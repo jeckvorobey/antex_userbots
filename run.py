@@ -272,6 +272,11 @@ async def _log_resolved_group(
     group_target: str | None,
 ) -> None:
     """Логирует целевую группу, в которой будет работать swarm."""
+    logger.info(
+        "Целевая группа настроена: GROUP_CHAT_ID=%s GROUP_TARGET=%s",
+        group_chat_id,
+        group_target,
+    )
     resolved_group_target = await _resolve_group_target(telegram_client, group_chat_id, group_target)
     if resolved_group_target is None:
         logger.warning(

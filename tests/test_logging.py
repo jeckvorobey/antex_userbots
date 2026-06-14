@@ -61,3 +61,19 @@ async def test_orchestrator_logs_skip_on_recent_human_activity(caplog):
 
     assert started is False
     assert any("recent human activity" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_log_resolved_group_logs_configured_group_id_even_without_membership(caplog, monkeypatch):
+    """Проверяет, что лог целевой группы содержит GROUP_CHAT_ID ещё до resolve membership."""
+    import run
+
+    monkeypatch.setattr(run, "_resolve_group_target", AsyncMock(return_value=None))
+
+    with caplog.at_level(logging.INFO):
+        await run._log_resolved_group(SimpleNamespace(), -1001234567890, "@chat")
+
+    assert any(
+        "Целевая группа настроена: GROUP_CHAT_ID=-1001234567890 GROUP_TARGET=@chat" in record.getMessage()
+        for record in caplog.records
+    )
