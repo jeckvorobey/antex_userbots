@@ -62,12 +62,12 @@ async def test_orchestrator_skips_exchange_outside_active_windows():
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_avoids_recent_pairs_and_topics():
-    """Проверяет anti-repeat по persisted парам и темам."""
+async def test_orchestrator_avoids_recent_bots_and_last_topics():
+    """Проверяет anti-repeat по последним ботам и последним темам."""
     exchange_store = SimpleNamespace(
         get_due_started_exchange=AsyncMock(return_value=None),
-        get_recent_pairs=AsyncMock(return_value=[("anna", "mike")]),
-        get_recent_topic_keys=AsyncMock(return_value={"где есть суп"}),
+        get_recent_bot_ids=AsyncMock(return_value=["anna", "mike", "john"]),
+        get_recent_topic_keys_by_limit=AsyncMock(return_value={"где есть суп"}),
         get_recent_questions=AsyncMock(return_value=[]),
     )
     topic_selector = SimpleNamespace(topics=["Где есть суп", "Куда сходить вечером"])
@@ -76,6 +76,8 @@ async def test_orchestrator_avoids_recent_pairs_and_topics():
             SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
             SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md", telegram_user_id=202),
             SwarmBotProfile(id="john", session_string="john", persona_file="john.md", telegram_user_id=303),
+            SwarmBotProfile(id="kate", session_string="kate", persona_file="kate.md", telegram_user_id=404),
+            SwarmBotProfile(id="lena", session_string="lena", persona_file="lena.md", telegram_user_id=505),
         ],
         manager=SimpleNamespace(),
         topic_selector=topic_selector,
@@ -87,8 +89,36 @@ async def test_orchestrator_avoids_recent_pairs_and_topics():
 
     decision = await orchestrator._build_exchange_decision()
 
-    assert (decision.initiator.id, decision.responder.id) != ("anna", "mike")
+    assert {decision.initiator.id, decision.responder.id} == {"kate", "lena"}
     assert decision.topic == "Куда сходить вечером"
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_relaxes_recent_bot_filter_when_pool_is_too_small():
+    """Проверяет fallback, если после исключения последних 3 ботов не хватает пары."""
+    exchange_store = SimpleNamespace(
+        get_due_started_exchange=AsyncMock(return_value=None),
+        get_recent_bot_ids=AsyncMock(return_value=["anna", "mike", "john"]),
+        get_recent_topic_keys_by_limit=AsyncMock(return_value=set()),
+        get_recent_questions=AsyncMock(return_value=[]),
+    )
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+            SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md", telegram_user_id=202),
+            SwarmBotProfile(id="john", session_string="john", persona_file="john.md", telegram_user_id=303),
+        ],
+        manager=SimpleNamespace(),
+        topic_selector=SimpleNamespace(topics=["Тема"]),
+        prompt_composer=SimpleNamespace(),
+        gemini_client=SimpleNamespace(),
+        history=SimpleNamespace(),
+        exchange_store=exchange_store,
+    )
+
+    decision = await orchestrator._build_exchange_decision()
+
+    assert decision.initiator.id != decision.responder.id
 
 
 @pytest.mark.asyncio
@@ -123,8 +153,8 @@ async def test_orchestrator_runs_exchange_and_saves_history():
     exchange_store = SimpleNamespace(
         get_due_started_exchange=AsyncMock(return_value=None),
         get_exchange_by_window_key=AsyncMock(return_value=None),
-        get_recent_pairs=AsyncMock(return_value=[]),
-        get_recent_topic_keys=AsyncMock(return_value=set()),
+        get_recent_bot_ids=AsyncMock(return_value=[]),
+        get_recent_topic_keys_by_limit=AsyncMock(return_value=set()),
         get_recent_questions=AsyncMock(return_value=[]),
         get_recent_question_signatures=AsyncMock(return_value=set()),
         create_exchange=AsyncMock(return_value="exchange-1"),
@@ -279,8 +309,8 @@ async def test_orchestrator_resolves_group_target_per_sending_client():
     exchange_store = SimpleNamespace(
         get_due_started_exchange=AsyncMock(return_value=None),
         get_exchange_by_window_key=AsyncMock(return_value=None),
-        get_recent_pairs=AsyncMock(return_value=[]),
-        get_recent_topic_keys=AsyncMock(return_value=set()),
+        get_recent_bot_ids=AsyncMock(return_value=[]),
+        get_recent_topic_keys_by_limit=AsyncMock(return_value=set()),
         get_recent_questions=AsyncMock(return_value=[]),
         get_recent_question_signatures=AsyncMock(return_value=set()),
         create_exchange=AsyncMock(return_value="exchange-1"),
@@ -337,8 +367,8 @@ async def test_orchestrator_skips_when_bot_is_busy():
     exchange_store = SimpleNamespace(
         get_due_started_exchange=AsyncMock(return_value=None),
         get_exchange_by_window_key=AsyncMock(return_value=None),
-        get_recent_pairs=AsyncMock(return_value=[]),
-        get_recent_topic_keys=AsyncMock(return_value=set()),
+        get_recent_bot_ids=AsyncMock(return_value=[]),
+        get_recent_topic_keys_by_limit=AsyncMock(return_value=set()),
         get_recent_questions=AsyncMock(return_value=[]),
         get_recent_question_signatures=AsyncMock(return_value=set()),
         create_exchange=AsyncMock(return_value="exchange-1"),
@@ -408,8 +438,8 @@ async def test_orchestrator_uses_second_precision_for_responder_due_time():
     exchange_store = SimpleNamespace(
         get_due_started_exchange=AsyncMock(return_value=None),
         get_exchange_by_window_key=AsyncMock(return_value=None),
-        get_recent_pairs=AsyncMock(return_value=[]),
-        get_recent_topic_keys=AsyncMock(return_value=set()),
+        get_recent_bot_ids=AsyncMock(return_value=[]),
+        get_recent_topic_keys_by_limit=AsyncMock(return_value=set()),
         get_recent_questions=AsyncMock(return_value=[]),
         get_recent_question_signatures=AsyncMock(return_value=set()),
         create_exchange=AsyncMock(return_value="exchange-1"),

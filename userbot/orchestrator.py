@@ -14,6 +14,9 @@ from userbot.scheduler import is_within_windows_utc, pick_random_datetime, pick_
 
 logger = logging.getLogger(__name__)
 
+RECENT_BOT_COOLDOWN_LIMIT = 3
+RECENT_TOPIC_LIMIT = 10
+
 
 class SwarmOrchestrator:
     """Выбирает пары ботов и проводит A -> B exchange."""
@@ -31,7 +34,6 @@ class SwarmOrchestrator:
         group_target: object | None = None,
         group_chat_id: int | None = None,
         max_turns_per_exchange: int = 2,
-        pair_cooldown_slots: int = 1,
         active_windows_utc: list[str] | None = None,
         initiator_offset_minutes: tuple[int, int] = (0, 30),
         responder_delay_minutes: tuple[int, int] = (3, 10),
@@ -53,7 +55,6 @@ class SwarmOrchestrator:
         self.group_target = group_target
         self.group_chat_id = group_chat_id
         self.max_turns_per_exchange = max_turns_per_exchange
-        self.pair_cooldown_slots = max(0, pair_cooldown_slots)
         self.active_windows_utc = active_windows_utc or []
         self.initiator_offset_minutes = initiator_offset_minutes
         self.responder_delay_minutes = responder_delay_minutes
@@ -125,15 +126,9 @@ class SwarmOrchestrator:
 
     async def _build_exchange_decision(self) -> ExchangeDecision:
         """Выбирает пару ботов и тему с persisted anti-repeat."""
-        recent_pairs = await self.exchange_store.get_recent_pairs(self.pair_cooldown_slots)
-        all_pairs = [
-            (initiator, responder)
-            for initiator in self.bot_profiles
-            for responder in self.bot_profiles
-            if initiator.id != responder.id
-        ]
-        eligible_pairs = [pair for pair in all_pairs if (pair[0].id, pair[1].id) not in set(recent_pairs)]
-        chosen_initiator, chosen_responder = random.choice(eligible_pairs or all_pairs)
+        recent_bot_ids = await self.exchange_store.get_recent_bot_ids(RECENT_BOT_COOLDOWN_LIMIT)
+        candidates = self._pick_bot_candidates(recent_bot_ids)
+        chosen_initiator, chosen_responder = random.sample(candidates, 2)
 
         topic = await self._choose_topic()
         recent_questions = await self.exchange_store.get_recent_questions(since=self.question_repeat_window)
@@ -145,9 +140,24 @@ class SwarmOrchestrator:
             recent_questions=recent_questions,
         )
 
+    def _pick_bot_candidates(self, recent_bot_ids: list[str]) -> list[SwarmBotProfile]:
+        """Возвращает кандидатов, ослабляя cooldown только если иначе пары не собрать."""
+        for cooldown_size in range(min(RECENT_BOT_COOLDOWN_LIMIT, len(recent_bot_ids)), -1, -1):
+            excluded_bot_ids = set(recent_bot_ids[:cooldown_size])
+            candidates = [profile for profile in self.bot_profiles if profile.id not in excluded_bot_ids]
+            if len(candidates) >= 2:
+                if cooldown_size < min(RECENT_BOT_COOLDOWN_LIMIT, len(recent_bot_ids)):
+                    logger.info(
+                        "orchestrator: relaxed recent bot cooldown cooldown_size=%s candidates=%s",
+                        cooldown_size,
+                        len(candidates),
+                    )
+                return candidates
+        raise ValueError("Для scheduled exchange нужно минимум два enabled userbot")
+
     async def _choose_topic(self) -> str:
-        """Выбирает тему, избегая recent topics при наличии альтернатив."""
-        recent_topic_keys = await self.exchange_store.get_recent_topic_keys(since=self.topic_repeat_window)
+        """Выбирает тему, избегая последних заданных тем при наличии альтернатив."""
+        recent_topic_keys = await self.exchange_store.get_recent_topic_keys_by_limit(RECENT_TOPIC_LIMIT)
         available_topics = list(getattr(self.topic_selector, "topics", []))
         if not available_topics:
             topic = await self.topic_selector.pick_random()

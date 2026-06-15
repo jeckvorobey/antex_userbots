@@ -425,7 +425,6 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
         group_target=group_target,
         group_chat_id=settings.group_chat_id,
         max_turns_per_exchange=settings.swarm_max_turns_per_exchange,
-        pair_cooldown_slots=settings.swarm_pair_cooldown_slots,
         active_windows_utc=settings.swarm_schedule_active_windows_utc,
         initiator_offset_minutes=settings.swarm_initiator_offset_minutes,
         responder_delay_minutes=settings.swarm_responder_delay_minutes,

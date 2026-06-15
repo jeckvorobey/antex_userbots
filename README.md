@@ -123,6 +123,7 @@ active_windows_utc = ["10-11", "16-18"]
 initiator_offset_minutes = [0, 30]
 responder_delay_minutes = [3, 10]
 max_turns_per_exchange = 2
+# Deprecated: оставлено для совместимости, выбор идет по последним 3 userbot.
 pair_cooldown_slots = 1
 
 [swarm.orchestrator]

@@ -185,25 +185,53 @@ class ExchangeStore:
         await connection.commit()
         logger.info("Exchange пропущен: exchange_id=%s reason=%s", exchange_id, skip_reason)
 
-    async def get_recent_pairs(self, limit: int) -> list[tuple[str, str]]:
-        """Возвращает последние completed/started пары из persisted state."""
+    async def get_recent_bot_ids(self, limit: int) -> list[str]:
+        """Возвращает последние уникальные bot_id, которые писали scheduled-сообщения."""
         if limit <= 0:
             return []
         connection = await self._get_connection()
         async with connection.execute(
             """
-            SELECT initiator_bot_id, responder_bot_id
-            FROM scheduled_exchanges
-            WHERE status IN ('started', 'completed')
-            ORDER BY COALESCE(completed_at, started_at, created_at) DESC
-            LIMIT ?
+            SELECT bot_id
+            FROM (
+                SELECT
+                    initiator_bot_id AS bot_id,
+                    COALESCE(started_at, created_at) AS event_at,
+                    rowid AS exchange_rowid,
+                    0 AS event_order
+                FROM scheduled_exchanges
+                WHERE status IN ('started', 'completed')
+                  AND started_at IS NOT NULL
+
+                UNION ALL
+
+                SELECT
+                    responder_bot_id AS bot_id,
+                    COALESCE(completed_at, started_at, created_at) AS event_at,
+                    rowid AS exchange_rowid,
+                    1 AS event_order
+                FROM scheduled_exchanges
+                WHERE status = 'completed'
+                  AND completed_at IS NOT NULL
+            ) bot_events
+            ORDER BY datetime(event_at) DESC, exchange_rowid DESC, event_order DESC
             """,
-            (limit,),
         ) as cursor:
             rows = await cursor.fetchall()
-        pairs = [(row[0], row[1]) for row in rows]
-        logger.info("Загружены последние пары exchange: count=%s", len(pairs))
-        return pairs
+
+        recent_bot_ids: list[str] = []
+        seen_bot_ids: set[str] = set()
+        for row in rows:
+            bot_id = row[0]
+            if not isinstance(bot_id, str) or bot_id in seen_bot_ids:
+                continue
+            recent_bot_ids.append(bot_id)
+            seen_bot_ids.add(bot_id)
+            if len(recent_bot_ids) >= limit:
+                break
+
+        logger.info("Загружены последние scheduled bot_id: count=%s", len(recent_bot_ids))
+        return recent_bot_ids
 
     async def get_exchange_by_window_key(self, window_key: str) -> dict[str, object] | None:
         """Возвращает exchange, уже зарегистрированный в текущем окне."""
@@ -257,21 +285,24 @@ class ExchangeStore:
             row = await cursor.fetchone()
         return dict(row) if row is not None else None
 
-    async def get_recent_topic_keys(self, *, since: timedelta) -> set[str]:
-        """Возвращает недавно использованные topic_key."""
-        threshold = self._threshold_timestamp(since)
+    async def get_recent_topic_keys_by_limit(self, limit: int) -> set[str]:
+        """Возвращает topic_key из последних started/completed exchange."""
+        if limit <= 0:
+            return set()
         connection = await self._get_connection()
         async with connection.execute(
             """
-            SELECT DISTINCT topic_key
+            SELECT topic_key
             FROM scheduled_exchanges
-            WHERE status IN ('started', 'completed') AND datetime(COALESCE(started_at, created_at)) >= datetime(?)
+            WHERE status IN ('started', 'completed')
+            ORDER BY datetime(COALESCE(started_at, created_at)) DESC, rowid DESC
+            LIMIT ?
             """,
-            (threshold,),
+            (limit,),
         ) as cursor:
             rows = await cursor.fetchall()
         topic_keys = {row[0] for row in rows if isinstance(row[0], str)}
-        logger.info("Загружены recent topic_key: count=%s since=%s", len(topic_keys), threshold)
+        logger.info("Загружены последние topic_key по limit=%s: count=%s", limit, len(topic_keys))
         return topic_keys
 
     async def get_recent_question_signatures(self, *, since: timedelta) -> set[str]:

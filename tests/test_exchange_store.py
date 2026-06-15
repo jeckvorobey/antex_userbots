@@ -24,8 +24,8 @@ def test_normalize_signature_compacts_text():
     assert normalize_signature("  Один   и тот же   вопрос?! ") == "один и тот же вопрос"
 
 
-async def test_exchange_store_persists_recent_pairs_and_topics(exchange_store):
-    """Проверяет persisted pair/topic state для orchestrator."""
+async def test_exchange_store_persists_recent_bot_ids_topics_and_signatures(exchange_store):
+    """Проверяет persisted bot/topic/question state для orchestrator."""
     exchange_id = await exchange_store.create_exchange(
         initiator_bot_id="anna",
         responder_bot_id="mike",
@@ -34,13 +34,62 @@ async def test_exchange_store_persists_recent_pairs_and_topics(exchange_store):
     await exchange_store.mark_exchange_started(exchange_id, initiator_message_id=55, question_signature="Кто знает место с супом?")
     await exchange_store.mark_exchange_completed(exchange_id)
 
-    pairs = await exchange_store.get_recent_pairs(1)
-    topics = await exchange_store.get_recent_topic_keys(since=timedelta(days=1))
+    bot_ids = await exchange_store.get_recent_bot_ids(2)
+    topics = await exchange_store.get_recent_topic_keys_by_limit(1)
     signatures = await exchange_store.get_recent_question_signatures(since=timedelta(days=1))
 
-    assert pairs == [("anna", "mike")]
+    assert bot_ids == ["mike", "anna"]
     assert "где есть суп" in topics
     assert "кто знает место с супом" in signatures
+
+
+async def test_exchange_store_returns_recent_unique_bot_ids_by_message_order(exchange_store):
+    """Проверяет выбор последних уникальных ботов, которые писали scheduled-сообщения."""
+    first_exchange = await exchange_store.create_exchange(
+        initiator_bot_id="anna",
+        responder_bot_id="mike",
+        topic="Первая тема",
+    )
+    await exchange_store.mark_exchange_started(first_exchange, initiator_message_id=101, question_signature="Первый вопрос")
+    await exchange_store.mark_exchange_completed(first_exchange)
+
+    second_exchange = await exchange_store.create_exchange(
+        initiator_bot_id="john",
+        responder_bot_id="kate",
+        topic="Вторая тема",
+    )
+    await exchange_store.mark_exchange_started(second_exchange, initiator_message_id=102, question_signature="Второй вопрос")
+    await exchange_store.mark_exchange_completed(second_exchange)
+
+    third_exchange = await exchange_store.create_exchange(
+        initiator_bot_id="lena",
+        responder_bot_id="mike",
+        topic="Третья тема",
+    )
+    await exchange_store.mark_exchange_started(third_exchange, initiator_message_id=103, question_signature="Третий вопрос")
+
+    recent_bot_ids = await exchange_store.get_recent_bot_ids(3)
+
+    assert recent_bot_ids == ["lena", "kate", "john"]
+
+
+async def test_exchange_store_returns_recent_topic_keys_by_limit(exchange_store):
+    """Проверяет выбор последних topic_key по количеству, а не по временному окну."""
+    for index in range(12):
+        exchange_id = await exchange_store.create_exchange(
+            initiator_bot_id=f"bot-{index}",
+            responder_bot_id=f"responder-{index}",
+            topic=f"Тема {index}",
+        )
+        await exchange_store.mark_exchange_started(
+            exchange_id,
+            initiator_message_id=index,
+            question_signature=f"Вопрос {index}",
+        )
+
+    topic_keys = await exchange_store.get_recent_topic_keys_by_limit(10)
+
+    assert topic_keys == {f"тема {index}" for index in range(2, 12)}
 
 
 async def test_exchange_store_marks_skipped_exchange(exchange_store):

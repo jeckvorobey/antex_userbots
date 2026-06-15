@@ -170,6 +170,7 @@ class SwarmScheduleConfig(_StrictModel):
     initiator_offset_minutes: MinuteRange = (0, 30)
     responder_delay_minutes: MinuteRange = (3, 10)
     max_turns_per_exchange: int = Field(default=2, ge=1)
+    # Deprecated: сохраняем чтение старых TOML, orchestrator использует bot-based cooldown.
     pair_cooldown_slots: int = Field(default=1, ge=0)
 
     @field_validator("active_windows_utc")
