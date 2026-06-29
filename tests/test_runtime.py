@@ -99,7 +99,6 @@ async def test_main_runs_swarm_mode(monkeypatch):
         api_id=1,
         api_hash="hash",
         gemini_api_key="gemini-key",
-        session_string="legacy-unused",
         db_path=":memory:",
         settings_path=None,
     )
@@ -178,7 +177,6 @@ async def test_run_swarm_mode_starts_manager_registers_scheduler_and_supervises(
         api_id=1,
         api_hash="hash",
         gemini_api_key="gemini-key",
-        session_string="legacy-unused",
         group_target="@group",
         db_path=":memory:",
         settings_path=None,
@@ -236,7 +234,6 @@ async def test_run_swarm_mode_requires_two_active_bots_after_start(monkeypatch):
         api_id=1,
         api_hash="hash",
         gemini_api_key="gemini-key",
-        session_string="legacy-unused",
         group_target="@group",
         db_path=":memory:",
         settings_path=None,
@@ -362,6 +359,28 @@ async def test_resolve_group_target_skips_get_entity_for_invite_link():
 
     assert resolved is None
     telegram_client.get_entity.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_resolve_group_target_redacts_private_invite_link_in_logs(caplog):
+    """Проверяет, что приватная invite-ссылка не попадает в логи целиком."""
+    import logging
+    import run
+
+    class DialogClient(FakeTelegramClient):
+        async def iter_dialogs(self):
+            if False:
+                yield None
+
+    telegram_client = DialogClient("anna", 1, "hash")
+
+    with caplog.at_level(logging.INFO):
+        resolved = await run._resolve_group_target(telegram_client, 123, "https://t.me/+SecretInviteHash")
+
+    assert resolved is None
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "SecretInviteHash" not in messages
+    assert "<private invite link>" in messages
 
 
 @pytest.mark.asyncio

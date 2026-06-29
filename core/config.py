@@ -72,7 +72,6 @@ class Secrets(BaseSettings):
     api_id: int
     api_hash: str
     gemini_api_key: str
-    session_string: OptionalStr = None
     proxy_url: OptionalStr = None
     group_chat_id: OptionalChatId = None
     group_target: OptionalStr = None
@@ -89,12 +88,6 @@ class AppModeConfig(_StrictModel):
     """Секция режима приложения."""
 
     mode: Literal["swarm"] = "swarm"
-
-
-class PathsConfig(_StrictModel):
-    """Пути к локальным ресурсам проекта, не покрытым профильными секциями."""
-
-    reply_rules_path: str = "ai/prompts/reply_rules.md"
 
 
 class StorageConfig(_StrictModel):
@@ -130,12 +123,6 @@ class GeminiConfig(_StrictModel):
     request_timeout_seconds: float = Field(default=45.0, gt=0.0)
 
 
-class TelegramConfig(_StrictModel):
-    """Несекретные параметры Telegram."""
-
-    whitelist_user_ids: list[int] = Field(default_factory=list)
-
-
 class LoggingConfig(_StrictModel):
     """Параметры логирования."""
 
@@ -151,6 +138,12 @@ class SwarmBotConfig(_StrictModel):
     enabled: bool = True
     temperature: float = Field(default=0.9, ge=0.0, le=2.0)
 
+    @field_validator("persona_file")
+    @classmethod
+    def validate_persona_file(cls, value: str) -> str:
+        """Запрещает выход persona_file за пределы bot_profiles_dir."""
+        return _validate_relative_persona_file(value)
+
 
 class SwarmBotRuntimeConfig(_StrictModel):
     """Развёрнутая runtime-конфигурация userbot с реальной строкой сессии."""
@@ -162,6 +155,12 @@ class SwarmBotRuntimeConfig(_StrictModel):
     enabled: bool = True
     temperature: float = Field(default=0.9, ge=0.0, le=2.0)
 
+    @field_validator("persona_file")
+    @classmethod
+    def validate_persona_file(cls, value: str) -> str:
+        """Запрещает выход persona_file за пределы bot_profiles_dir."""
+        return _validate_relative_persona_file(value)
+
 
 class SwarmScheduleConfig(_StrictModel):
     """Расписание swarm-обменов."""
@@ -170,8 +169,6 @@ class SwarmScheduleConfig(_StrictModel):
     initiator_offset_minutes: MinuteRange = (0, 30)
     responder_delay_minutes: MinuteRange = (3, 10)
     max_turns_per_exchange: int = Field(default=2, ge=1)
-    # Deprecated: сохраняем чтение старых TOML, orchestrator использует bot-based cooldown.
-    pair_cooldown_slots: int = Field(default=1, ge=0)
 
     @field_validator("active_windows_utc")
     @classmethod
@@ -213,10 +210,6 @@ class SwarmOrchestratorConfig(_StrictModel):
 class SwarmConfig(_StrictModel):
     """Секция swarm-настроек."""
 
-    enabled: bool = False
-    max_parallel_bots: int = Field(default=20, ge=1)
-    ignore_messages_from_swarm: bool = True
-    reply_only_to_addressed_bot: bool = True
     schedule: SwarmScheduleConfig = Field(default_factory=SwarmScheduleConfig)
     orchestrator: SwarmOrchestratorConfig = Field(default_factory=SwarmOrchestratorConfig)
     bots: list[SwarmBotConfig] = Field(default_factory=list)
@@ -238,12 +231,10 @@ class AppConfig(_StrictModel):
     """Полная несекретная TOML-конфигурация."""
 
     app: AppModeConfig = Field(default_factory=AppModeConfig)
-    paths: PathsConfig = Field(default_factory=PathsConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     target: TargetConfig = Field(default_factory=TargetConfig)
     prompts: PromptsConfig = Field(default_factory=PromptsConfig)
     gemini: GeminiConfig = Field(default_factory=GeminiConfig)
-    telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     swarm: SwarmConfig = Field(default_factory=SwarmConfig)
 
@@ -256,6 +247,17 @@ def _read_pair(value: object, label: str) -> tuple[int, int]:
     if not isinstance(first, int) or not isinstance(second, int):
         raise ValueError(f"{label} должен содержать целые числа")
     return first, second
+
+
+def _validate_relative_persona_file(value: str) -> str:
+    """Проверяет, что persona_file является относительным именем внутри директории профилей."""
+    normalized = value.strip()
+    if normalized == "":
+        raise ValueError("persona_file не должен быть пустым")
+    path = Path(normalized)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError("persona_file должен быть относительным путём внутри bot_profiles_dir")
+    return normalized
 
 
 _UNSET = object()
@@ -300,7 +302,6 @@ class Settings:
             "api_id",
             "api_hash",
             "gemini_api_key",
-            "session_string",
             "proxy_url",
             "group_chat_id",
             "group_target",
@@ -343,7 +344,6 @@ class Settings:
 
         self.db_path = config.storage.db_path
         self.topics_path = config.prompts.topics_path
-        self.reply_rules_path = config.paths.reply_rules_path
         self.prompts_dir = config.prompts.base_dir
         self.bot_profiles_dir = config.prompts.bot_profiles_dir
         if self.group_chat_id is None and config.target.group_chat_id is not None:
@@ -359,27 +359,17 @@ class Settings:
         self.gemini_retry_jitter_seconds = config.gemini.retry_jitter_seconds
         self.gemini_request_timeout_seconds = config.gemini.request_timeout_seconds
 
-        self.whitelist_user_ids = ",".join(str(user_id) for user_id in config.telegram.whitelist_user_ids)
-
         self.log_level = config.logging.level
 
-        self.swarm_enabled = config.swarm.enabled or self.mode == "swarm"
-        self.swarm_max_parallel_bots = config.swarm.max_parallel_bots
-        self.swarm_ignore_messages_from_swarm = config.swarm.ignore_messages_from_swarm
-        self.swarm_reply_only_to_addressed_bot = config.swarm.reply_only_to_addressed_bot
         self.swarm_schedule_active_windows_utc = list(config.swarm.schedule.active_windows_utc)
         self.swarm_initiator_offset_minutes = config.swarm.schedule.initiator_offset_minutes
         self.swarm_responder_delay_minutes = config.swarm.schedule.responder_delay_minutes
         self.swarm_max_turns_per_exchange = config.swarm.schedule.max_turns_per_exchange
-        self.swarm_pair_cooldown_slots = config.swarm.schedule.pair_cooldown_slots
         self.swarm_tick_seconds = config.swarm.orchestrator.tick_seconds
         self.swarm_silence_timeout_minutes = config.swarm.orchestrator.silence_timeout_minutes
         self.swarm_skip_if_recent_human_activity = config.swarm.orchestrator.skip_if_recent_human_activity
         self.swarm_bots = self._resolve_swarm_bots(config.swarm.bots)
         self.swarm_bot_ids = [bot.id for bot in self.swarm_bots]
-
-        if self.mode == "swarm":
-            self.whitelist_user_ids = ""
 
     def _resolve_swarm_bots(self, bots: list[SwarmBotConfig]) -> list[SwarmBotRuntimeConfig]:
         """Разворачивает session_env каждого swarm-бота в фактическую строку сессии."""

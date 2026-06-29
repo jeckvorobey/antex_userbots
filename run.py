@@ -80,6 +80,13 @@ def _is_invite_link(target: str | None) -> bool:
     return normalized.startswith(("https://t.me/+", "http://t.me/+", "https://t.me/joinchat/", "http://t.me/joinchat/"))
 
 
+def _redact_group_target(target: object) -> object:
+    """Скрывает приватные invite-ссылки Telegram в логах."""
+    if isinstance(target, str) and _is_invite_link(target):
+        return "<private invite link>"
+    return target
+
+
 def _normalize_public_group_target(target: str) -> str:
     """Нормализует публичный target группы до формы, совместимой с Telethon."""
     normalized = target.strip()
@@ -179,7 +186,7 @@ async def _resolve_group_target(
     normalized_group_target = group_target.strip() if isinstance(group_target, str) else None
     if normalized_group_target:
         if _is_invite_link(normalized_group_target):
-            logger.info("Пропуск get_entity для invite link target=%s", normalized_group_target)
+            logger.info("Пропуск get_entity для invite link target=%s", _redact_group_target(normalized_group_target))
             return None
         get_entity = getattr(telegram_client, "get_entity", None)
         if get_entity is None:
@@ -275,14 +282,14 @@ async def _log_resolved_group(
     logger.info(
         "Целевая группа настроена: GROUP_CHAT_ID=%s GROUP_TARGET=%s",
         group_chat_id,
-        group_target,
+        _redact_group_target(group_target),
     )
     resolved_group_target = await _resolve_group_target(telegram_client, group_chat_id, group_target)
     if resolved_group_target is None:
         logger.warning(
             "Не удалось определить целевую группу при инициализации: GROUP_CHAT_ID=%s, GROUP_TARGET=%s",
             group_chat_id,
-            group_target,
+            _redact_group_target(group_target),
         )
         return
 

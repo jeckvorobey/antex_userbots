@@ -66,14 +66,3 @@ class ExchangeDecision:
     topic: str
     topic_key: str
     recent_questions: list[str] = field(default_factory=list)
-
-
-@dataclass(slots=True)
-class ExchangePlan:
-    """План одного scheduled-обмена между двумя ботами."""
-
-    exchange_id: str
-    initiator_bot_id: str
-    responder_bot_id: str
-    topic: str
-    max_turns: int = 2

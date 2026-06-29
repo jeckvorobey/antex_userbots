@@ -92,20 +92,6 @@ async def test_exchange_store_returns_recent_topic_keys_by_limit(exchange_store)
     assert topic_keys == {f"тема {index}" for index in range(2, 12)}
 
 
-async def test_exchange_store_marks_skipped_exchange(exchange_store):
-    """Проверяет сохранение skip reason."""
-    exchange_id = await exchange_store.create_exchange(
-        initiator_bot_id="anna",
-        responder_bot_id="mike",
-        topic="Тема",
-    )
-    await exchange_store.mark_exchange_skipped(exchange_id, "initiator_busy")
-
-    questions = await exchange_store.get_recent_questions(since=timedelta(days=1))
-
-    assert questions == []
-
-
 async def test_exchange_store_tracks_window_and_due_stages(exchange_store):
     """Проверяет хранение окна и отложенных стадий exchange."""
     exchange_id = await exchange_store.create_exchange(
@@ -117,12 +103,9 @@ async def test_exchange_store_tracks_window_and_due_stages(exchange_store):
     )
 
     planned = await exchange_store.get_exchange_by_window_key("2026-04-20T19:10-12")
-    due_planned = await exchange_store.get_due_planned_exchange(now=datetime(2026, 4, 20, 19, 6, tzinfo=UTC))
 
     assert planned is not None
     assert planned["exchange_id"] == exchange_id
-    assert due_planned is not None
-    assert due_planned["exchange_id"] == exchange_id
 
     await exchange_store.mark_exchange_started(
         exchange_id,

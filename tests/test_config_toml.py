@@ -12,7 +12,6 @@ BASE_SECRETS = {
     "api_id": 12345678,
     "api_hash": "test_api_hash_abc",
     "gemini_api_key": "test_gemini_key_xyz",
-    "session_string": "test-session-string",
     "group_chat_id": -100123,
     "group_target": "@group",
 }
@@ -41,9 +40,6 @@ def test_settings_loads_non_secret_values_from_toml(tmp_path):
         topics_path = "custom/topics.md"
         bot_profiles_dir = "custom/bots"
 
-        [paths]
-        reply_rules_path = "custom/rules.md"
-
         [gemini]
         model = "gemini-test"
         fallback_model = "gemini-lite"
@@ -52,9 +48,6 @@ def test_settings_loads_non_secret_values_from_toml(tmp_path):
         retry_backoff_seconds = 2.0
         retry_jitter_seconds = 0.4
         request_timeout_seconds = 12.5
-
-        [telegram]
-        whitelist_user_ids = [111, 222]
 
         [logging]
         level = "DEBUG"
@@ -66,7 +59,6 @@ def test_settings_loads_non_secret_values_from_toml(tmp_path):
     assert settings.mode == "swarm"
     assert settings.db_path == ":memory:"
     assert settings.topics_path == "custom/topics.md"
-    assert settings.reply_rules_path == "custom/rules.md"
     assert settings.prompts_dir == "custom/prompts"
     assert settings.bot_profiles_dir == "custom/bots"
     assert settings.gemini_model == "gemini-test"
@@ -75,7 +67,6 @@ def test_settings_loads_non_secret_values_from_toml(tmp_path):
     assert settings.gemini_max_retries == 4
     assert settings.group_chat_id == -100123
     assert settings.group_target == "@group"
-    assert settings.whitelist_user_ids == ""
     assert settings.log_level == "DEBUG"
 
 
@@ -111,7 +102,6 @@ def test_settings_path_can_come_from_env(tmp_path):
         "API_ID": "12345678",
         "API_HASH": "test_hash",
         "GEMINI_API_KEY": "test_key",
-        "SESSION_STRING": "test-session-string",
         "SETTINGS_PATH": str(settings_path),
     }
 
@@ -165,7 +155,6 @@ def test_settings_reads_target_section_from_toml(tmp_path):
         "API_ID": "12345678",
         "API_HASH": "test_hash",
         "GEMINI_API_KEY": "test_key",
-        "SESSION_STRING": "legacy-session",
         "SESSION_STRING_ANNA": "anna-session",
         "SESSION_STRING_MIKE": "mike-session",
         "SETTINGS_PATH": str(settings_path),
@@ -193,7 +182,6 @@ def test_settings_rejects_missing_settings_path_from_env(tmp_path):
         "API_ID": "12345678",
         "API_HASH": "test_hash",
         "GEMINI_API_KEY": "test_key",
-        "SESSION_STRING": "test-session-string",
         "SETTINGS_PATH": str(missing_path),
     }
 
@@ -212,7 +200,6 @@ def test_settings_rejects_missing_settings_path_from_env_file(tmp_path):
                 "API_ID=12345678",
                 "API_HASH=test_hash",
                 "GEMINI_API_KEY=test_key",
-                "SESSION_STRING=test-session-string",
                 f"SETTINGS_PATH={missing_path}",
             ],
         ),
@@ -275,18 +262,11 @@ def test_settings_loads_swarm_mode_and_bots(tmp_path):
         topics_path = "custom/topics.md"
         bot_profiles_dir = "custom/bots"
 
-        [swarm]
-        enabled = true
-        max_parallel_bots = 12
-        ignore_messages_from_swarm = true
-        reply_only_to_addressed_bot = true
-
         [swarm.schedule]
         active_windows_utc = ["10-11", "16-18"]
         initiator_offset_minutes = [0, 30]
         responder_delay_minutes = [3, 10]
         max_turns_per_exchange = 2
-        pair_cooldown_slots = 1
 
         [swarm.orchestrator]
         tick_seconds = 30
@@ -313,7 +293,6 @@ def test_settings_loads_swarm_mode_and_bots(tmp_path):
         "API_ID": "12345678",
         "API_HASH": "test_hash",
         "GEMINI_API_KEY": "test_key",
-        "SESSION_STRING": "legacy-session",
         "SESSION_STRING_ANNA": "anna-session",
         "SESSION_STRING_MIKE": "mike-session",
         "SETTINGS_PATH": str(settings_path),
@@ -326,22 +305,16 @@ def test_settings_loads_swarm_mode_and_bots(tmp_path):
     assert settings.db_path == ":memory:"
     assert settings.prompts_dir == "custom/prompts"
     assert settings.topics_path == "custom/topics.md"
-    assert settings.swarm_enabled is True
-    assert settings.swarm_max_parallel_bots == 12
-    assert settings.swarm_ignore_messages_from_swarm is True
-    assert settings.swarm_reply_only_to_addressed_bot is True
     assert settings.swarm_schedule_active_windows_utc == ["10-11", "16-18"]
     assert settings.swarm_initiator_offset_minutes == (0, 30)
     assert settings.swarm_responder_delay_minutes == (3, 10)
     assert settings.swarm_max_turns_per_exchange == 2
-    assert settings.swarm_pair_cooldown_slots == 1
     assert settings.swarm_tick_seconds == 30
     assert settings.swarm_silence_timeout_minutes == 60
     assert settings.swarm_skip_if_recent_human_activity is True
     assert settings.swarm_bot_ids == ["anna", "mike"]
     assert settings.swarm_bots[0].session_string == "anna-session"
     assert settings.swarm_bots[1].session_string == "mike-session"
-    assert settings.whitelist_user_ids == ""
 
 
 @pytest.mark.parametrize(
@@ -435,7 +408,6 @@ def test_settings_rejects_duplicate_swarm_bot_ids(tmp_path):
         "API_ID": "12345678",
         "API_HASH": "test_hash",
         "GEMINI_API_KEY": "test_key",
-        "SESSION_STRING": "legacy-session",
         "SESSION_STRING_ANNA": "anna-session",
         "SESSION_STRING_ANNA_2": "anna-session-2",
         "SETTINGS_PATH": str(settings_path),
@@ -465,7 +437,6 @@ def test_settings_rejects_missing_swarm_session_env(tmp_path):
         "API_ID": "12345678",
         "API_HASH": "test_hash",
         "GEMINI_API_KEY": "test_key",
-        "SESSION_STRING": "legacy-session",
         "SETTINGS_PATH": str(settings_path),
     }
 
@@ -474,16 +445,27 @@ def test_settings_rejects_missing_swarm_session_env(tmp_path):
             Settings(_env_file=None)
 
 
-def test_settings_ignores_whitelist_in_swarm_mode(tmp_path):
-    """Проверяет, что whitelist_user_ids отключается в swarm-режиме."""
+@pytest.mark.parametrize(
+    ("toml_fragment", "key_name"),
+    [
+        ("[paths]\nreply_" + "rules_path = \"custom/rules.md\"", "paths"),
+        ("[telegram]\nwhite" + "list_user_ids = [111, 222]", "telegram"),
+        ("[swarm]\nenabled = true", "enabled"),
+        ("[swarm]\nmax_parallel_bots = 12", "max_parallel_bots"),
+        ("[swarm]\nignore_messages_from_swarm = true", "ignore_messages_from_swarm"),
+        ("[swarm]\nreply_only_to_addressed_bot = true", "reply_only_to_addressed_bot"),
+        ("[swarm.schedule]\npair_" + "cooldown_slots = 1", "pair_" + "cooldown_slots"),
+    ],
+)
+def test_settings_rejects_removed_toml_keys(tmp_path, toml_fragment: str, key_name: str):
+    """Проверяет строгий отказ от удалённых legacy TOML-ключей."""
     settings_path = write_settings(
         tmp_path,
-        """
+        f"""
         [app]
         mode = "swarm"
 
-        [telegram]
-        whitelist_user_ids = [111, 222]
+        {toml_fragment}
 
         [[swarm.bots]]
         id = "anna"
@@ -496,13 +478,39 @@ def test_settings_ignores_whitelist_in_swarm_mode(tmp_path):
         "API_ID": "12345678",
         "API_HASH": "test_hash",
         "GEMINI_API_KEY": "test_key",
-        "SESSION_STRING": "legacy-session",
         "SESSION_STRING_ANNA": "anna-session",
         "SETTINGS_PATH": str(settings_path),
     }
 
     with patch.dict("os.environ", env, clear=True):
-        settings = Settings(_env_file=None)
+        with pytest.raises(Exception, match=key_name):
+            Settings(_env_file=None)
 
-    assert settings.mode == "swarm"
-    assert settings.whitelist_user_ids == ""
+
+@pytest.mark.parametrize("persona_file", ["../secret.md", "/tmp/secret.md"])
+def test_settings_rejects_persona_file_outside_profiles_dir(tmp_path, persona_file: str):
+    """Проверяет запрет path traversal в persona_file."""
+    settings_path = write_settings(
+        tmp_path,
+        f"""
+        [app]
+        mode = "swarm"
+
+        [[swarm.bots]]
+        id = "anna"
+        session_env = "SESSION_STRING_ANNA"
+        persona_file = "{persona_file}"
+        """,
+    )
+
+    env = {
+        "API_ID": "12345678",
+        "API_HASH": "test_hash",
+        "GEMINI_API_KEY": "test_key",
+        "SESSION_STRING_ANNA": "anna-session",
+        "SETTINGS_PATH": str(settings_path),
+    }
+
+    with patch.dict("os.environ", env, clear=True):
+        with pytest.raises(Exception, match="persona_file"):
+            Settings(_env_file=None)

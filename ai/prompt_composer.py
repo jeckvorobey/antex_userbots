@@ -54,9 +54,18 @@ class PromptComposer:
                 raise ValueError("bot_id or persona_file is required for persona loading")
             persona_path = self.bot_profiles_dir / f"{bot_id}.md"
         else:
-            persona_path = self.bot_profiles_dir / persona_file
+            persona_path = self.bot_profiles_dir / self._validate_persona_file(persona_file)
         logger.info("Загрузка persona-файла: bot_id=%s path=%s", bot_id, persona_path)
         if not persona_path.exists():
             logger.warning("Persona-файл не найден: %s", persona_path)
             return ""
         return persona_path.read_text(encoding="utf-8")
+
+    @staticmethod
+    def _validate_persona_file(persona_file: str) -> str:
+        """Запрещает чтение persona-файлов вне bot_profiles_dir."""
+        normalized = persona_file.strip()
+        path = Path(normalized)
+        if normalized == "" or path.is_absolute() or ".." in path.parts:
+            raise ValueError("persona_file должен быть относительным путём внутри bot_profiles_dir")
+        return normalized

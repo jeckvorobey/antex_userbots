@@ -114,17 +114,11 @@ temperature = 0.9
 [logging]
 level = "INFO"
 
-[swarm]
-enabled = true
-reply_only_to_addressed_bot = true
-
 [swarm.schedule]
 active_windows_utc = ["10-11", "16-18"]
 initiator_offset_minutes = [0, 30]
 responder_delay_minutes = [3, 10]
 max_turns_per_exchange = 2
-# Deprecated: оставлено для совместимости, выбор идет по последним 3 userbot.
-pair_cooldown_slots = 1
 
 [swarm.orchestrator]
 tick_seconds = 30
@@ -162,7 +156,6 @@ Runtime читает реальные файлы без `.example`:
 - `ai/prompts/reply.md`
 - `ai/prompts/start_topic.md`
 - `ai/prompts/topics.md`
-- `ai/prompts/reply_rules.md`
 - `ai/prompts/wind_down_hint.md`
 
 В репозитории лежат только примеры с суффиксом `.example.md`. Для нового инстанса скопируй нужные шаблоны в такие же имена без `.example` и заполни их под конкретную группу.
@@ -184,7 +177,7 @@ bot_profiles_dir = "ai/prompts/bots"
 
 Шаблон persona-файла находится в `ai/prompts/bots/persona.example.md`. Реальные persona-файлы тоже локальные и не коммитятся.
 
-### 6. Получить `SESSION_STRING` для каждого аккаунта
+### 6. Получить `SESSION_STRING_*` для каждого аккаунта
 
 Для каждого Telegram-аккаунта нужно один раз получить строку сессии.
 
@@ -259,8 +252,7 @@ uv run pytest
 - reply router;
 - orchestrator;
 - scheduler;
-- runtime и bootstrap;
-- вспомогательные скрипты.
+- runtime и bootstrap.
 
 ### Быстрая проверка, что тесты вообще собираются
 
@@ -305,36 +297,10 @@ uv run pytest tests/test_reply_router.py
 5. Проверь, что в группе появился обмен `A -> B`.
 6. Проверь, что exchange записался в SQLite.
 
-## Вспомогательные скрипты
-
-В проекте есть дополнительные утилиты.
-
-### Посмотреть информацию о текущем Telegram-пользователе
-
-```bash
-uv run python scripts/get_info.py
-```
-
-Скрипт:
-- логинится текущим аккаунтом;
-- собирает публичные атрибуты пользователя;
-- сохраняет отчёт в `tg_user_info/info.txt`.
-
-### Обновить профиль аккаунта
-
-```bash
-uv run python scripts/update_profile.py
-```
-
-Скрипт в интерактивном режиме может:
-- обновить имя;
-- обновить фамилию;
-- обновить username;
-- обновить аватар.
-
 ## Важные ограничения
 
 - проект рассчитан на `swarm`-режим;
+- запуск приложения выполняется только через `uv run python run.py`;
 - база данных только SQLite;
 - сетевые и БД-операции сделаны асинхронно;
 - persona каждого бота должна загружаться из `persona_file`;

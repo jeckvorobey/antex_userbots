@@ -160,7 +160,6 @@ async def test_orchestrator_runs_exchange_and_saves_history():
         create_exchange=AsyncMock(return_value="exchange-1"),
         mark_exchange_started=AsyncMock(),
         mark_exchange_completed=AsyncMock(),
-        mark_exchange_skipped=AsyncMock(),
     )
     history = SimpleNamespace(
         get_session_history=AsyncMock(return_value=[]),
@@ -316,7 +315,6 @@ async def test_orchestrator_resolves_group_target_per_sending_client():
         create_exchange=AsyncMock(return_value="exchange-1"),
         mark_exchange_started=AsyncMock(),
         mark_exchange_completed=AsyncMock(),
-        mark_exchange_skipped=AsyncMock(),
     )
     history = SimpleNamespace(
         get_session_history=AsyncMock(return_value=[]),
@@ -372,7 +370,6 @@ async def test_orchestrator_skips_when_bot_is_busy():
         get_recent_questions=AsyncMock(return_value=[]),
         get_recent_question_signatures=AsyncMock(return_value=set()),
         create_exchange=AsyncMock(return_value="exchange-1"),
-        mark_exchange_skipped=AsyncMock(),
     )
     orchestrator = SwarmOrchestrator(
         bot_profiles=[
@@ -404,7 +401,7 @@ async def test_orchestrator_skips_when_bot_is_busy():
     )
 
     assert await orchestrator.run_once() is False
-    exchange_store.mark_exchange_skipped.assert_not_called()
+    exchange_store.create_exchange.assert_awaited_once()
 
 
 def test_orchestrator_picks_initiator_due_at_inside_remaining_active_window():
@@ -445,7 +442,6 @@ async def test_orchestrator_uses_second_precision_for_responder_due_time():
         create_exchange=AsyncMock(return_value="exchange-1"),
         mark_exchange_started=AsyncMock(),
         mark_exchange_completed=AsyncMock(),
-        mark_exchange_skipped=AsyncMock(),
     )
     history = SimpleNamespace(
         get_session_history=AsyncMock(return_value=[]),

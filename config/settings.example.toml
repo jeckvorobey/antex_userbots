@@ -84,27 +84,6 @@ request_timeout_seconds = 45.0
 # Пример: "INFO"
 level = "INFO"
 
-[swarm]
-# Включает swarm-режим.
-# В текущем проекте обычно должно быть true.
-# Пример: true
-enabled = true
-
-# Максимальное количество одновременно активных ботов в рамках runtime-ограничений.
-# Сейчас параметр хранится в конфиге как общий лимит swarm.
-# Пример: 20
-max_parallel_bots = 20
-
-# Если true, сообщения от других ботов swarm игнорируются в routed reply-логике.
-# Это нужно, чтобы боты не отвечали друг другу как на сообщения обычных людей.
-# Пример: true
-ignore_messages_from_swarm = true
-
-# Если true, бот отвечает только на те сообщения, которые являются reply именно на него.
-# Это основной ожидаемый режим работы.
-# Пример: true
-reply_only_to_addressed_bot = true
-
 [swarm.schedule]
 # UTC-окна, в которые разрешены плановые обмены между ботами.
 # Формат каждого окна: "HH-HH".
@@ -126,10 +105,6 @@ responder_delay_minutes = [3, 10]
 # Пример: 2
 max_turns_per_exchange = 2
 
-# Deprecated: ключ оставлен для совместимости старых конфигов.
-# Сейчас orchestrator исключает последних 3 использованных userbot автоматически.
-pair_cooldown_slots = 1
-
 [swarm.orchestrator]
 # Как часто orchestrator проверяет, нужно ли запускать новый exchange, в секундах.
 # Пример: 30
@@ -150,7 +125,7 @@ skip_if_recent_human_activity = true
 # Пример: "anna"
 id = "anna"
 
-# Имя переменной окружения из .env, где лежит SESSION_STRING этого аккаунта.
+# Имя переменной окружения из .env, где лежит строка Telethon-сессии этого аккаунта.
 # Пример: "SESSION_STRING_ANNA"
 session_env = "SESSION_STRING_ANNA"
 

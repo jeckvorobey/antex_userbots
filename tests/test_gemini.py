@@ -59,7 +59,6 @@ def test_prompt_examples_are_committed_without_runtime_names():
         Path("ai/prompts/reply.example.md"),
         Path("ai/prompts/start_topic.example.md"),
         Path("ai/prompts/topics.example.md"),
-        Path("ai/prompts/reply_rules.example.md"),
         Path("ai/prompts/wind_down_hint.example.md"),
         Path("ai/prompts/bots/persona.example.md"),
     ]

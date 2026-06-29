@@ -169,22 +169,6 @@ class ExchangeStore:
         await connection.commit()
         logger.info("Exchange помечен как completed: exchange_id=%s", exchange_id)
 
-    async def mark_exchange_skipped(self, exchange_id: str, skip_reason: str) -> None:
-        """Помечает exchange как пропущенный."""
-        connection = await self._get_connection()
-        await connection.execute(
-            """
-            UPDATE scheduled_exchanges
-            SET status = 'skipped',
-                skip_reason = ?,
-                completed_at = CURRENT_TIMESTAMP
-            WHERE exchange_id = ?
-            """,
-            (skip_reason, exchange_id),
-        )
-        await connection.commit()
-        logger.info("Exchange пропущен: exchange_id=%s reason=%s", exchange_id, skip_reason)
-
     async def get_recent_bot_ids(self, limit: int) -> list[str]:
         """Возвращает последние уникальные bot_id, которые писали scheduled-сообщения."""
         if limit <= 0:
@@ -245,24 +229,6 @@ class ExchangeStore:
             LIMIT 1
             """,
             (window_key,),
-        ) as cursor:
-            row = await cursor.fetchone()
-        return dict(row) if row is not None else None
-
-    async def get_due_planned_exchange(self, *, now: datetime) -> dict[str, object] | None:
-        """Возвращает ближайший planned exchange, которому пора отправить вопрос."""
-        connection = await self._get_connection()
-        async with connection.execute(
-            """
-            SELECT *
-            FROM scheduled_exchanges
-            WHERE status = 'planned'
-              AND initiator_scheduled_at IS NOT NULL
-              AND datetime(initiator_scheduled_at) <= datetime(?)
-            ORDER BY datetime(initiator_scheduled_at) ASC, created_at ASC
-            LIMIT 1
-            """,
-            (self._serialize_timestamp(now),),
         ) as cursor:
             row = await cursor.fetchone()
         return dict(row) if row is not None else None
