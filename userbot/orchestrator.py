@@ -31,6 +31,8 @@ class SwarmOrchestrator:
         gemini_client: Any,
         history: Any,
         exchange_store: ExchangeStore | Any,
+        group_id: str | None = None,
+        group_city: str | None = None,
         group_target: object | None = None,
         group_chat_id: int | None = None,
         max_turns_per_exchange: int = 2,
@@ -52,6 +54,8 @@ class SwarmOrchestrator:
         self.gemini_client = gemini_client
         self.history = history
         self.exchange_store = exchange_store
+        self.group_id = group_id
+        self.group_city = group_city
         self.group_target = group_target
         self.group_chat_id = group_chat_id
         self.max_turns_per_exchange = max_turns_per_exchange
@@ -70,7 +74,11 @@ class SwarmOrchestrator:
         """Выполняет одну due-стадию scheduled exchange."""
         now = self.now_provider()
         due_responder_getter = getattr(self.exchange_store, "get_due_started_exchange", None)
-        due_responder = await due_responder_getter(now=now) if callable(due_responder_getter) else None
+        due_responder = (
+            await due_responder_getter(now=now, group_id=self.group_id, group_chat_id=self.group_chat_id)
+            if callable(due_responder_getter)
+            else None
+        )
         if due_responder is not None:
             return await self._run_due_responder_exchange(exchange=due_responder)
 
@@ -83,10 +91,17 @@ class SwarmOrchestrator:
         if self.group_target is None:
             logger.warning("orchestrator: skip exchange because group_target is not configured")
             return False
+        if self.group_id is not None and self.group_chat_id is None:
+            logger.warning("orchestrator: skip exchange because resolved group_chat_id is missing group_id=%s", self.group_id)
+            return False
 
         window_key, window_start, window_end = self._build_window_key(now)
         get_exchange_by_window_key = getattr(self.exchange_store, "get_exchange_by_window_key", None)
-        current_window_exchange = await get_exchange_by_window_key(window_key) if callable(get_exchange_by_window_key) else None
+        current_window_exchange = (
+            await get_exchange_by_window_key(window_key, group_id=self.group_id, group_chat_id=self.group_chat_id)
+            if callable(get_exchange_by_window_key)
+            else None
+        )
         if current_window_exchange is not None:
             status = current_window_exchange.get("status")
             if status == "planned":
@@ -107,6 +122,8 @@ class SwarmOrchestrator:
         )
         initiator_scheduled_at = self._pick_initiator_due_at(window_start=window_start, window_end=window_end)
         exchange_id = await self.exchange_store.create_exchange(
+            group_id=self.group_id,
+            group_chat_id=self.group_chat_id,
             initiator_bot_id=decision.initiator.id,
             responder_bot_id=decision.responder.id,
             topic=decision.topic,
@@ -116,6 +133,8 @@ class SwarmOrchestrator:
         )
         planned_exchange = {
             "exchange_id": exchange_id,
+            "group_id": self.group_id,
+            "group_chat_id": self.group_chat_id,
             "initiator_bot_id": decision.initiator.id,
             "responder_bot_id": decision.responder.id,
             "topic": decision.topic,
@@ -126,12 +145,20 @@ class SwarmOrchestrator:
 
     async def _build_exchange_decision(self) -> ExchangeDecision:
         """Выбирает пару ботов и тему с persisted anti-repeat."""
-        recent_bot_ids = await self.exchange_store.get_recent_bot_ids(RECENT_BOT_COOLDOWN_LIMIT)
+        recent_bot_ids = await self.exchange_store.get_recent_bot_ids(
+            RECENT_BOT_COOLDOWN_LIMIT,
+            group_id=self.group_id,
+            group_chat_id=self.group_chat_id,
+        )
         candidates = self._pick_bot_candidates(recent_bot_ids)
         chosen_initiator, chosen_responder = random.sample(candidates, 2)
 
         topic = await self._choose_topic()
-        recent_questions = await self.exchange_store.get_recent_questions(since=self.question_repeat_window)
+        recent_questions = await self.exchange_store.get_recent_questions(
+            since=self.question_repeat_window,
+            group_id=self.group_id,
+            group_chat_id=self.group_chat_id,
+        )
         return ExchangeDecision(
             initiator=chosen_initiator,
             responder=chosen_responder,
@@ -157,7 +184,11 @@ class SwarmOrchestrator:
 
     async def _choose_topic(self) -> str:
         """Выбирает тему, избегая последних заданных тем при наличии альтернатив."""
-        recent_topic_keys = await self.exchange_store.get_recent_topic_keys_by_limit(RECENT_TOPIC_LIMIT)
+        recent_topic_keys = await self.exchange_store.get_recent_topic_keys_by_limit(
+            RECENT_TOPIC_LIMIT,
+            group_id=self.group_id,
+            group_chat_id=self.group_chat_id,
+        )
         available_topics = list(getattr(self.topic_selector, "topics", []))
         if not available_topics:
             topic = await self.topic_selector.pick_random()
@@ -202,12 +233,13 @@ class SwarmOrchestrator:
                 recent_questions_context = "Недавние вопросы, которые не стоит повторять:\n" + "\n".join(
                     f"- {item}" for item in decision.recent_questions[:5]
                 )
+            exchange_context = self._build_exchange_context(recent_questions_context)
 
             initiator_prompt = await self.prompt_composer.compose(
                 "start_topic",
                 bot_id=decision.initiator.id,
                 persona_file=decision.initiator.persona_file,
-                exchange_context=recent_questions_context,
+                exchange_context=exchange_context,
             )
             initiator_text = await self._generate_non_repeating_question(
                 initiator_prompt=initiator_prompt,
@@ -227,11 +259,12 @@ class SwarmOrchestrator:
                 question_signature=initiator_text,
                 responder_scheduled_at=responder_due_at,
             )
+            history_chat_id = self._history_chat_id(exchange)
             await self.history.save_message(
                 user_id=decision.initiator.telegram_user_id or 0,
                 role="assistant",
                 text=initiator_text,
-                chat_id=self.group_chat_id,
+                chat_id=history_chat_id,
                 bot_id=decision.initiator.id,
                 exchange_id=str(exchange["exchange_id"]),
                 message_origin="scheduled_initiator",
@@ -269,10 +302,13 @@ class SwarmOrchestrator:
                 "reply",
                 bot_id=responder.id,
                 persona_file=responder.persona_file,
-                exchange_context=f"Тема обмена: {exchange['topic']}\nСообщение инициатора: {exchange['question_text']}",
+                exchange_context=self._build_exchange_context(
+                    f"Тема обмена: {exchange['topic']}\nСообщение инициатора: {exchange['question_text']}"
+                ),
             )
+            history_chat_id = self._history_chat_id(exchange)
             responder_history = await self.history.get_session_history(
-                chat_id=self.group_chat_id,
+                chat_id=history_chat_id,
                 bot_id=responder.id,
             )
             responder_text = await self.gemini_client.generate_reply(
@@ -292,7 +328,7 @@ class SwarmOrchestrator:
                 user_id=responder.telegram_user_id or 0,
                 role="assistant",
                 text=responder_text,
-                chat_id=self.group_chat_id,
+                chat_id=history_chat_id,
                 bot_id=responder.id,
                 exchange_id=str(exchange["exchange_id"]),
                 message_origin="scheduled_responder",
@@ -323,7 +359,11 @@ class SwarmOrchestrator:
 
     async def _generate_non_repeating_question(self, *, initiator_prompt: str, topic: str) -> str:
         """Генерирует вопрос и старается избежать повтора по recent signature."""
-        recent_signatures = await self.exchange_store.get_recent_question_signatures(since=self.question_repeat_window)
+        recent_signatures = await self.exchange_store.get_recent_question_signatures(
+            since=self.question_repeat_window,
+            group_id=self.group_id,
+            group_chat_id=self.group_chat_id,
+        )
         prompt = initiator_prompt
         for attempt in range(1, 3):
             question_text = await self.gemini_client.start_topic(system_prompt=prompt, topic=topic)
@@ -343,7 +383,11 @@ class SwarmOrchestrator:
         topic: str,
     ) -> ExchangeDecision:
         """Восстанавливает ExchangeDecision из persisted exchange."""
-        recent_questions = await self.exchange_store.get_recent_questions(since=self.question_repeat_window)
+        recent_questions = await self.exchange_store.get_recent_questions(
+            since=self.question_repeat_window,
+            group_id=self.group_id,
+            group_chat_id=self.group_chat_id,
+        )
         logger.info(
             "orchestrator: restoring persisted exchange exchange_id=%s initiator=%s responder=%s",
             exchange_id,
@@ -375,6 +419,30 @@ class SwarmOrchestrator:
             now=self.now_provider(),
             randint_provider=self.randint_provider,
         )
+
+    def _build_exchange_context(self, body: str | None = None) -> str:
+        """Добавляет к prompt-контексту сведения о группе."""
+        parts: list[str] = []
+        if self.group_city or self.group_id:
+            parts.append(
+                "Контекст группы: "
+                + ", ".join(
+                    item
+                    for item in (
+                        f"город: {self.group_city}" if self.group_city else None,
+                        f"group_id: {self.group_id}" if self.group_id else None,
+                    )
+                    if item
+                )
+            )
+        if body and body.strip():
+            parts.append(body.strip())
+        return "\n".join(parts)
+
+    def _history_chat_id(self, exchange: dict[str, object]) -> int | None:
+        """Возвращает реальный chat_id группы для истории."""
+        raw_chat_id = exchange.get("group_chat_id", self.group_chat_id)
+        return raw_chat_id if isinstance(raw_chat_id, int) else self.group_chat_id
 
     def _build_window_key(self, now: datetime) -> tuple[str, datetime, datetime]:
         """Строит persisted ключ текущего активного окна."""

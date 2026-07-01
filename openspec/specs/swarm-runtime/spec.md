@@ -51,11 +51,11 @@ The system SHALL register an addressed-reply handler for each active bot client.
 - **THEN** handler registration skips that bot id
 
 ### Requirement: Target group membership
-The system SHALL resolve or join the configured target group for each bot during startup.
+The system SHALL resolve or join every enabled configured group for each bot during startup and after group reload.
 
 #### Scenario: Already joined target is reused
-- **WHEN** the bot already has a matching dialog by chat id or public target
-- **THEN** no join request is sent
+- **WHEN** the bot already has a matching dialog by chat id or public target for an enabled group
+- **THEN** no join request is sent for that group
 
 #### Scenario: Public target can be joined
 - **WHEN** the bot is not already in a public target group
@@ -68,6 +68,32 @@ The system SHALL resolve or join the configured target group for each bot during
 #### Scenario: Private invite link with unavailable chat id fails clearly
 - **WHEN** `group_chat_id` is configured, the bot cannot see that group, and `group_target` is a private invite link
 - **THEN** startup raises a clear membership error instead of importing the invite link
+
+### Requirement: Group runtime registry
+The system SHALL maintain runtime state for configured groups separately from immutable configuration.
+
+#### Scenario: Enabled group becomes active after resolve
+- **WHEN** at least one active bot resolves an enabled group to a Telegram target and chat id
+- **THEN** the group runtime state is available for routing and scheduled exchanges
+
+#### Scenario: Disabled group stops runtime work
+- **WHEN** a reload marks a group disabled
+- **THEN** routing and scheduling skip that group without stopping the bot pool
+
+### Requirement: Group orchestrator reuse
+The system SHALL reuse per-group scheduled orchestrators across scheduler ticks while the group's effective runtime signature is unchanged.
+
+#### Scenario: Unchanged group reuses orchestrator
+- **WHEN** two scheduler ticks run for the same enabled group without settings or resolved target changes
+- **THEN** the second tick reuses the existing `SwarmOrchestrator` instance for that group
+
+#### Scenario: Changed group rebuilds orchestrator
+- **WHEN** a group's effective schedule, target, city, max turns, or skip-human-activity setting changes
+- **THEN** the next scheduler tick creates a replacement `SwarmOrchestrator` for that group
+
+#### Scenario: Disabled group cache is pruned
+- **WHEN** a reload removes or disables a group
+- **THEN** the scheduler cache removes that group's orchestrator and stops ticking it
 
 ### Requirement: Client supervision
 The system SHALL keep active bot clients supervised and reconnect after unexpected disconnects or client errors.
@@ -89,4 +115,3 @@ The system SHALL not log private Telegram invite hashes.
 #### Scenario: Invite link resolve is skipped with redacted log
 - **WHEN** group resolution receives a private invite link
 - **THEN** direct `get_entity` is skipped and logs contain a redacted marker instead of the invite hash
-

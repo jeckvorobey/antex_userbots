@@ -8,17 +8,6 @@
 # Пример: "swarm"
 mode = "swarm"
 
-[target]
-# Числовой id целевой Telegram-группы.
-# Обычно это id супергруппы в формате -100...
-# Пример: -1001234567890
-group_chat_id = -1001234567890
-
-# Публичный username или ссылка-идентификатор той же группы.
-# Нужен как дополнительный способ найти группу через Telegram.
-# Пример: "@my_group"
-group_target = "@my_group"
-
 [storage]
 # Путь к SQLite-файлу, где будет храниться история сообщений и scheduled exchange.
 # Если папки не существует, приложение создаст её само.
@@ -28,20 +17,18 @@ db_path = "data/history.db"
 [prompts]
 # Базовая директория с промтами.
 # Внутри неё лежат system.md, reply.md, start_topic.md и другие markdown-файлы.
-# Реальные *.md файлы локальные для каждого инстанса и не коммитятся.
-# Для старта скопируйте *.example.md в такие же имена без .example.
+# Эти файлы являются production-промтами текущего инстанса и хранятся в git.
 # Пример: "ai/prompts"
 base_dir = "ai/prompts"
 
 # Путь к файлу со списком тем для плановых диалогов между ботами.
-# Обычно это markdown-файл, где хранятся заготовки тем.
-# Файл локальный для инстанса и не коммитится.
+# Это общий список topic-intents; initiator адаптирует выбранную тему под город группы.
 # Пример: "ai/prompts/topics.md"
 topics_path = "ai/prompts/topics.md"
 
 # Папка с persona-файлами конкретных ботов.
 # Каждый bot из [[swarm.bots]] ссылается на файл из этой директории.
-# Реальные persona-файлы локальные для инстанса и не коммитятся.
+# Persona-файлы текущего инстанса хранятся в git.
 # Пример: "ai/prompts/bots"
 bot_profiles_dir = "ai/prompts/bots"
 
@@ -104,6 +91,37 @@ responder_delay_minutes = [3, 10]
 # Значение 2 означает классический сценарий: bot A пишет, bot B отвечает.
 # Пример: 2
 max_turns_per_exchange = 2
+
+[[groups]]
+# Уникальный id группы внутри приложения.
+# Используется для scoped scheduled exchange и anti-repeat state.
+id = "danang"
+
+# Название города для prompt-контекста scheduled exchange.
+city = "Da Nang"
+
+# Если false, reply-router и orchestrator перестают обрабатывать группу.
+enabled = true
+
+# Числовой id Telegram-группы. Обычно это id супергруппы в формате -100...
+group_chat_id = -1001234567890
+
+# Публичный username или invite/public link той же группы.
+# Нужен как дополнительный способ найти или присоединиться к группе через Telegram.
+group_target = "@danang_group"
+
+[[groups]]
+id = "batumi"
+city = "Batumi"
+enabled = true
+group_chat_id = -1009876543210
+group_target = "@batumi_group"
+
+# Необязательные override расписания только для этой группы.
+# Все неуказанные поля наследуются из [swarm.schedule].
+[groups.schedule]
+active_windows_utc = ["14-16"]
+responder_delay_minutes = [5, 12]
 
 [swarm.orchestrator]
 # Как часто orchestrator проверяет, нужно ли запускать новый exchange, в секундах.

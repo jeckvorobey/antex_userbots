@@ -17,13 +17,14 @@ def _build_event(
     reply_sender_id: int | None = 101,
     reply_message_id: int = 55,
     sender_is_bot: bool = False,
+    chat_id: int = -100555,
 ):
     reply_message = SimpleNamespace(sender_id=reply_sender_id, id=reply_message_id)
     return SimpleNamespace(
         sender_id=sender_id,
         raw_text=raw_text,
         is_reply=is_reply,
-        chat_id=-100555,
+        chat_id=chat_id,
         id=77,
         reply=AsyncMock(),
         get_reply_message=AsyncMock(return_value=reply_message if is_reply else None),
@@ -45,6 +46,25 @@ async def test_router_ignores_non_reply_message():
     handled = await router.handle_event(_build_event(sender_id=999, is_reply=False))
 
     assert handled is False
+
+
+@pytest.mark.asyncio
+async def test_router_ignores_event_outside_enabled_groups():
+    """Проверяет, что router отвечает только в enabled configured groups."""
+    history = SimpleNamespace(get_session_history=AsyncMock(), save_message=AsyncMock())
+    router = AddressedReplyRouter(
+        bot_profile=SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+        history=history,
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system")),
+        gemini_client=SimpleNamespace(generate_reply=AsyncMock()),
+        swarm_user_ids={202, 303},
+        enabled_group_chat_ids={-100555},
+    )
+
+    handled = await router.handle_event(_build_event(sender_id=999, chat_id=-100999))
+
+    assert handled is False
+    history.get_session_history.assert_not_called()
 
 
 @pytest.mark.asyncio

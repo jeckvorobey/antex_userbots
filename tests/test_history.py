@@ -173,6 +173,24 @@ async def test_init_db_is_idempotent(history):
     await history.init_db()  # вызов второй раз не должен упасть
 
 
+async def test_init_db_creates_history_indexes_idempotently(history):
+    """Проверяет создание индексов для горячих history-запросов."""
+    await history.init_db()
+    connection = await history._get_connection()
+    async with connection.execute("PRAGMA index_list(messages)") as cursor:
+        rows = await cursor.fetchall()
+
+    index_names = {row[1] for row in rows}
+
+    assert {
+        "idx_messages_user_id_id",
+        "idx_messages_chat_id_id",
+        "idx_messages_chat_bot_id",
+        "idx_messages_chat_created_at",
+        "idx_messages_chat_bot_created_at",
+    }.issubset(index_names)
+
+
 async def test_save_message_persists_swarm_metadata(history):
     """Проверяет сохранение bot_id, exchange_id, origin и reply_to_message_id."""
     await history.save_message(

@@ -83,6 +83,4 @@ Nachang_group_2026-04-14/
 PLAN.md
 config/settings.toml
 
-# Runtime prompt files are instance-local. Keep only example templates in git.
-ai/prompts/**/*.md
-!ai/prompts/**/*.example.md
+# Prompt files are part of this single production instance.

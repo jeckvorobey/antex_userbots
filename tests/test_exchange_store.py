@@ -1,6 +1,7 @@
 """Тесты persisted state для orchestrator."""
 
 from datetime import UTC, datetime, timedelta
+import sqlite3
 
 import pytest
 import pytest_asyncio
@@ -72,6 +73,10 @@ async def test_exchange_store_returns_recent_unique_bot_ids_by_message_order(exc
 
     assert recent_bot_ids == ["lena", "kate", "john"]
 
+    limited_bot_ids = await exchange_store.get_recent_bot_ids(2)
+
+    assert limited_bot_ids == ["lena", "kate"]
+
 
 async def test_exchange_store_returns_recent_topic_keys_by_limit(exchange_store):
     """Проверяет выбор последних topic_key по количеству, а не по временному окну."""
@@ -121,3 +126,104 @@ async def test_exchange_store_tracks_window_and_due_stages(exchange_store):
     assert due_started["exchange_id"] == exchange_id
     assert due_started["initiator_message_id"] == 55
     assert due_started["question_text"] == "Кто где сейчас живёт ближе к морю?"
+
+
+async def test_exchange_store_scopes_queries_by_group(exchange_store):
+    """Проверяет изоляцию persisted anti-repeat state между группами."""
+    danang_exchange = await exchange_store.create_exchange(
+        group_id="danang",
+        group_chat_id=-100111,
+        initiator_bot_id="anna",
+        responder_bot_id="mike",
+        topic="Где поесть суп?",
+        window_key="2026-04-20T19:19-20",
+    )
+    await exchange_store.mark_exchange_started(
+        danang_exchange,
+        initiator_message_id=501,
+        question_text="Где суп?",
+        question_signature="Где суп?",
+        responder_scheduled_at=datetime(2026, 4, 20, 19, 10, tzinfo=UTC),
+    )
+    await exchange_store.mark_exchange_completed(danang_exchange)
+
+    batumi_exchange = await exchange_store.create_exchange(
+        group_id="batumi",
+        group_chat_id=-100222,
+        initiator_bot_id="kate",
+        responder_bot_id="john",
+        topic="Где кофе?",
+        window_key="2026-04-20T19:19-20",
+    )
+    await exchange_store.mark_exchange_started(
+        batumi_exchange,
+        initiator_message_id=601,
+        question_text="Где кофе?",
+        question_signature="Где кофе?",
+        responder_scheduled_at=datetime(2026, 4, 20, 19, 10, tzinfo=UTC),
+    )
+
+    assert await exchange_store.get_recent_bot_ids(2, group_id="danang") == ["mike", "anna"]
+    assert await exchange_store.get_recent_topic_keys_by_limit(10, group_id="danang") == {"где поесть суп"}
+    assert await exchange_store.get_recent_question_signatures(since=timedelta(days=1), group_id="danang") == {"где суп"}
+    assert (await exchange_store.get_exchange_by_window_key("2026-04-20T19:19-20", group_id="danang"))["exchange_id"] == danang_exchange
+    assert (
+        await exchange_store.get_due_started_exchange(now=datetime(2026, 4, 20, 19, 11, tzinfo=UTC), group_id="batumi")
+    )["exchange_id"] == batumi_exchange
+
+
+async def test_exchange_store_migrates_legacy_table_idempotently(tmp_path):
+    """Проверяет миграцию старой таблицы без group columns."""
+    db_path = tmp_path / "history.db"
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        """
+        CREATE TABLE scheduled_exchanges (
+            exchange_id TEXT PRIMARY KEY,
+            initiator_bot_id TEXT NOT NULL,
+            responder_bot_id TEXT NOT NULL,
+            pair_key TEXT NOT NULL,
+            window_key TEXT,
+            topic TEXT NOT NULL,
+            topic_key TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'planned'
+        )
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    store = ExchangeStore(str(db_path))
+    await store.init_db()
+    await store.init_db()
+    try:
+        db = await store._get_connection()
+        async with db.execute("PRAGMA table_info(scheduled_exchanges)") as cursor:
+            rows = await cursor.fetchall()
+        columns = [row[1] for row in rows]
+    finally:
+        await store.close()
+
+    assert "group_id" in columns
+    assert "group_chat_id" in columns
+
+
+async def test_exchange_store_creates_indexes_idempotently(exchange_store):
+    """Проверяет создание индексов для горячих scheduled exchange запросов."""
+    await exchange_store.init_db()
+    db = await exchange_store._get_connection()
+    async with db.execute("PRAGMA index_list(scheduled_exchanges)") as cursor:
+        rows = await cursor.fetchall()
+
+    index_names = {row[1] for row in rows}
+
+    assert {
+        "idx_scheduled_exchanges_group_window_created",
+        "idx_scheduled_exchanges_chat_window_created",
+        "idx_scheduled_exchanges_group_due_responder",
+        "idx_scheduled_exchanges_chat_due_responder",
+        "idx_scheduled_exchanges_group_recent_started",
+        "idx_scheduled_exchanges_chat_recent_started",
+        "idx_scheduled_exchanges_group_recent_completed",
+        "idx_scheduled_exchanges_chat_recent_completed",
+    }.issubset(index_names)

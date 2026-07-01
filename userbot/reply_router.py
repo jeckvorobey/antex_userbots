@@ -26,6 +26,7 @@ class AddressedReplyRouter:
         prompt_composer: PromptComposer | Any,
         gemini_client: GeminiClient | Any,
         swarm_user_ids: set[int],
+        enabled_group_chat_ids: set[int] | None = None,
         manager: SwarmManager | Any | None = None,
     ) -> None:
         self.bot_profile = bot_profile
@@ -33,10 +34,16 @@ class AddressedReplyRouter:
         self.prompt_composer = prompt_composer
         self.gemini_client = gemini_client
         self.swarm_user_ids = swarm_user_ids
+        self.enabled_group_chat_ids = enabled_group_chat_ids
         self.manager = manager
 
     async def handle_event(self, event: Any) -> bool:
         """Обрабатывает входящее сообщение, если оно адресовано текущему боту."""
+        chat_id = getattr(event, "chat_id", None)
+        if self.enabled_group_chat_ids is not None and chat_id not in self.enabled_group_chat_ids:
+            logger.info("router: bot_id=%s ignore event outside enabled groups chat_id=%s", self.bot_profile.id, chat_id)
+            return False
+
         sender_id = getattr(event, "sender_id", None)
         if sender_id in self.swarm_user_ids:
             logger.info("router: bot_id=%s ignore sender from swarm sender_id=%s", self.bot_profile.id, sender_id)

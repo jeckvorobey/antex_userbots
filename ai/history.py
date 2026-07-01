@@ -58,6 +58,8 @@ class MessageHistory:
         await self._ensure_column(connection, "exchange_id", "TEXT")
         await self._ensure_column(connection, "message_origin", "TEXT")
         await self._ensure_column(connection, "reply_to_message_id", "INTEGER")
+        await self._ensure_column(connection, "created_at", "TIMESTAMP")
+        await self._ensure_indexes(connection)
         logger.info("Таблица истории сообщений готова")
 
     async def save_message(
@@ -267,3 +269,31 @@ class MessageHistory:
         except aiosqlite.OperationalError as exc:
             if "duplicate column" not in str(exc).lower():
                 raise
+
+    async def _ensure_indexes(self, connection: aiosqlite.Connection) -> None:
+        """Создаёт индексы для горячих запросов истории."""
+        index_statements = [
+            """
+            CREATE INDEX IF NOT EXISTS idx_messages_user_id_id
+            ON messages (user_id, id DESC)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_messages_chat_id_id
+            ON messages (chat_id, id DESC)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_messages_chat_bot_id
+            ON messages (chat_id, bot_id, id DESC)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_messages_chat_created_at
+            ON messages (chat_id, created_at, id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_messages_chat_bot_created_at
+            ON messages (chat_id, bot_id, created_at, id)
+            """,
+        ]
+        for statement in index_statements:
+            await connection.execute(statement)
+        await connection.commit()

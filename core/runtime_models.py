@@ -58,6 +58,30 @@ class BotRuntimeState:
 
 
 @dataclass(slots=True)
+class GroupRuntimeState:
+    """Runtime-состояние одной Telegram-группы."""
+
+    group_id: str
+    city: str
+    enabled: bool = True
+    group_chat_id: int | None = None
+    group_target: str | None = None
+    resolved_target: object | None = None
+    resolved_chat_id: int | None = None
+    last_resolved_at: datetime | None = None
+
+    def mark_resolved(self, *, target: object, chat_id: int | None = None) -> None:
+        """Фиксирует успешный resolve группы."""
+        self.resolved_target = target
+        self.resolved_chat_id = chat_id if chat_id is not None else self.group_chat_id
+        self.last_resolved_at = datetime.now(UTC)
+
+    def mark_disabled(self) -> None:
+        """Отключает runtime-обработку группы."""
+        self.enabled = False
+
+
+@dataclass(slots=True)
 class ExchangeDecision:
     """Результат выбора exchange orchestrator-ом."""
 

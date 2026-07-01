@@ -20,7 +20,7 @@ def test_settings_loads_required_fields():
     with patch.dict(os.environ, BASE_ENV, clear=True):
         from core.config import Settings
 
-        s = Settings()
+        s = Settings(_env_file=None)
         assert s.api_id == 12345678
         assert s.api_hash == "test_api_hash_abc"
         assert s.gemini_api_key == "test_gemini_key_xyz"
@@ -33,7 +33,7 @@ def test_settings_ignores_legacy_session_string():
     with patch.dict(os.environ, env, clear=True):
         from core.config import Settings
 
-        s = Settings()
+        s = Settings(_env_file=None)
 
     assert not hasattr(s, "session_string")
 
@@ -107,16 +107,17 @@ def test_settings_has_db_path():
     with patch.dict(os.environ, BASE_ENV, clear=True):
         from core.config import Settings
 
-        s = Settings()
+        s = Settings(_env_file=None)
         assert s.db_path is not None
         assert len(s.db_path) > 0
 
 
-def test_get_settings_returns_settings_instance():
+def test_get_settings_returns_settings_instance(monkeypatch, tmp_path):
     """Проверяет, что публичная фабрика возвращает объект Settings."""
     with patch.dict(os.environ, BASE_ENV, clear=True):
         from core.config import Settings, get_settings
 
+        monkeypatch.chdir(tmp_path)
         get_settings.cache_clear()
         settings = get_settings()
 
@@ -130,7 +131,7 @@ def test_settings_reads_proxy_url():
     with patch.dict(os.environ, env, clear=True):
         from core.config import Settings
 
-        s = Settings()
+        s = Settings(_env_file=None)
 
         assert s.proxy_url == "http://user:pass@127.0.0.1:8080"
 

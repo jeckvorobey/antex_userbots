@@ -52,33 +52,59 @@ async def test_prompt_loader_preserves_full_content():
         assert result == content
 
 
-def test_prompt_examples_are_committed_without_runtime_names():
-    """Проверяет, что в репозитории есть шаблоны, а не production-промты."""
-    examples = [
-        Path("ai/prompts/system.example.md"),
-        Path("ai/prompts/reply.example.md"),
-        Path("ai/prompts/start_topic.example.md"),
-        Path("ai/prompts/topics.example.md"),
-        Path("ai/prompts/wind_down_hint.example.md"),
-        Path("ai/prompts/bots/persona.example.md"),
+def test_runtime_prompt_files_are_committed():
+    """Проверяет, что production-промты одного инстанса лежат в репозитории."""
+    prompt_files = [
+        Path("ai/prompts/system.md"),
+        Path("ai/prompts/reply.md"),
+        Path("ai/prompts/start_topic.md"),
+        Path("ai/prompts/topics.md"),
+        Path("ai/prompts/wind_down_hint.md"),
+        Path("ai/prompts/bots/anna.md"),
     ]
 
-    for path in examples:
-        assert path.exists(), f"Нет example-файла: {path}"
+    for path in prompt_files:
+        assert path.exists(), f"Нет prompt-файла: {path}"
         assert path.read_text(encoding="utf-8").strip()
 
 
 @pytest.mark.asyncio
-async def test_prompt_loader_can_read_copied_example_prompt(tmp_path):
-    """Проверяет, что example-шаблон можно скопировать в runtime-имя без изменения загрузчика."""
-    source = Path("ai/prompts/system.example.md")
-    target = tmp_path / "system.md"
-    target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
-
-    loader = PromptLoader(prompts_dir=str(tmp_path))
+async def test_prompt_loader_can_read_committed_runtime_prompt():
+    """Проверяет, что loader читает реальный runtime prompt."""
+    loader = PromptLoader(prompts_dir="ai/prompts")
     system_prompt = await loader.load("system")
 
-    assert "System prompt example" in system_prompt
+    assert "Telegram" in system_prompt
+
+
+def test_no_prompt_examples_are_required_anymore():
+    """Проверяет, что старые шаблоны .example.md удалены из prompt-контракта."""
+    assert not list(Path("ai/prompts").glob("**/*.example.md"))
+
+
+def test_shared_topics_are_city_neutral_intents():
+    """Проверяет, что общий topics.md не содержит готовые вопросы под один город."""
+    topics_path = Path("ai/prompts/topics.md")
+    city_markers = {"нячанг", "danang", "da nang", "батум", "batumi"}
+    topic_lines = [
+        line.strip()
+        for line in topics_path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#") and line.strip() != "---"
+    ]
+
+    assert topic_lines
+    assert all("?" not in line for line in topic_lines)
+    lowered = "\n".join(topic_lines).lower()
+    assert not any(marker in lowered for marker in city_markers)
+
+
+def test_start_topic_prompt_requires_city_adaptation():
+    """Проверяет, что start_topic prompt адаптирует общий intent под город группы."""
+    prompt = Path("ai/prompts/start_topic.md").read_text(encoding="utf-8").lower()
+
+    assert "город" in prompt
+    assert "не упоминай другой город" in prompt
+    assert "не копируй тему дословно" in prompt
 
 
 def test_gemini_client_initializes_with_api_key():

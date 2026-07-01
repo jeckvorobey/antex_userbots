@@ -218,6 +218,73 @@ async def test_orchestrator_runs_exchange_and_saves_history():
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_scopes_exchange_to_group_and_uses_real_chat_id():
+    """Проверяет group scope для scheduled exchange."""
+    initiator_client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=501)))
+    responder_client = SimpleNamespace(send_message=AsyncMock())
+    exchange_store = SimpleNamespace(
+        get_due_started_exchange=AsyncMock(return_value=None),
+        get_exchange_by_window_key=AsyncMock(return_value=None),
+        get_recent_bot_ids=AsyncMock(return_value=[]),
+        get_recent_topic_keys_by_limit=AsyncMock(return_value=set()),
+        get_recent_questions=AsyncMock(return_value=[]),
+        get_recent_question_signatures=AsyncMock(return_value=set()),
+        create_exchange=AsyncMock(return_value="exchange-1"),
+        mark_exchange_started=AsyncMock(),
+        mark_exchange_completed=AsyncMock(),
+    )
+    history = SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock())
+    prompt_composer = SimpleNamespace(compose=AsyncMock(return_value="system-init"))
+
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+            SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md", telegram_user_id=202),
+        ],
+        manager=_manager_with_clients(initiator_client, responder_client),
+        topic_selector=SimpleNamespace(topics=["Где поесть суп?"]),
+        prompt_composer=prompt_composer,
+        gemini_client=SimpleNamespace(start_topic=AsyncMock(return_value="Кто знает место с хорошим супом?")),
+        history=history,
+        exchange_store=exchange_store,
+        group_id="danang",
+        group_city="Da Nang",
+        group_target="@danang",
+        group_chat_id=-100111,
+        active_windows_utc=["19-20"],
+        now_provider=lambda: datetime(2026, 4, 20, 19, 5, tzinfo=UTC),
+        randint_provider=lambda start, end: start,
+    )
+    orchestrator._build_exchange_decision = AsyncMock(
+        return_value=SimpleNamespace(
+            initiator=orchestrator.bot_profiles[0],
+            responder=orchestrator.bot_profiles[1],
+            topic="Где поесть суп?",
+            topic_key="где поесть суп",
+            recent_questions=[],
+        )
+    )
+
+    assert await orchestrator.run_once() is True
+
+    exchange_store.get_due_started_exchange.assert_awaited_once_with(
+        now=datetime(2026, 4, 20, 19, 5, tzinfo=UTC),
+        group_id="danang",
+        group_chat_id=-100111,
+    )
+    exchange_store.get_exchange_by_window_key.assert_awaited_once_with(
+        "2026-04-20T19:19-20",
+        group_id="danang",
+        group_chat_id=-100111,
+    )
+    exchange_store.create_exchange.assert_awaited_once()
+    assert exchange_store.create_exchange.await_args.kwargs["group_id"] == "danang"
+    assert exchange_store.create_exchange.await_args.kwargs["group_chat_id"] == -100111
+    assert history.save_message.await_args.kwargs["chat_id"] == -100111
+    assert "город: Da Nang" in prompt_composer.compose.await_args.kwargs["exchange_context"]
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_sends_due_responder_and_completes_exchange():
     """Проверяет, что ответчик отвечает только после наступления due времени."""
     initiator_client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=501)))

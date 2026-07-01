@@ -226,6 +226,114 @@ async def test_run_swarm_mode_starts_manager_registers_scheduler_and_supervises(
 
 
 @pytest.mark.asyncio
+async def test_run_swarm_mode_reuses_group_orchestrator_between_ticks(monkeypatch):
+    """Проверяет, что scheduler tick переиспользует orchestrator для неизменной группы."""
+    import run
+
+    settings = Settings(
+        api_id=1,
+        api_hash="hash",
+        gemini_api_key="gemini-key",
+        group_chat_id=-100111,
+        group_target="@group",
+        db_path=":memory:",
+        settings_path=None,
+    )
+    settings.mode = "swarm"
+    settings.swarm_tick_seconds = 30
+    settings.swarm_bots = [
+        SimpleNamespace(id="anna", session_string="anna-session", persona_file="anna.md", enabled=True, temperature=0.9, session_env="SESSION_STRING_ANNA"),
+        SimpleNamespace(id="mike", session_string="mike-session", persona_file="mike.md", enabled=True, temperature=0.8, session_env="SESSION_STRING_MIKE"),
+    ]
+
+    manager = SimpleNamespace(
+        active_bot_ids=["anna", "mike"],
+        bot_profiles=[
+            SimpleNamespace(id="anna", enabled=True, telegram_user_id=101, persona_file="anna.md"),
+            SimpleNamespace(id="mike", enabled=True, telegram_user_id=202, persona_file="mike.md"),
+        ],
+        start=AsyncMock(),
+        stop=AsyncMock(),
+        supervise_bot=AsyncMock(side_effect=[None, None]),
+        get_client=lambda _bot_id: SimpleNamespace(client=FakeTelegramClient("anna", 1, "hash")),
+        swarm_user_ids={101, 202},
+    )
+    runtime = SimpleNamespace(
+        topic_selector=SimpleNamespace(),
+        prompt_composer=SimpleNamespace(),
+        gemini_client=SimpleNamespace(),
+        history=SimpleNamespace(),
+        exchange_store=SimpleNamespace(),
+    )
+    scheduler = SimpleNamespace(add_job=Mock())
+    created_orchestrators = []
+
+    class FakeOrchestrator:
+        """Orchestrator-заглушка для подсчёта созданных экземпляров."""
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.run_once = AsyncMock(return_value=False)
+            created_orchestrators.append(self)
+
+    monkeypatch.setattr(run, "SwarmManager", lambda **kwargs: manager)
+    monkeypatch.setattr(run, "_register_swarm_handlers", AsyncMock())
+    monkeypatch.setattr(run, "_log_resolved_group", AsyncMock())
+    monkeypatch.setattr(run, "_resolve_group_target", AsyncMock(return_value=SimpleNamespace(id=-100111, username="group")))
+    monkeypatch.setattr(run, "SwarmOrchestrator", FakeOrchestrator)
+
+    await run._run_swarm_mode(settings, runtime, scheduler)
+    tick = scheduler.add_job.call_args.args[0]
+
+    await tick()
+    await tick()
+
+    assert len(created_orchestrators) == 1
+    assert created_orchestrators[0].run_once.await_count == 2
+
+
+def test_group_orchestrator_cache_rebuilds_on_signature_change_and_prunes():
+    """Проверяет пересоздание cache entry при смене подписи и очистку отключённых групп."""
+    import run
+
+    cache = {}
+    created = []
+
+    first = run._get_cached_group_orchestrator(
+        cache,
+        "batumi",
+        ("batumi", "Batumi", "10-12"),
+        lambda: created.append("first") or object(),
+    )
+    reused = run._get_cached_group_orchestrator(
+        cache,
+        "batumi",
+        ("batumi", "Batumi", "10-12"),
+        lambda: created.append("unexpected") or object(),
+    )
+    rebuilt = run._get_cached_group_orchestrator(
+        cache,
+        "batumi",
+        ("batumi", "Batumi", "12-14"),
+        lambda: created.append("rebuilt") or object(),
+    )
+    run._get_cached_group_orchestrator(
+        cache,
+        "tbilisi",
+        ("tbilisi", "Tbilisi", "10-12"),
+        lambda: created.append("tbilisi") or object(),
+    )
+
+    assert first is reused
+    assert rebuilt is not first
+    assert created == ["first", "rebuilt", "tbilisi"]
+
+    run._prune_orchestrator_cache(cache, {"tbilisi"})
+
+    assert set(cache) == {"tbilisi"}
+
+
+@pytest.mark.asyncio
 async def test_run_swarm_mode_requires_two_active_bots_after_start(monkeypatch):
     """Проверяет отказ запуска, если после startup остался один бот."""
     import run

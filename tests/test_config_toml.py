@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from core.config import Settings
+from core.config import Settings, SettingsReloadWatcher
 
 
 BASE_SECRETS = {
@@ -127,8 +127,8 @@ def test_settings_rejects_group_target_in_toml(tmp_path):
         Settings(**BASE_SECRETS, settings_path=str(settings_path))
 
 
-def test_settings_reads_target_section_from_toml(tmp_path):
-    """Проверяет чтение целевой группы из секции [target]."""
+def test_settings_rejects_target_section_from_toml(tmp_path):
+    """Проверяет, что [target] больше не входит в публичный TOML-контракт."""
     settings_path = write_settings(
         tmp_path,
         """
@@ -161,10 +161,173 @@ def test_settings_reads_target_section_from_toml(tmp_path):
     }
 
     with patch.dict("os.environ", env, clear=True):
+        with pytest.raises(Exception, match="target"):
+            Settings(_env_file=None)
+
+
+def test_settings_reads_multi_group_config_and_schedule_overrides(tmp_path):
+    """Проверяет загрузку нескольких групп и наследование расписания."""
+    settings_path = write_settings(
+        tmp_path,
+        """
+        [app]
+        mode = "swarm"
+
+        [swarm.schedule]
+        active_windows_utc = ["10-12"]
+        initiator_offset_minutes = [1, 2]
+        responder_delay_minutes = [3, 4]
+        max_turns_per_exchange = 2
+
+        [[groups]]
+        id = "danang"
+        city = "Da Nang"
+        enabled = true
+        group_chat_id = -100111
+        group_target = "@danang_chat"
+
+        [[groups]]
+        id = "batumi"
+        city = "Batumi"
+        enabled = false
+        group_chat_id = -100222
+
+        [groups.schedule]
+        active_windows_utc = ["14-16"]
+        responder_delay_minutes = [8, 9]
+
+        [[swarm.bots]]
+        id = "anna"
+        session_env = "SESSION_STRING_ANNA"
+        persona_file = "anna.md"
+        """,
+    )
+
+    env = {
+        "API_ID": "12345678",
+        "API_HASH": "test_hash",
+        "GEMINI_API_KEY": "test_key",
+        "SESSION_STRING_ANNA": "anna-session",
+        "SETTINGS_PATH": str(settings_path),
+    }
+
+    with patch.dict("os.environ", env, clear=True):
         settings = Settings(_env_file=None)
 
-    assert settings.group_chat_id == -100987654321
-    assert settings.group_target == "@swarm_group"
+    assert [group.id for group in settings.groups] == ["danang", "batumi"]
+    assert [group.id for group in settings.enabled_groups] == ["danang"]
+    assert settings.groups[0].active_windows_utc == ["10-12"]
+    assert settings.groups[0].responder_delay_minutes == (3, 4)
+    assert settings.groups[1].active_windows_utc == ["14-16"]
+    assert settings.groups[1].initiator_offset_minutes == (1, 2)
+    assert settings.groups[1].responder_delay_minutes == (8, 9)
+
+
+def test_settings_rejects_duplicate_group_ids(tmp_path):
+    """Проверяет запрет дублирующихся group.id."""
+    settings_path = write_settings(
+        tmp_path,
+        """
+        [[groups]]
+        id = "danang"
+        city = "Da Nang"
+        group_chat_id = -100111
+
+        [[groups]]
+        id = "DANANG"
+        city = "Da Nang 2"
+        group_target = "@danang2"
+
+        [[swarm.bots]]
+        id = "anna"
+        session_env = "SESSION_STRING_ANNA"
+        persona_file = "anna.md"
+        """,
+    )
+
+    env = {
+        "API_ID": "12345678",
+        "API_HASH": "test_hash",
+        "GEMINI_API_KEY": "test_key",
+        "SESSION_STRING_ANNA": "anna-session",
+        "SETTINGS_PATH": str(settings_path),
+    }
+
+    with patch.dict("os.environ", env, clear=True):
+        with pytest.raises(Exception, match="group id"):
+            Settings(_env_file=None)
+
+
+def test_settings_rejects_group_without_target(tmp_path):
+    """Проверяет, что группа без id чата и target невалидна."""
+    settings_path = write_settings(
+        tmp_path,
+        """
+        [[groups]]
+        id = "danang"
+        city = "Da Nang"
+
+        [[swarm.bots]]
+        id = "anna"
+        session_env = "SESSION_STRING_ANNA"
+        persona_file = "anna.md"
+        """,
+    )
+
+    env = {
+        "API_ID": "12345678",
+        "API_HASH": "test_hash",
+        "GEMINI_API_KEY": "test_key",
+        "SESSION_STRING_ANNA": "anna-session",
+        "SETTINGS_PATH": str(settings_path),
+    }
+
+    with patch.dict("os.environ", env, clear=True):
+        with pytest.raises(Exception, match="group_chat_id|group_target"):
+            Settings(_env_file=None)
+
+
+def test_settings_reload_watcher_returns_new_settings_on_mtime_change(tmp_path):
+    """Проверяет non-mutating reload по mtime settings.toml."""
+    settings_path = write_settings(
+        tmp_path,
+        """
+        [[groups]]
+        id = "danang"
+        city = "Da Nang"
+        group_chat_id = -100111
+        """,
+    )
+    env = {
+        "API_ID": "12345678",
+        "API_HASH": "test_hash",
+        "GEMINI_API_KEY": "test_key",
+        "SETTINGS_PATH": str(settings_path),
+    }
+
+    with patch.dict("os.environ", env, clear=True):
+        settings = Settings(_env_file=None)
+        watcher = SettingsReloadWatcher(settings)
+        assert watcher.poll() is None
+        settings_path.write_text(
+            """
+            [[groups]]
+            id = "danang"
+            city = "Da Nang"
+            group_chat_id = -100111
+
+            [[groups]]
+            id = "batumi"
+            city = "Batumi"
+            group_chat_id = -100222
+            """.strip(),
+            encoding="utf-8",
+        )
+        reloaded = watcher.poll()
+
+    assert reloaded is not None
+    assert reloaded is not settings
+    assert [group.id for group in reloaded.groups] == ["danang", "batumi"]
 
 
 def test_settings_rejects_missing_explicit_settings_path(tmp_path):

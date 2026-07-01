@@ -7,7 +7,7 @@ Define prompt loading, persona composition, topic loading, and Gemini generation
 ## Requirements
 
 ### Requirement: Runtime prompt files
-The system SHALL load prompt text from runtime `.md` files rather than hardcoding prompt content.
+The system SHALL load prompt text from tracked production `.md` files rather than hardcoding prompt content or relying on copied example templates.
 
 #### Scenario: Prompt file is loaded by name
 - **WHEN** `PromptLoader.load("system")` is called
@@ -17,8 +17,12 @@ The system SHALL load prompt text from runtime `.md` files rather than hardcodin
 - **WHEN** the requested prompt file does not exist
 - **THEN** `PromptLoader` raises `FileNotFoundError`
 
+#### Scenario: Prompt examples are not required
+- **WHEN** repository prompt files are validated
+- **THEN** runtime prompt names such as `system.md`, `reply.md`, `start_topic.md`, `topics.md`, and `wind_down_hint.md` exist without requiring matching `*.example.md` files
+
 ### Requirement: Prompt composition
-The system SHALL compose generated-task prompts from base prompt, bot persona, and optional exchange context.
+The system SHALL compose generated-task prompts from base prompt, bot persona, and optional exchange context including scheduled group context.
 
 #### Scenario: Base prompt and persona are combined
 - **WHEN** a base prompt and persona are available
@@ -27,6 +31,10 @@ The system SHALL compose generated-task prompts from base prompt, bot persona, a
 #### Scenario: Exchange context is appended
 - **WHEN** exchange context is provided
 - **THEN** it is appended after base prompt and persona separated by a blank line
+
+#### Scenario: Scheduled group context is appended
+- **WHEN** scheduled exchange composition receives group city or group id context
+- **THEN** that context is included in the exchange context passed to prompt composition
 
 #### Scenario: Missing persona file is allowed
 - **WHEN** the configured persona file does not exist
@@ -37,11 +45,11 @@ The system SHALL compose generated-task prompts from base prompt, bot persona, a
 - **THEN** prompt composition raises `ValueError`
 
 ### Requirement: Topic loading
-The system SHALL load scheduled exchange topics from the configured topics file.
+The system SHALL load scheduled exchange topic intents from the configured topics file.
 
-#### Scenario: Topic file lines become topics
+#### Scenario: Topic file lines become topic intents
 - **WHEN** the topics file contains non-empty non-comment lines
-- **THEN** those lines are loaded as available topics
+- **THEN** those lines are loaded as available topic intents
 
 #### Scenario: Comments are ignored
 - **WHEN** topic lines start with `#`
@@ -50,6 +58,10 @@ The system SHALL load scheduled exchange topics from the configured topics file.
 #### Scenario: Empty topic list fails on pick
 - **WHEN** no topics are loaded
 - **THEN** `pick_random` raises `ValueError` with message `Список тем пуст`
+
+#### Scenario: Topic intents are city-neutral
+- **WHEN** the committed shared topics file is validated
+- **THEN** topic intent lines do not contain fixed city names from configured groups or old single-city prompts
 
 ### Requirement: Gemini reply generation
 The system SHALL generate replies by sending system instruction, rendered history, and user message to the configured Gemini model.
@@ -61,6 +73,10 @@ The system SHALL generate replies by sending system instruction, rendered histor
 #### Scenario: Start topic request includes topic
 - **WHEN** `start_topic` is called
 - **THEN** the Gemini request contents include `Тема разговора: <topic>`
+
+#### Scenario: Start topic adapts intent to group city
+- **WHEN** scheduled start-topic generation is composed for a group
+- **THEN** the system instruction includes rules to transform the shared topic intent into one natural question for that group's city and not mention another city
 
 ### Requirement: Gemini resilience
 The system SHALL retry temporary Gemini failures and optionally switch to a fallback model.
@@ -87,4 +103,3 @@ The system SHALL avoid exposing proxy credentials in Gemini logs.
 #### Scenario: Proxy description redacts credentials
 - **WHEN** a proxy URL with credentials is configured
 - **THEN** log-facing proxy description contains only scheme, host, and port
-
