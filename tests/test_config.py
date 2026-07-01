@@ -15,6 +15,12 @@ BASE_ENV = {
 }
 
 
+@pytest.fixture(autouse=True)
+def isolate_cwd(tmp_path, monkeypatch):
+    """Изолирует cwd, чтобы тесты не зависели от локального config/settings.toml."""
+    monkeypatch.chdir(tmp_path)
+
+
 def test_settings_loads_required_fields():
     """Проверяет, что обязательные поля загружаются из переменных окружения."""
     with patch.dict(os.environ, BASE_ENV, clear=True):

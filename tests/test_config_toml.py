@@ -24,84 +24,110 @@ def write_settings(tmp_path: Path, content: str) -> Path:
     return path
 
 
-def test_settings_loads_non_secret_values_from_toml(tmp_path):
-    """Проверяет загрузку несекретных параметров из TOML."""
+def write_default_settings(tmp_path: Path, content: str) -> Path:
+    """Создаёт встроенный config/settings.toml для проверки default path."""
+    path = tmp_path / "config" / "settings.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content.strip(), encoding="utf-8")
+    return path
+
+
+def test_settings_loads_non_secret_values_from_minimal_toml(tmp_path):
+    """Проверяет загрузку минимального TOML-контракта и кодовых defaults."""
     settings_path = write_settings(
         tmp_path,
         """
-        [app]
-        mode = "swarm"
+        [[groups]]
+        id = "danang"
+        city = "Da Nang"
+        group_chat_id = -100111
 
-        [storage]
-        db_path = ":memory:"
-
-        [prompts]
-        base_dir = "custom/prompts"
-        topics_path = "custom/topics.md"
-        bot_profiles_dir = "custom/bots"
-
-        [gemini]
-        model = "gemini-test"
-        fallback_model = "gemini-lite"
-        temperature = 1.2
-        max_retries = 4
-        retry_backoff_seconds = 2.0
-        retry_jitter_seconds = 0.4
-        request_timeout_seconds = 12.5
-
-        [logging]
-        level = "DEBUG"
+        [[swarm.bots]]
+        id = "anna"
+        session_env = "SESSION_STRING_ANNA"
+        persona_file = "anna.md"
         """,
     )
 
-    settings = Settings(**BASE_SECRETS, settings_path=str(settings_path))
+    with patch.dict("os.environ", {"SESSION_STRING_ANNA": "anna-session"}, clear=False):
+        settings = Settings(
+            **BASE_SECRETS,
+            settings_path=str(settings_path),
+        )
 
     assert settings.mode == "swarm"
-    assert settings.db_path == ":memory:"
-    assert settings.topics_path == "custom/topics.md"
-    assert settings.prompts_dir == "custom/prompts"
-    assert settings.bot_profiles_dir == "custom/bots"
-    assert settings.gemini_model == "gemini-test"
-    assert settings.gemini_fallback_model == "gemini-lite"
-    assert settings.gemini_temperature == 1.2
-    assert settings.gemini_max_retries == 4
+    assert settings.db_path == "data/history.db"
+    assert settings.topics_path == "ai/prompts/topics.md"
+    assert settings.prompts_dir == "ai/prompts"
+    assert settings.bot_profiles_dir == "ai/prompts/bots"
+    assert settings.gemini_model == "gemini-2.5-flash"
+    assert settings.gemini_fallback_model == "gemini-2.5-flash-lite"
+    assert settings.gemini_temperature == 0.9
+    assert settings.gemini_max_retries == 3
     assert settings.group_chat_id == -100123
     assert settings.group_target == "@group"
-    assert settings.log_level == "DEBUG"
+    assert settings.log_level == "INFO"
 
 
-def test_settings_with_secret_overrides_ignores_local_toml_without_settings_path(tmp_path, monkeypatch):
-    """Проверяет изоляцию тестовых overrides от локального settings.toml."""
-    write_settings(
+def test_settings_uses_builtin_default_settings_path(tmp_path, monkeypatch):
+    """Проверяет built-in default path config/settings.toml без SETTINGS_PATH."""
+    write_default_settings(
         tmp_path,
         """
         [gemini]
-        model = "gemini-local-toml"
+        model = "gemini-default-path"
+
+        [[groups]]
+        id = "danang"
+        city = "Da Nang"
+        group_chat_id = -100111
+
+        [[swarm.bots]]
+        id = "anna"
+        session_env = "SESSION_STRING_ANNA"
+        persona_file = "anna.md"
         """,
     )
     monkeypatch.chdir(tmp_path)
 
-    settings = Settings(**BASE_SECRETS)
+    env = {
+        "API_ID": "12345678",
+        "API_HASH": "test_hash",
+        "GEMINI_API_KEY": "test_key",
+        "SESSION_STRING_ANNA": "anna-session",
+    }
 
-    assert settings.gemini_model == "gemini-2.5-flash"
+    with patch.dict("os.environ", env, clear=True):
+        settings = Settings(_env_file=None)
+
+    assert settings.settings_path == "config/settings.toml"
+    assert settings.gemini_model == "gemini-default-path"
 
 
 def test_settings_path_can_come_from_env(tmp_path):
-    """Проверяет, что SETTINGS_PATH выбирает TOML-файл."""
+    """Проверяет, что env override SETTINGS_PATH всё ещё поддерживается."""
     settings_path = write_settings(
         tmp_path,
         """
-        [app]
-        mode = "swarm"
-
         [gemini]
-        model = "gemini-from-env"
+        model = "gemini-local-toml"
+
+        [[groups]]
+        id = "danang"
+        city = "Da Nang"
+        group_chat_id = -100111
+
+        [[swarm.bots]]
+        id = "anna"
+        session_env = "SESSION_STRING_ANNA"
+        persona_file = "anna.md"
         """,
     )
     env = {
         "API_ID": "12345678",
         "API_HASH": "test_hash",
         "GEMINI_API_KEY": "test_key",
+        "SESSION_STRING_ANNA": "anna-session",
         "SETTINGS_PATH": str(settings_path),
     }
 
@@ -109,7 +135,7 @@ def test_settings_path_can_come_from_env(tmp_path):
         settings = Settings(_env_file=None)
 
     assert settings.mode == "swarm"
-    assert settings.gemini_model == "gemini-from-env"
+    assert settings.gemini_model == "gemini-local-toml"
 
 
 def test_settings_rejects_group_target_in_toml(tmp_path):
@@ -132,9 +158,6 @@ def test_settings_rejects_target_section_from_toml(tmp_path):
     settings_path = write_settings(
         tmp_path,
         """
-        [app]
-        mode = "swarm"
-
         [target]
         group_chat_id = -100987654321
         group_target = "@swarm_group"
@@ -170,9 +193,6 @@ def test_settings_reads_multi_group_config_and_schedule_overrides(tmp_path):
     settings_path = write_settings(
         tmp_path,
         """
-        [app]
-        mode = "swarm"
-
         [swarm.schedule]
         active_windows_utc = ["10-12"]
         initiator_offset_minutes = [1, 2]
@@ -379,9 +399,6 @@ def test_settings_reads_swarm_sessions_from_env_file(tmp_path):
     settings_path = write_settings(
         tmp_path,
         """
-        [app]
-        mode = "swarm"
-
         [[swarm.bots]]
         id = "sofia"
         session_env = "SESSION_STRING_SOFIA"
@@ -414,17 +431,6 @@ def test_settings_loads_swarm_mode_and_bots(tmp_path):
     settings_path = write_settings(
         tmp_path,
         """
-        [app]
-        mode = "swarm"
-
-        [storage]
-        db_path = ":memory:"
-
-        [prompts]
-        base_dir = "custom/prompts"
-        topics_path = "custom/topics.md"
-        bot_profiles_dir = "custom/bots"
-
         [swarm.schedule]
         active_windows_utc = ["10-11", "16-18"]
         initiator_offset_minutes = [0, 30]
@@ -465,9 +471,9 @@ def test_settings_loads_swarm_mode_and_bots(tmp_path):
         settings = Settings(_env_file=None)
 
     assert settings.mode == "swarm"
-    assert settings.db_path == ":memory:"
-    assert settings.prompts_dir == "custom/prompts"
-    assert settings.topics_path == "custom/topics.md"
+    assert settings.db_path == "data/history.db"
+    assert settings.prompts_dir == "ai/prompts"
+    assert settings.topics_path == "ai/prompts/topics.md"
     assert settings.swarm_schedule_active_windows_utc == ["10-11", "16-18"]
     assert settings.swarm_initiator_offset_minutes == (0, 30)
     assert settings.swarm_responder_delay_minutes == (3, 10)
@@ -489,9 +495,6 @@ def test_settings_rejects_invalid_active_windows(tmp_path, window_value: str):
     settings_path = write_settings(
         tmp_path,
         f"""
-        [app]
-        mode = "swarm"
-
         [swarm.schedule]
         active_windows_utc = {window_value}
 
@@ -521,9 +524,6 @@ def test_settings_rejects_invalid_minute_ranges(tmp_path, value: str):
     settings_path = write_settings(
         tmp_path,
         f"""
-        [app]
-        mode = "swarm"
-
         [swarm.schedule]
         responder_delay_minutes = {value}
 
@@ -552,9 +552,6 @@ def test_settings_rejects_duplicate_swarm_bot_ids(tmp_path):
     settings_path = write_settings(
         tmp_path,
         """
-        [app]
-        mode = "swarm"
-
         [[swarm.bots]]
         id = "anna"
         session_env = "SESSION_STRING_ANNA"
@@ -586,9 +583,6 @@ def test_settings_rejects_missing_swarm_session_env(tmp_path):
     settings_path = write_settings(
         tmp_path,
         """
-        [app]
-        mode = "swarm"
-
         [[swarm.bots]]
         id = "anna"
         session_env = "SESSION_STRING_ANNA"
@@ -611,6 +605,9 @@ def test_settings_rejects_missing_swarm_session_env(tmp_path):
 @pytest.mark.parametrize(
     ("toml_fragment", "key_name"),
     [
+        ("[app]\nmode = \"swarm\"", "app"),
+        ("[storage]\ndb_path = \":memory:\"", "storage"),
+        ("[prompts]\nbase_dir = \"custom/prompts\"", "prompts"),
         ("[paths]\nreply_" + "rules_path = \"custom/rules.md\"", "paths"),
         ("[telegram]\nwhite" + "list_user_ids = [111, 222]", "telegram"),
         ("[swarm]\nenabled = true", "enabled"),
@@ -625,10 +622,12 @@ def test_settings_rejects_removed_toml_keys(tmp_path, toml_fragment: str, key_na
     settings_path = write_settings(
         tmp_path,
         f"""
-        [app]
-        mode = "swarm"
-
         {toml_fragment}
+
+        [[groups]]
+        id = "danang"
+        city = "Da Nang"
+        group_chat_id = -100111
 
         [[swarm.bots]]
         id = "anna"
@@ -656,9 +655,6 @@ def test_settings_rejects_persona_file_outside_profiles_dir(tmp_path, persona_fi
     settings_path = write_settings(
         tmp_path,
         f"""
-        [app]
-        mode = "swarm"
-
         [[swarm.bots]]
         id = "anna"
         session_env = "SESSION_STRING_ANNA"

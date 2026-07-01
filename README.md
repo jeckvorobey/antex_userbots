@@ -73,7 +73,6 @@ cp .env.example .env
 API_ID=12345678
 API_HASH=your_telegram_api_hash
 GEMINI_API_KEY=your_gemini_api_key
-SETTINGS_PATH=config/settings.toml
 SESSION_STRING_ANNA=...
 SESSION_STRING_MIKE=...
 ```
@@ -81,6 +80,7 @@ SESSION_STRING_MIKE=...
 Важно:
 - имя переменной `SESSION_STRING_*` должно совпадать с `session_env` у бота в TOML;
 - `SESSION_STRING_*` нельзя коммитить и нельзя логировать.
+- `config/settings.toml` подхватывается автоматически; `SETTINGS_PATH` больше не нужен для обычного запуска.
 
 ### 3. Создать файл настроек
 
@@ -93,21 +93,8 @@ cp config/settings.example.toml config/settings.toml
 Минимальный пример:
 
 ```toml
-[app]
-mode = "swarm"
-
-[storage]
-db_path = "data/history.db"
-
-[prompts]
-base_dir = "ai/prompts"
-topics_path = "ai/prompts/topics.md"
-bot_profiles_dir = "ai/prompts/bots"
-
 [gemini]
 model = "gemini-2.5-flash"
-fallback_model = "gemini-2.5-flash-lite"
-temperature = 0.9
 
 [logging]
 level = "INFO"
@@ -158,11 +145,11 @@ temperature = 0.8
 
 На что обратить внимание:
 - группы задаются через `[[groups]]`; старый `[target]` в TOML больше не поддерживается;
+- старые секции `[app]`, `[storage]` и `[prompts]` больше не входят в публичный TOML-контракт;
 - `group.id` должен быть уникальным;
 - каждая группа должна иметь `group_chat_id` или `group_target`;
 - если у группы есть `[groups.schedule]`, неуказанные поля наследуются из `[swarm.schedule]`;
-- `db_path` это путь к SQLite-файлу;
-- `bot_profiles_dir` это папка с persona-файлами;
+- `data/history.db`, `ai/prompts/`, `ai/prompts/topics.md` и `ai/prompts/bots/` теперь задаются кодовыми defaults;
 - каждый `persona_file` должен реально существовать;
 - для каждого `session_env` должна быть переменная в `.env`;
 - реальные файлы `ai/prompts/**/*.md` являются частью этого production-инстанса и хранятся в git;
@@ -181,16 +168,9 @@ Runtime читает реальные файлы:
 
 ### 5. Подготовить persona-файлы
 
-Проект ожидает persona-файлы в директории, указанной в `bot_profiles_dir`.
+Проект ожидает persona-файлы в `ai/prompts/bots`, если ты не используешь внутренний override пути.
 
-Если у тебя в конфиге:
-
-```toml
-[prompts]
-bot_profiles_dir = "ai/prompts/bots"
-```
-
-то должны существовать файлы вроде:
+Должны существовать файлы вроде:
 - `ai/prompts/bots/anna.md`
 - `ai/prompts/bots/mike.md`
 
@@ -242,7 +222,7 @@ uv run python run.py
 
 ## Reload групп
 
-Во время работы scheduler проверяет `settings.toml` по `mtime`. Если файл изменился:
+Во время работы scheduler проверяет `config/settings.toml` по `mtime`. Если файл изменился:
 - добавленные или включённые группы попадут в следующие scheduler ticks;
 - выключенные группы перестанут получать scheduled exchanges и addressed replies;
 - боты не перезапускаются, изменения списка ботов и `SESSION_STRING_*` по-прежнему требуют restart.
@@ -333,6 +313,16 @@ uv run pytest tests/test_reply_router.py
 - persona каждого бота должна загружаться из `persona_file`;
 - все сообщения должны сохраняться в БД;
 - секреты из `.env` нельзя публиковать.
+
+## Миграция старого конфига
+
+Если у тебя старый `config/settings.toml`, убери из него:
+- `[app]`
+- `[storage]`
+- `[prompts]`
+- `SETTINGS_PATH` из `.env`
+
+После этого проверь, что в файле остались только реально нужные override-секции вроде `[gemini]`, `[logging]`, `[swarm.schedule]`, `[swarm.orchestrator]`, `[[groups]]` и `[[swarm.bots]]`.
 
 ## Коротко: минимальный путь до первого запуска
 

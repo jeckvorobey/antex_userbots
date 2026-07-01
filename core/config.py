@@ -75,33 +75,13 @@ class Secrets(BaseSettings):
     proxy_url: OptionalStr = None
     group_chat_id: OptionalChatId = None
     group_target: OptionalStr = None
-    settings_path: str = "settings.toml"
+    settings_path: OptionalStr = None
 
 
 class _StrictModel(BaseModel):
     """Базовая модель TOML-секций с запретом неизвестных ключей."""
 
     model_config = ConfigDict(extra="forbid")
-
-
-class AppModeConfig(_StrictModel):
-    """Секция режима приложения."""
-
-    mode: Literal["swarm"] = "swarm"
-
-
-class StorageConfig(_StrictModel):
-    """Пути к хранилищу."""
-
-    db_path: str = "data/history.db"
-
-
-class PromptsConfig(_StrictModel):
-    """Пути к промтам и профилям ботов."""
-
-    base_dir: str = "ai/prompts"
-    topics_path: str = "ai/prompts/topics.md"
-    bot_profiles_dir: str = "ai/prompts/bots"
 
 
 class GeminiConfig(_StrictModel):
@@ -280,10 +260,7 @@ class SwarmConfig(_StrictModel):
 class AppConfig(_StrictModel):
     """Полная несекретная TOML-конфигурация."""
 
-    app: AppModeConfig = Field(default_factory=AppModeConfig)
-    storage: StorageConfig = Field(default_factory=StorageConfig)
     groups: list[GroupConfig] = Field(default_factory=list)
-    prompts: PromptsConfig = Field(default_factory=PromptsConfig)
     gemini: GeminiConfig = Field(default_factory=GeminiConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     swarm: SwarmConfig = Field(default_factory=SwarmConfig)
@@ -323,6 +300,12 @@ def _validate_relative_persona_file(value: str) -> str:
 
 
 _UNSET = object()
+DEFAULT_SETTINGS_PATH = "config/settings.toml"
+DEFAULT_MODE = "swarm"
+DEFAULT_DB_PATH = "data/history.db"
+DEFAULT_PROMPTS_DIR = "ai/prompts"
+DEFAULT_TOPICS_PATH = "ai/prompts/topics.md"
+DEFAULT_BOT_PROFILES_DIR = "ai/prompts/bots"
 
 
 def _load_toml_config(settings_path: str | Path | None, *, require_exists: bool = False) -> AppConfig:
@@ -376,7 +359,7 @@ class Settings:
             for key in secret_keys:
                 setattr(self, key, secret_overrides.get(key, getattr(secrets, key)))
             if settings_path_override is _UNSET:
-                settings_path = getattr(secrets, "settings_path", "settings.toml")
+                settings_path = getattr(secrets, "settings_path", None) or DEFAULT_SETTINGS_PATH
                 settings_path_required = "settings_path" in secrets.model_fields_set
             else:
                 settings_path = settings_path_override
@@ -385,14 +368,14 @@ class Settings:
             for key in secret_keys:
                 setattr(self, key, secret_overrides.get(key))
             if settings_path_override is _UNSET:
-                settings_path = os.environ.get("SETTINGS_PATH")
-                settings_path_required = settings_path is not None
+                settings_path = os.environ.get("SETTINGS_PATH") or DEFAULT_SETTINGS_PATH
+                settings_path_required = "SETTINGS_PATH" in os.environ
             else:
                 settings_path = settings_path_override
                 settings_path_required = settings_path is not None
 
         app_config = _load_toml_config(settings_path, require_exists=settings_path_required)
-        self.settings_path = str(settings_path or "settings.toml")
+        self.settings_path = str(settings_path or DEFAULT_SETTINGS_PATH)
         self._settings_path_required = settings_path_required
         self._env_file = _env_file
         self._apply_app_config(app_config)
@@ -404,12 +387,12 @@ class Settings:
 
     def _apply_app_config(self, config: AppConfig) -> None:
         """Пробрасывает секции TOML в публичные поля Settings."""
-        self.mode = config.app.mode
+        self.mode = DEFAULT_MODE
 
-        self.db_path = config.storage.db_path
-        self.topics_path = config.prompts.topics_path
-        self.prompts_dir = config.prompts.base_dir
-        self.bot_profiles_dir = config.prompts.bot_profiles_dir
+        self.db_path = DEFAULT_DB_PATH
+        self.topics_path = DEFAULT_TOPICS_PATH
+        self.prompts_dir = DEFAULT_PROMPTS_DIR
+        self.bot_profiles_dir = DEFAULT_BOT_PROFILES_DIR
 
         self.gemini_model = config.gemini.model
         self.gemini_fallback_model = config.gemini.fallback_model
