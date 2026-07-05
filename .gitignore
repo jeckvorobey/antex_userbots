@@ -82,5 +82,5 @@ tg_user_info/*
 Nachang_group_2026-04-14/
 PLAN.md
 config/settings.toml
-
+config/settings.prod.toml
 # Prompt files are part of this single production instance.
