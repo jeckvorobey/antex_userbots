@@ -34,7 +34,7 @@ The system SHALL create at most one scheduled exchange record per group and comp
 The system SHALL use persisted group-scoped exchange state to reduce repeated scheduled participants, topics, and question text.
 
 #### Scenario: Recent bots are excluded when possible
-- **WHEN** at least two candidates remain after excluding the last three scheduled bot ids for the group
+- **WHEN** at least two candidates remain after excluding the last four scheduled bot ids for the group
 - **THEN** the chosen initiator and responder come from the remaining candidates
 
 #### Scenario: Recent bot filter relaxes when pool is small

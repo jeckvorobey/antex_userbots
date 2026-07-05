@@ -63,10 +63,10 @@ async def test_orchestrator_skips_exchange_outside_active_windows():
 
 @pytest.mark.asyncio
 async def test_orchestrator_avoids_recent_bots_and_last_topics():
-    """Проверяет anti-repeat по последним ботам и последним темам."""
+    """Проверяет anti-repeat по последним 4 ботам и последним темам."""
     exchange_store = SimpleNamespace(
         get_due_started_exchange=AsyncMock(return_value=None),
-        get_recent_bot_ids=AsyncMock(return_value=["anna", "mike", "john"]),
+        get_recent_bot_ids=AsyncMock(return_value=["anna", "mike", "john", "kate"]),
         get_recent_topic_keys_by_limit=AsyncMock(return_value={"где есть суп"}),
         get_recent_questions=AsyncMock(return_value=[]),
     )
@@ -78,6 +78,7 @@ async def test_orchestrator_avoids_recent_bots_and_last_topics():
             SwarmBotProfile(id="john", session_string="john", persona_file="john.md", telegram_user_id=303),
             SwarmBotProfile(id="kate", session_string="kate", persona_file="kate.md", telegram_user_id=404),
             SwarmBotProfile(id="lena", session_string="lena", persona_file="lena.md", telegram_user_id=505),
+            SwarmBotProfile(id="max", session_string="max", persona_file="max.md", telegram_user_id=606),
         ],
         manager=SimpleNamespace(),
         topic_selector=topic_selector,
@@ -89,16 +90,16 @@ async def test_orchestrator_avoids_recent_bots_and_last_topics():
 
     decision = await orchestrator._build_exchange_decision()
 
-    assert {decision.initiator.id, decision.responder.id} == {"kate", "lena"}
+    assert {decision.initiator.id, decision.responder.id} == {"lena", "max"}
     assert decision.topic == "Куда сходить вечером"
 
 
 @pytest.mark.asyncio
 async def test_orchestrator_relaxes_recent_bot_filter_when_pool_is_too_small():
-    """Проверяет fallback, если после исключения последних 3 ботов не хватает пары."""
+    """Проверяет fallback, если после исключения последних 4 ботов не хватает пары."""
     exchange_store = SimpleNamespace(
         get_due_started_exchange=AsyncMock(return_value=None),
-        get_recent_bot_ids=AsyncMock(return_value=["anna", "mike", "john"]),
+        get_recent_bot_ids=AsyncMock(return_value=["anna", "mike", "john", "kate"]),
         get_recent_topic_keys_by_limit=AsyncMock(return_value=set()),
         get_recent_questions=AsyncMock(return_value=[]),
     )
@@ -107,6 +108,7 @@ async def test_orchestrator_relaxes_recent_bot_filter_when_pool_is_too_small():
             SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
             SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md", telegram_user_id=202),
             SwarmBotProfile(id="john", session_string="john", persona_file="john.md", telegram_user_id=303),
+            SwarmBotProfile(id="kate", session_string="kate", persona_file="kate.md", telegram_user_id=404),
         ],
         manager=SimpleNamespace(),
         topic_selector=SimpleNamespace(topics=["Тема"]),
@@ -119,6 +121,36 @@ async def test_orchestrator_relaxes_recent_bot_filter_when_pool_is_too_small():
     decision = await orchestrator._build_exchange_decision()
 
     assert decision.initiator.id != decision.responder.id
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_passes_group_scope_to_recent_bot_ids():
+    """Проверяет что group_id и group_chat_id передаются в get_recent_bot_ids."""
+    get_recent_bot_ids = AsyncMock(return_value=[])
+    exchange_store = SimpleNamespace(
+        get_due_started_exchange=AsyncMock(return_value=None),
+        get_recent_bot_ids=get_recent_bot_ids,
+        get_recent_topic_keys_by_limit=AsyncMock(return_value=set()),
+        get_recent_questions=AsyncMock(return_value=[]),
+    )
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+            SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md", telegram_user_id=202),
+        ],
+        manager=SimpleNamespace(),
+        topic_selector=SimpleNamespace(topics=["Тема"]),
+        prompt_composer=SimpleNamespace(),
+        gemini_client=SimpleNamespace(),
+        history=SimpleNamespace(),
+        exchange_store=exchange_store,
+        group_id="danang",
+        group_chat_id=-100111,
+    )
+
+    await orchestrator._build_exchange_decision()
+
+    get_recent_bot_ids.assert_awaited_once_with(4, group_id="danang", group_chat_id=-100111)
 
 
 @pytest.mark.asyncio

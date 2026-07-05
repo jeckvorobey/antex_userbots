@@ -16,7 +16,7 @@ from userbot.scheduler import is_within_windows_utc, pick_random_datetime, pick_
 
 logger = logging.getLogger(__name__)
 
-RECENT_BOT_COOLDOWN_LIMIT = 3
+RECENT_BOT_COOLDOWN_LIMIT = 4
 RECENT_TOPIC_LIMIT = 10
 RECENT_INITIATOR_HISTORY_SCAN_LIMIT = 50
 IMPORTANT_SERVICE_KIND = "important_service"
