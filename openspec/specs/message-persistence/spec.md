@@ -121,3 +121,81 @@ The system SHALL save scheduled messages under the real resolved Telegram group 
 #### Scenario: Scheduled message uses resolved chat id
 - **WHEN** an orchestrator sends scheduled initiator or responder text
 - **THEN** message history stores `chat_id` equal to the resolved Telegram group id, not a global fallback
+
+### Requirement: Important service exchange metadata
+The system SHALL persist whether a scheduled exchange is ordinary or important-service and SHALL persist the important-service scenario key for important-service exchanges.
+
+#### Scenario: Important service exchange is created
+- **WHEN** the orchestrator creates an important-service exchange
+- **THEN** `scheduled_exchanges` stores `exchange_kind = important_service` and the selected `important_scenario`
+
+#### Scenario: Ordinary exchange is created
+- **WHEN** the orchestrator creates an ordinary scheduled exchange
+- **THEN** `scheduled_exchanges` stores or treats the exchange as `exchange_kind = regular` with no important-service scenario
+
+#### Scenario: Legacy rows remain regular
+- **WHEN** `ExchangeStore.init_db` migrates an existing database whose `scheduled_exchanges` rows do not have important-service metadata
+- **THEN** those rows are treated as ordinary scheduled exchanges
+
+### Requirement: Important service state queries
+The system SHALL expose group-scoped persisted queries for important-service cadence and scenario rotation.
+
+#### Scenario: Latest important service exchange is returned by group
+- **WHEN** important-service exchanges exist for multiple groups
+- **THEN** querying the latest important-service exchange for `danang` returns only `danang` state
+
+#### Scenario: Recent important service date is available
+- **WHEN** a group has a started or completed important-service exchange
+- **THEN** the store can return the latest important-service timestamp used for UTC calendar-day cadence checks
+
+#### Scenario: Latest scenario drives rotation
+- **WHEN** a group has a latest important-service exchange with scenario `booking_airbnb`
+- **THEN** the store can return `booking_airbnb` so the orchestrator can select `exchange_usdt`
+
+### Requirement: Important service indexes
+The system SHALL create idempotent indexes that support group-scoped latest important-service exchange lookup.
+
+#### Scenario: Important service indexes are created
+- **WHEN** `ExchangeStore.init_db` runs
+- **THEN** indexes for group, chat, exchange kind, important scenario, and recent lifecycle timestamp lookup exist without duplicate-index failure
+
+### Requirement: Exchange activity sort key
+The system SHALL persist a `last_activity_at` timestamp on scheduled exchanges for recent and latest exchange lookups.
+
+#### Scenario: New exchange stores activity timestamp
+- **WHEN** `ExchangeStore.create_exchange` creates a planned exchange
+- **THEN** the exchange has a non-empty `last_activity_at`
+
+#### Scenario: Started exchange updates activity timestamp
+- **WHEN** `ExchangeStore.mark_exchange_started` marks an exchange as started
+- **THEN** `last_activity_at` equals the stored `started_at` value
+
+#### Scenario: Completed exchange updates activity timestamp
+- **WHEN** `ExchangeStore.mark_exchange_completed` marks an exchange as completed
+- **THEN** `last_activity_at` equals the stored `completed_at` value
+
+#### Scenario: Legacy exchange rows are backfilled
+- **WHEN** `ExchangeStore.init_db` migrates a legacy `scheduled_exchanges` table with lifecycle timestamps but no `last_activity_at`
+- **THEN** `last_activity_at` is filled from `completed_at`, `started_at`, or `created_at` in that priority order
+
+### Requirement: Index-friendly exchange hot-path lookups
+The system SHALL use persisted UTC timestamp strings and `last_activity_at` ordering for due, recent, and latest scheduled exchange queries.
+
+#### Scenario: Due responder compares stored timestamps directly
+- **WHEN** `get_due_started_exchange` checks due responder rows
+- **THEN** it compares `responder_scheduled_at` to the serialized current UTC timestamp without wrapping the column in a SQL timestamp function
+
+#### Scenario: Recent question context follows activity order
+- **WHEN** recent scheduled questions are requested for a group
+- **THEN** the returned rows are ordered by `last_activity_at` descending
+
+#### Scenario: Latest important service exchange follows activity order
+- **WHEN** latest important-service exchange state is requested for a group
+- **THEN** the returned row is selected by `last_activity_at` descending
+
+### Requirement: Activity indexes
+The system SHALL create idempotent indexes that support group-scoped and chat-scoped recent exchange activity lookups.
+
+#### Scenario: Activity indexes are created
+- **WHEN** `ExchangeStore.init_db` runs
+- **THEN** indexes for group/chat status and `last_activity_at` lookup exist without duplicate-index failure

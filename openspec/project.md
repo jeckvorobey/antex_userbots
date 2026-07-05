@@ -56,7 +56,7 @@ APScheduler tick
   -> ExchangeStore group-scoped due responder check
   -> group active UTC window and human-activity checks
   -> ExchangeStore group-scoped window check
-  -> shared topic intent selection
+  -> important-service cadence/rotation check or shared topic intent selection
   -> city-aware start-topic adaptation
   -> bot/topic/question anti-repeat
   -> PromptComposer start_topic/reply prompts
@@ -73,7 +73,9 @@ Non-secret settings are loaded from TOML through strict pydantic models. Support
 
 ## Data Storage
 
-SQLite is the only persistent storage. `MessageHistory` manages the `messages` table using Telegram `chat_id` as group scope. `ExchangeStore` manages the `scheduled_exchanges` table and persisted group-scoped anti-repeat state for scheduled exchanges, including `group_id` and `group_chat_id`.
+SQLite is the only persistent storage. `MessageHistory` manages the `messages` table using Telegram `chat_id` as group scope. `ExchangeStore` manages the `scheduled_exchanges` table and persisted group-scoped anti-repeat state for scheduled exchanges, including `group_id`, `group_chat_id`, and `last_activity_at` as the indexed sort key for recent/latest exchange lookups.
+
+Important-service exchanges are stored in the same `scheduled_exchanges` lifecycle as ordinary exchanges with `exchange_kind = important_service` and an `important_scenario` key. Their cadence is evaluated per group by UTC calendar days: after a group receives an important-service exchange on day N, the next one for that group is eligible no earlier than day N+3. The scenario cycle is `exchange_rub` -> `booking_airbnb` -> `exchange_usdt` -> `booking_booking`, and important-service prompt contexts use `important_service_question` / `important_service_answer` markers so only important answers are required to mention `@tt_exchenge_bot`.
 
 ## Development Rules
 

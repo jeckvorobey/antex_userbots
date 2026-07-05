@@ -90,3 +90,6 @@ class ExchangeDecision:
     topic: str
     topic_key: str
     recent_questions: list[str] = field(default_factory=list)
+    exchange_kind: str = "regular"
+    important_scenario: str | None = None
+    important_answer_intent: str | None = None

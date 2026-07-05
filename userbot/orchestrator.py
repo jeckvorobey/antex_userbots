@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import random
+from dataclasses import dataclass
+from datetime import date
 from datetime import UTC, datetime, timedelta
 from typing import Any, Callable
 
@@ -16,6 +18,42 @@ logger = logging.getLogger(__name__)
 
 RECENT_BOT_COOLDOWN_LIMIT = 3
 RECENT_TOPIC_LIMIT = 10
+IMPORTANT_SERVICE_KIND = "important_service"
+REGULAR_EXCHANGE_KIND = "regular"
+IMPORTANT_SERVICE_CONTACT = "@tt_exchenge_bot"
+
+
+@dataclass(frozen=True, slots=True)
+class ImportantServiceScenario:
+    """Описание important-service сценария без готового финального текста."""
+
+    key: str
+    question_intent: str
+    answer_intent: str
+
+
+IMPORTANT_SERVICE_SCENARIOS: tuple[ImportantServiceScenario, ...] = (
+    ImportantServiceScenario(
+        key="exchange_rub",
+        question_intent="Где можно обменять безналичные рубли?",
+        answer_intent=f"Разговорно посоветуй обратиться в {IMPORTANT_SERVICE_CONTACT} для обмена безналичных рублей.",
+    ),
+    ImportantServiceScenario(
+        key="booking_airbnb",
+        question_intent="Как забронировать и оплатить Airbnb рублями или USDT?",
+        answer_intent=f"Разговорно посоветуй обратиться в {IMPORTANT_SERVICE_CONTACT} для помощи с оплатой Airbnb рублями или USDT.",
+    ),
+    ImportantServiceScenario(
+        key="exchange_usdt",
+        question_intent="Где можно обменять безналичный USDT?",
+        answer_intent=f"Разговорно посоветуй обратиться в {IMPORTANT_SERVICE_CONTACT} для обмена безналичного USDT.",
+    ),
+    ImportantServiceScenario(
+        key="booking_booking",
+        question_intent="Как забронировать и оплатить Booking рублями или USDT?",
+        answer_intent=f"Разговорно посоветуй обратиться в {IMPORTANT_SERVICE_CONTACT} для помощи с оплатой Booking рублями или USDT.",
+    ),
+)
 
 
 class SwarmOrchestrator:
@@ -113,12 +151,14 @@ class SwarmOrchestrator:
             )
             return False
 
-        decision = await self._build_exchange_decision()
+        decision = self._normalize_exchange_decision(await self._build_exchange_decision_for_window(now))
         logger.info(
-            "orchestrator: selected pair initiator=%s responder=%s topic_key=%s",
+            "orchestrator: selected pair initiator=%s responder=%s topic_key=%s kind=%s scenario=%s",
             decision.initiator.id,
             decision.responder.id,
             decision.topic_key,
+            decision.exchange_kind,
+            decision.important_scenario,
         )
         initiator_scheduled_at = self._pick_initiator_due_at(window_start=window_start, window_end=window_end)
         exchange_id = await self.exchange_store.create_exchange(
@@ -130,6 +170,8 @@ class SwarmOrchestrator:
             topic_key=decision.topic_key,
             window_key=window_key,
             initiator_scheduled_at=initiator_scheduled_at,
+            exchange_kind=decision.exchange_kind,
+            important_scenario=decision.important_scenario,
         )
         planned_exchange = {
             "exchange_id": exchange_id,
@@ -140,8 +182,17 @@ class SwarmOrchestrator:
             "topic": decision.topic,
             "window_key": window_key,
             "initiator_scheduled_at": self._serialize_timestamp(initiator_scheduled_at),
+            "exchange_kind": decision.exchange_kind,
+            "important_scenario": decision.important_scenario,
         }
         return await self._run_due_planned_exchange(exchange=planned_exchange, now=now)
+
+    async def _build_exchange_decision_for_window(self, now: datetime) -> ExchangeDecision:
+        """Выбирает important-service exchange, если он due, иначе обычный exchange."""
+        important_decision = await self._build_important_service_decision_if_due(now)
+        if important_decision is not None:
+            return important_decision
+        return await self._build_exchange_decision()
 
     async def _build_exchange_decision(self) -> ExchangeDecision:
         """Выбирает пару ботов и тему с persisted anti-repeat."""
@@ -165,6 +216,48 @@ class SwarmOrchestrator:
             topic=topic,
             topic_key=normalize_signature(topic),
             recent_questions=recent_questions,
+        )
+
+    async def _build_important_service_decision_if_due(self, now: datetime) -> ExchangeDecision | None:
+        """Возвращает important-service decision, если группа достигла cadence."""
+        latest_getter = getattr(self.exchange_store, "get_latest_important_service_exchange", None)
+        if not callable(latest_getter):
+            return None
+
+        latest_exchange = await latest_getter(group_id=self.group_id, group_chat_id=self.group_chat_id)
+        if not self._important_service_is_due(latest_exchange, now):
+            logger.info("orchestrator: important-service exchange is not due group_id=%s", self.group_id)
+            return None
+
+        scenario = self._next_important_service_scenario(
+            latest_exchange.get("important_scenario") if latest_exchange is not None else None
+        )
+        recent_bot_ids = await self.exchange_store.get_recent_bot_ids(
+            RECENT_BOT_COOLDOWN_LIMIT,
+            group_id=self.group_id,
+            group_chat_id=self.group_chat_id,
+        )
+        candidates = self._pick_bot_candidates(recent_bot_ids)
+        chosen_initiator, chosen_responder = random.sample(candidates, 2)
+        recent_questions = await self.exchange_store.get_recent_questions(
+            since=self.question_repeat_window,
+            group_id=self.group_id,
+            group_chat_id=self.group_chat_id,
+        )
+        logger.info(
+            "orchestrator: important-service selected scenario=%s group_id=%s",
+            scenario.key,
+            self.group_id,
+        )
+        return ExchangeDecision(
+            initiator=chosen_initiator,
+            responder=chosen_responder,
+            topic=scenario.question_intent,
+            topic_key=normalize_signature(f"important_service:{scenario.key}"),
+            recent_questions=recent_questions,
+            exchange_kind=IMPORTANT_SERVICE_KIND,
+            important_scenario=scenario.key,
+            important_answer_intent=scenario.answer_intent,
         )
 
     def _pick_bot_candidates(self, recent_bot_ids: list[str]) -> list[SwarmBotProfile]:
@@ -195,7 +288,17 @@ class SwarmOrchestrator:
             logger.info("orchestrator: fallback topic pick via selector topic=%s", topic)
             return topic
 
-        fresh_topics = [topic for topic in available_topics if normalize_signature(topic) not in recent_topic_keys]
+        topic_key_getter = getattr(self.topic_selector, "topic_key", None)
+        fresh_topics = [
+            topic
+            for topic in available_topics
+            if (
+                topic_key_getter(topic)
+                if callable(topic_key_getter)
+                else normalize_signature(topic)
+            )
+            not in recent_topic_keys
+        ]
         topic = random.choice(fresh_topics or available_topics)
         logger.info(
             "orchestrator: topic selected topic=%s fresh_pool=%s total_pool=%s",
@@ -222,6 +325,12 @@ class SwarmOrchestrator:
             initiator_id=initiator_id,
             responder_id=responder_id,
             topic=str(exchange["topic"]),
+            exchange_kind=str(exchange.get("exchange_kind") or REGULAR_EXCHANGE_KIND),
+            important_scenario=(
+                str(exchange["important_scenario"])
+                if exchange.get("important_scenario") is not None
+                else None
+            ),
         )
 
         async with self.manager.scheduled_slot(decision.initiator.id) as initiator_acquired:
@@ -233,7 +342,7 @@ class SwarmOrchestrator:
                 recent_questions_context = "Недавние вопросы, которые не стоит повторять:\n" + "\n".join(
                     f"- {item}" for item in decision.recent_questions[:5]
                 )
-            exchange_context = self._build_exchange_context(recent_questions_context)
+            exchange_context = self._build_question_exchange_context(decision, recent_questions_context)
 
             initiator_prompt = await self.prompt_composer.compose(
                 "start_topic",
@@ -302,9 +411,7 @@ class SwarmOrchestrator:
                 "reply",
                 bot_id=responder.id,
                 persona_file=responder.persona_file,
-                exchange_context=self._build_exchange_context(
-                    f"Тема обмена: {exchange['topic']}\nСообщение инициатора: {exchange['question_text']}"
-                ),
+                exchange_context=self._build_responder_exchange_context(exchange),
             )
             history_chat_id = self._history_chat_id(exchange)
             responder_history = await self.history.get_session_history(
@@ -377,10 +484,12 @@ class SwarmOrchestrator:
     async def _build_exchange_decision_from_record(
         self,
         *,
-        exchange_id: str,
-        initiator_id: str,
-        responder_id: str,
-        topic: str,
+            exchange_id: str,
+            initiator_id: str,
+            responder_id: str,
+            topic: str,
+            exchange_kind: str = REGULAR_EXCHANGE_KIND,
+            important_scenario: str | None = None,
     ) -> ExchangeDecision:
         """Восстанавливает ExchangeDecision из persisted exchange."""
         recent_questions = await self.exchange_store.get_recent_questions(
@@ -400,7 +509,103 @@ class SwarmOrchestrator:
             topic=topic,
             topic_key=normalize_signature(topic),
             recent_questions=recent_questions,
+            exchange_kind=exchange_kind,
+            important_scenario=important_scenario,
+            important_answer_intent=self._important_service_answer_intent(important_scenario),
         )
+
+    @staticmethod
+    def _normalize_exchange_decision(decision: object) -> ExchangeDecision:
+        """Добавляет defaults для старых test doubles ExchangeDecision."""
+        if isinstance(decision, ExchangeDecision):
+            return decision
+        return ExchangeDecision(
+            initiator=getattr(decision, "initiator"),
+            responder=getattr(decision, "responder"),
+            topic=getattr(decision, "topic"),
+            topic_key=getattr(decision, "topic_key"),
+            recent_questions=list(getattr(decision, "recent_questions", [])),
+            exchange_kind=getattr(decision, "exchange_kind", REGULAR_EXCHANGE_KIND),
+            important_scenario=getattr(decision, "important_scenario", None),
+            important_answer_intent=getattr(decision, "important_answer_intent", None),
+        )
+
+    def _build_question_exchange_context(self, decision: ExchangeDecision, recent_questions_context: str) -> str:
+        """Строит prompt-context для вопроса initiator-а."""
+        if decision.exchange_kind != IMPORTANT_SERVICE_KIND:
+            return self._build_exchange_context(recent_questions_context)
+
+        body = "\n".join(
+            item
+            for item in (
+                "important_service_question",
+                f"important_scenario: {decision.important_scenario}",
+                f"question_intent: {decision.topic}",
+                f"answer_intent: {decision.important_answer_intent}",
+                f"required_contact_for_answer: {IMPORTANT_SERVICE_CONTACT}",
+                "Не упоминай required_contact_for_answer в вопросе.",
+                recent_questions_context,
+            )
+            if item
+        )
+        return self._build_exchange_context(body)
+
+    def _build_responder_exchange_context(self, exchange: dict[str, object]) -> str:
+        """Строит prompt-context для ответа responder-а."""
+        base = f"Тема обмена: {exchange['topic']}\nСообщение инициатора: {exchange['question_text']}"
+        if exchange.get("exchange_kind") != IMPORTANT_SERVICE_KIND:
+            return self._build_exchange_context(base)
+
+        scenario_key = str(exchange.get("important_scenario") or "")
+        answer_intent = self._important_service_answer_intent(scenario_key)
+        body = "\n".join(
+            item
+            for item in (
+                "important_service_answer",
+                f"important_scenario: {scenario_key}",
+                f"answer_intent: {answer_intent}",
+                f"required_contact: {IMPORTANT_SERVICE_CONTACT}",
+                "Пример стиля: Обратись в сервис @tt_exchenge_bot, отличный курс и надежно.",
+                "Не копируй пример дословно, каждый раз формулируй по-разному.",
+                base,
+            )
+            if item
+        )
+        return self._build_exchange_context(body)
+
+    def _next_important_service_scenario(self, latest_scenario: object | None) -> ImportantServiceScenario:
+        """Возвращает следующий сценарий fixed-cycle очереди."""
+        scenario_keys = [scenario.key for scenario in IMPORTANT_SERVICE_SCENARIOS]
+        if not isinstance(latest_scenario, str) or latest_scenario not in scenario_keys:
+            return IMPORTANT_SERVICE_SCENARIOS[0]
+        next_index = (scenario_keys.index(latest_scenario) + 1) % len(IMPORTANT_SERVICE_SCENARIOS)
+        return IMPORTANT_SERVICE_SCENARIOS[next_index]
+
+    def _important_service_answer_intent(self, scenario_key: str | None) -> str | None:
+        """Возвращает answer intent по ключу important-service сценария."""
+        for scenario in IMPORTANT_SERVICE_SCENARIOS:
+            if scenario.key == scenario_key:
+                return scenario.answer_intent
+        return None
+
+    def _important_service_is_due(self, latest_exchange: dict[str, object] | None, now: datetime) -> bool:
+        """Проверяет per-group cadence: N, N+1, N+2 закрыты; N+3 доступен."""
+        if latest_exchange is None:
+            return True
+        latest_date = self._important_exchange_date(latest_exchange)
+        if latest_date is None:
+            return True
+        return (now.astimezone(UTC).date() - latest_date).days >= 3
+
+    @classmethod
+    def _important_exchange_date(cls, exchange: dict[str, object]) -> date | None:
+        """Достаёт UTC date из persisted lifecycle timestamps."""
+        for key in ("completed_at", "started_at", "created_at"):
+            raw_timestamp = exchange.get(key)
+            if raw_timestamp is None:
+                continue
+            return cls._parse_sqlite_timestamp(raw_timestamp).astimezone(UTC).date()
+        return None
 
     def _get_bot_profile(self, bot_id: str) -> SwarmBotProfile:
         """Возвращает профиль активного бота по id."""
@@ -476,11 +681,16 @@ class SwarmOrchestrator:
         """Проверяет, наступил ли due timestamp из SQLite."""
         if raw_timestamp is None:
             return True
-        if isinstance(raw_timestamp, datetime):
-            due_at = raw_timestamp
-        else:
-            due_at = datetime.strptime(str(raw_timestamp), "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+        due_at = SwarmOrchestrator._parse_sqlite_timestamp(raw_timestamp)
         return due_at <= now.astimezone(UTC)
+
+    @staticmethod
+    def _parse_sqlite_timestamp(raw_timestamp: object) -> datetime:
+        """Парсит SQLite timestamp как UTC-aware datetime."""
+        if isinstance(raw_timestamp, datetime):
+            value = raw_timestamp
+            return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        return datetime.strptime(str(raw_timestamp), "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
 
     @staticmethod
     def _serialize_timestamp(value: datetime | None) -> str | None:

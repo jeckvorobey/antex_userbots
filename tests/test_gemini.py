@@ -107,6 +107,26 @@ def test_start_topic_prompt_requires_city_adaptation():
     assert "не копируй тему дословно" in prompt
 
 
+def test_important_service_start_topic_prompt_contract():
+    """Проверяет prompt-контракт important-service вопроса."""
+    prompt = Path("ai/prompts/start_topic.md").read_text(encoding="utf-8")
+
+    assert "important_service_question" in prompt
+    assert "question_intent" in prompt
+    assert "не упоминай `@tt_exchenge_bot`" in prompt
+    assert "отсутствует, не добавляй рекламный смысл" in prompt
+
+
+def test_important_service_reply_prompt_contract():
+    """Проверяет prompt-контракт important-service ответа."""
+    prompt = Path("ai/prompts/reply.md").read_text(encoding="utf-8")
+
+    assert "important_service_answer" in prompt
+    assert "естественно упомяни `@tt_exchenge_bot`" in prompt
+    assert "каждый раз меняй формулировку" in prompt
+    assert "отсутствует, не упоминай `@tt_exchenge_bot` специально" in prompt
+
+
 def test_gemini_client_initializes_with_api_key():
     """Проверяет, что GeminiClient инициализируется и хранит имя модели."""
     client = GeminiClient(api_key="test_key_123", model_name="gemini-1.5-flash")
