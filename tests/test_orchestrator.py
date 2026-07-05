@@ -431,7 +431,7 @@ async def test_orchestrator_important_service_replaces_regular_topic_when_due():
         topic_selector=SimpleNamespace(topics=["Обычная тема"]),
         prompt_composer=prompt_composer,
         gemini_client=SimpleNamespace(start_topic=AsyncMock(return_value="Где сейчас нормально поменять безналичные рубли?")),
-        history=SimpleNamespace(save_message=AsyncMock()),
+        history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
         exchange_store=exchange_store,
         group_id="danang",
         group_city="Da Nang",
@@ -453,6 +453,78 @@ async def test_orchestrator_important_service_replaces_regular_topic_when_due():
     assert exchange_store.create_exchange.await_args.kwargs["important_scenario"] == "exchange_rub"
     assert "important_service_question" in prompt_composer.compose.await_args.kwargs["exchange_context"]
     assert "@tt_exchenge_bot" in prompt_composer.compose.await_args.kwargs["exchange_context"]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_reselects_topic_when_initiator_recent_history_matches(monkeypatch):
+    """Проверяет, что bot-history заставляет выбрать другой topic из остатка пула."""
+    initiator_client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=801)))
+    responder_client = SimpleNamespace(send_message=AsyncMock())
+    exchange_store = SimpleNamespace(
+        get_due_started_exchange=AsyncMock(return_value=None),
+        get_exchange_by_window_key=AsyncMock(return_value=None),
+        get_recent_bot_ids=AsyncMock(return_value=[]),
+        get_recent_topic_keys_by_limit=AsyncMock(return_value=set()),
+        get_recent_questions=AsyncMock(return_value=[]),
+        get_recent_question_signatures=AsyncMock(return_value=set()),
+        create_exchange=AsyncMock(return_value="exchange-2"),
+        mark_exchange_started=AsyncMock(),
+        mark_exchange_completed=AsyncMock(),
+    )
+    history = SimpleNamespace(
+        get_session_history=AsyncMock(
+            return_value=[
+                {
+                    "role": "assistant",
+                    "text": "Старый вопрос?",
+                    "message_origin": "scheduled_initiator",
+                }
+            ]
+        ),
+        save_message=AsyncMock(),
+    )
+    monkeypatch.setattr("userbot.orchestrator.random.choice", lambda seq: seq[-1])
+
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+            SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md", telegram_user_id=202),
+        ],
+        manager=_manager_with_clients(initiator_client, responder_client),
+        topic_selector=SimpleNamespace(topics=["Старый вопрос?", "Другой вопрос?"]),
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system-init")),
+        gemini_client=SimpleNamespace(
+            start_topic=AsyncMock(side_effect=["Старый вопрос?", "Новый вопрос?"]),
+        ),
+        history=history,
+        exchange_store=exchange_store,
+        group_id="danang",
+        group_city="Da Nang",
+        group_target="@danang",
+        group_chat_id=-100111,
+        active_windows_utc=["19-20"],
+        now_provider=lambda: datetime(2026, 4, 20, 19, 5, tzinfo=UTC),
+        randint_provider=lambda start, end: start,
+    )
+    orchestrator._build_exchange_decision = AsyncMock(
+        return_value=SimpleNamespace(
+            initiator=orchestrator.bot_profiles[0],
+            responder=orchestrator.bot_profiles[1],
+            topic="Старый вопрос?",
+            topic_key="старый вопрос",
+            recent_questions=[],
+        )
+    )
+
+    assert await orchestrator.run_once() is True
+
+    assert history.get_session_history.await_args.kwargs["chat_id"] == -100111
+    assert history.get_session_history.await_args.kwargs["bot_id"] == "anna"
+    assert history.get_session_history.await_args.kwargs["limit"] == 50
+    assert orchestrator.gemini_client.start_topic.await_count == 2
+    assert orchestrator.gemini_client.start_topic.await_args_list[0].kwargs["topic"] == "Старый вопрос?"
+    assert orchestrator.gemini_client.start_topic.await_args_list[1].kwargs["topic"] == "Другой вопрос?"
+    assert history.save_message.await_args.kwargs["text"] == "Новый вопрос?"
 
 
 @pytest.mark.asyncio

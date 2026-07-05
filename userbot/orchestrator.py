@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 RECENT_BOT_COOLDOWN_LIMIT = 3
 RECENT_TOPIC_LIMIT = 10
+RECENT_INITIATOR_HISTORY_SCAN_LIMIT = 50
 IMPORTANT_SERVICE_KIND = "important_service"
 REGULAR_EXCHANGE_KIND = "regular"
 IMPORTANT_SERVICE_CONTACT = "@tt_exchenge_bot"
@@ -342,7 +343,27 @@ class SwarmOrchestrator:
                 recent_questions_context = "Недавние вопросы, которые не стоит повторять:\n" + "\n".join(
                     f"- {item}" for item in decision.recent_questions[:5]
                 )
-            exchange_context = self._build_question_exchange_context(decision, recent_questions_context)
+            history_chat_id = self._history_chat_id(exchange)
+            recent_initiator_questions = await self._get_recent_initiator_questions(
+                chat_id=history_chat_id,
+                bot_id=decision.initiator.id,
+            )
+            recent_initiator_questions_context = ""
+            if recent_initiator_questions:
+                recent_initiator_questions_context = "Недавние вопросы этого бота, которые не стоит повторять:\n" + "\n".join(
+                    f"- {item}" for item in recent_initiator_questions
+                )
+            exchange_context = self._build_question_exchange_context(
+                decision,
+                "\n\n".join(
+                    item
+                    for item in (
+                        recent_questions_context,
+                        recent_initiator_questions_context,
+                    )
+                    if item
+                ),
+            )
 
             initiator_prompt = await self.prompt_composer.compose(
                 "start_topic",
@@ -353,6 +374,7 @@ class SwarmOrchestrator:
             initiator_text = await self._generate_non_repeating_question(
                 initiator_prompt=initiator_prompt,
                 topic=decision.topic,
+                recent_bot_questions=recent_initiator_questions,
             )
             initiator_client = self.manager.get_client(decision.initiator.id)
             initiator_group_target = await self._resolve_group_target_for_client(initiator_client.client)
@@ -391,6 +413,27 @@ class SwarmOrchestrator:
                 await self.exchange_store.mark_exchange_completed(str(exchange["exchange_id"]))
                 logger.info("orchestrator: exchange completed without responder exchange_id=%s", exchange["exchange_id"])
         return True
+
+    async def _get_recent_initiator_questions(self, *, chat_id: int | None, bot_id: str) -> list[str]:
+        """Возвращает последние scheduled вопросы конкретного initiator-бота в группе."""
+        history_rows = await self.history.get_session_history(
+            chat_id=chat_id,
+            bot_id=bot_id,
+            limit=RECENT_INITIATOR_HISTORY_SCAN_LIMIT,
+        )
+        questions = [
+            str(item["text"])
+            for item in history_rows
+            if item.get("message_origin") == "scheduled_initiator" and isinstance(item.get("text"), str)
+        ]
+        questions = questions[-5:]
+        logger.info(
+            "orchestrator: loaded recent initiator questions chat_id=%s bot_id=%s count=%s",
+            chat_id,
+            bot_id,
+            len(questions),
+        )
+        return questions
 
     async def _run_due_responder_exchange(self, *, exchange: dict[str, object]) -> bool:
         """Отправляет отложенный ответ второго бота."""
@@ -464,20 +507,43 @@ class SwarmOrchestrator:
             return self.group_target
         return resolved_target
 
-    async def _generate_non_repeating_question(self, *, initiator_prompt: str, topic: str) -> str:
+    async def _generate_non_repeating_question(
+        self,
+        *,
+        initiator_prompt: str,
+        topic: str,
+        recent_bot_questions: list[str] | None = None,
+    ) -> str:
         """Генерирует вопрос и старается избежать повтора по recent signature."""
         recent_signatures = await self.exchange_store.get_recent_question_signatures(
             since=self.question_repeat_window,
             group_id=self.group_id,
             group_chat_id=self.group_chat_id,
         )
+        recent_signatures.update(normalize_signature(item) for item in recent_bot_questions or [])
+
         prompt = initiator_prompt
-        for attempt in range(1, 3):
-            question_text = await self.gemini_client.start_topic(system_prompt=prompt, topic=topic)
+        current_topic = topic
+        available_topics = list(getattr(self.topic_selector, "topics", []))
+        tried_topics = {topic}
+
+        for attempt in range(1, 4):
+            question_text = await self.gemini_client.start_topic(system_prompt=prompt, topic=current_topic)
             signature = normalize_signature(question_text)
             if signature not in recent_signatures:
                 return question_text
-            logger.info("orchestrator: repeated question signature detected attempt=%s topic=%s", attempt, topic)
+            logger.info("orchestrator: repeated question signature detected attempt=%s topic=%s", attempt, current_topic)
+            alternative_topics = [candidate for candidate in available_topics if candidate not in tried_topics]
+            if alternative_topics:
+                current_topic = random.choice(alternative_topics)
+                tried_topics.add(current_topic)
+                prompt = initiator_prompt
+                logger.info(
+                    "orchestrator: retrying scheduled question with alternative topic topic=%s remaining=%s",
+                    current_topic,
+                    len(alternative_topics) - 1,
+                )
+                continue
             prompt = f"{initiator_prompt}\n\nНе повторяй недавние формулировки. Скажи по-другому и естественнее."
         return question_text
 
