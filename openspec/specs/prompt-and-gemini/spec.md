@@ -3,9 +3,7 @@
 ## Purpose
 
 Define prompt loading, persona composition, topic loading, and Gemini generation behavior.
-
 ## Requirements
-
 ### Requirement: Runtime prompt files
 The system SHALL load prompt text from tracked production `.md` files rather than hardcoding prompt content or relying on copied example templates.
 
@@ -155,3 +153,26 @@ The system SHALL keep ordinary scheduled exchanges and addressed replies from au
 #### Scenario: Ordinary reply has no important marker
 - **WHEN** reply generation receives ordinary exchange context without `important_service_answer`
 - **THEN** the prompt does not require mentioning `@tt_exchenge_bot`
+
+### Requirement: Gemini input redaction
+The system SHALL redact obvious secret-like and invite-link content before sending prompts to Gemini.
+
+#### Scenario: Invite link is redacted before request
+- **WHEN** reply history or user input contains a Telegram invite link
+- **THEN** the Gemini request uses a redacted placeholder instead of the raw invite link
+
+#### Scenario: Token-like string is redacted before request
+- **WHEN** reply history or user input contains an obvious token-like or session-like secret string
+- **THEN** the Gemini request uses a redacted placeholder instead of the raw secret
+
+### Requirement: Gemini output safety validation
+The system SHALL validate generated output against runtime safety rules before publish-time callers accept it.
+
+#### Scenario: Too-long output is rejected
+- **WHEN** the generated output exceeds the configured maximum length
+- **THEN** the output validator marks it unsafe
+
+#### Scenario: Forbidden pattern output is rejected
+- **WHEN** the generated output contains blocked invite-link, token-like, or excessive-mention patterns
+- **THEN** the output validator marks it unsafe
+

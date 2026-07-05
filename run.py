@@ -433,12 +433,17 @@ async def _build_runtime_context(settings: object) -> RuntimeContext:
         retry_jitter_seconds=settings.gemini_retry_jitter_seconds,
         request_timeout_seconds=settings.gemini_request_timeout_seconds,
         temperature=settings.gemini_temperature,
+        max_output_chars=getattr(settings, "swarm_max_output_chars", 400),
+        max_mentions_per_message=getattr(settings, "swarm_max_mentions_per_message", 2),
     )
     topic_selector = TopicSelector(settings.topics_path)
     await topic_selector.load()
     prompt_composer = PromptComposer(prompt_loader=prompt_loader, bot_profiles_dir=settings.bot_profiles_dir)
     exchange_store = ExchangeStore(settings.db_path)
     await exchange_store.init_db()
+    retention_days = getattr(settings, "swarm_history_retention_days", 30)
+    await history.prune_older_than(retention_days=retention_days)
+    await exchange_store.prune_older_than(retention_days=retention_days)
 
     logger.info(
         "RuntimeContext инициализирован: db_path=%s prompts_dir=%s topics=%s",
@@ -477,6 +482,7 @@ def _build_swarm_bot_profiles(settings: object) -> list[SwarmBotProfile]:
 async def _register_swarm_handlers(
     manager: SwarmManager,
     runtime: RuntimeContext,
+    settings_getter,
     enabled_group_chat_ids: set[int] | None = None,
 ) -> None:
     """Регистрирует addressed-reply handlers на всех клиентах swarm."""
@@ -502,6 +508,7 @@ async def _register_swarm_handlers(
             swarm_user_ids=manager.swarm_user_ids,
             enabled_group_chat_ids=enabled_group_chat_ids,
             manager=manager,
+            security_settings_getter=settings_getter,
         )
 
         async def on_new_message(event: object, *, _router: AddressedReplyRouter = router) -> None:
@@ -539,7 +546,7 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
     enabled_group_chat_ids = {
         group.group_chat_id for group in current_groups if isinstance(getattr(group, "group_chat_id", None), int)
     }
-    await _register_swarm_handlers(manager, runtime, enabled_group_chat_ids or None)
+    await _register_swarm_handlers(manager, runtime, lambda: current_settings, enabled_group_chat_ids or None)
 
     first_client = manager.get_client(manager.active_bot_ids[0]).client
     for group in current_groups:
@@ -604,6 +611,7 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
                     initiator_offset_minutes=_group.initiator_offset_minutes,
                     responder_delay_minutes=_group.responder_delay_minutes,
                     skip_if_recent_human_activity=_settings.swarm_skip_if_recent_human_activity,
+                    allow_external_llm_for_scheduled=_settings.swarm_allow_external_llm_for_scheduled,
                     resolve_group_target=lambda telegram_client, _resolver_group=_group: _resolve_group_target(
                         telegram_client,
                         getattr(_resolver_group, "group_chat_id", None),

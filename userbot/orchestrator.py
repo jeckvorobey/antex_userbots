@@ -22,6 +22,7 @@ RECENT_INITIATOR_HISTORY_SCAN_LIMIT = 50
 IMPORTANT_SERVICE_KIND = "important_service"
 REGULAR_EXCHANGE_KIND = "regular"
 IMPORTANT_SERVICE_CONTACT = "@tt_exchenge_bot"
+SAFE_SCHEDULED_REPLY_FALLBACK_TEXT = "Я бы уточнил это у тех, кто сталкивался с этим совсем недавно."
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +86,7 @@ class SwarmOrchestrator:
         question_repeat_window: timedelta = timedelta(days=2),
         resolve_group_target: Callable[[object], Any] | None = None,
         randint_provider: Callable[[int, int], int] | None = None,
+        allow_external_llm_for_scheduled: bool = True,
     ) -> None:
         self.bot_profiles = [profile for profile in bot_profiles if profile.enabled]
         self.manager = manager
@@ -108,6 +110,7 @@ class SwarmOrchestrator:
         self.question_repeat_window = question_repeat_window
         self.resolve_group_target = resolve_group_target
         self.randint_provider = randint_provider or random.randint
+        self.allow_external_llm_for_scheduled = allow_external_llm_for_scheduled
 
     async def run_once(self) -> bool:
         """Выполняет одну due-стадию scheduled exchange."""
@@ -371,11 +374,26 @@ class SwarmOrchestrator:
                 persona_file=decision.initiator.persona_file,
                 exchange_context=exchange_context,
             )
-            initiator_text = await self._generate_non_repeating_question(
-                initiator_prompt=initiator_prompt,
-                topic=decision.topic,
-                recent_bot_questions=recent_initiator_questions,
-            )
+            if self._allow_external_llm_for_scheduled():
+                initiator_text = await self._generate_non_repeating_question(
+                    initiator_prompt=initiator_prompt,
+                    topic=decision.topic,
+                    recent_bot_questions=recent_initiator_questions,
+                )
+                output_safe_checker = getattr(self.gemini_client, "is_output_safe", lambda _text: True)
+                if not output_safe_checker(initiator_text):
+                    logger.warning(
+                        "orchestrator: replaced unsafe initiator text exchange_id=%s bot_id=%s",
+                        exchange["exchange_id"],
+                        decision.initiator.id,
+                    )
+                    initiator_text = self._build_safe_start_topic(decision.topic)
+            else:
+                logger.info(
+                    "orchestrator: using local initiator fallback because scheduled LLM is disabled exchange_id=%s",
+                    exchange["exchange_id"],
+                )
+                initiator_text = self._build_safe_start_topic(decision.topic)
             initiator_client = self.manager.get_client(decision.initiator.id)
             initiator_group_target = await self._resolve_group_target_for_client(initiator_client.client)
             initiator_message = await initiator_client.client.send_message(initiator_group_target, initiator_text)
@@ -461,11 +479,26 @@ class SwarmOrchestrator:
                 chat_id=history_chat_id,
                 bot_id=responder.id,
             )
-            responder_text = await self.gemini_client.generate_reply(
-                system_prompt=responder_prompt,
-                history=responder_history,
-                user_message=str(exchange["question_text"]),
-            )
+            if self._allow_external_llm_for_scheduled():
+                responder_text = await self.gemini_client.generate_reply(
+                    system_prompt=responder_prompt,
+                    history=responder_history,
+                    user_message=str(exchange["question_text"]),
+                )
+                output_safe_checker = getattr(self.gemini_client, "is_output_safe", lambda _text: True)
+                if not output_safe_checker(responder_text):
+                    logger.warning(
+                        "orchestrator: replaced unsafe responder text exchange_id=%s bot_id=%s",
+                        exchange["exchange_id"],
+                        responder.id,
+                    )
+                    responder_text = SAFE_SCHEDULED_REPLY_FALLBACK_TEXT
+            else:
+                logger.info(
+                    "orchestrator: using local responder fallback because scheduled LLM is disabled exchange_id=%s",
+                    exchange["exchange_id"],
+                )
+                responder_text = SAFE_SCHEDULED_REPLY_FALLBACK_TEXT
             responder_client = self.manager.get_client(responder.id)
             reply_to_message_id = exchange.get("initiator_message_id")
             responder_group_target = await self._resolve_group_target_for_client(responder_client.client)
@@ -709,6 +742,20 @@ class SwarmOrchestrator:
         if body and body.strip():
             parts.append(body.strip())
         return "\n".join(parts)
+
+    def _allow_external_llm_for_scheduled(self) -> bool:
+        """Проверяет, разрешён ли внешний LLM для scheduled exchange."""
+        return bool(getattr(self, "allow_external_llm_for_scheduled", True))
+
+    @staticmethod
+    def _build_safe_start_topic(topic: str) -> str:
+        """Строит безопасный локальный fallback для инициатора."""
+        normalized = topic.strip().rstrip(".!?")
+        if not normalized:
+            return "Кто может подсказать по этой теме?"
+        if topic.strip().endswith("?"):
+            return topic.strip()
+        return f"Кто может подсказать: {normalized.lower()}?"
 
     def _history_chat_id(self, exchange: dict[str, object]) -> int | None:
         """Возвращает реальный chat_id группы для истории."""

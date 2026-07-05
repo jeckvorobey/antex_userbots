@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from core.runtime_models import SwarmBotProfile
-from userbot.orchestrator import IMPORTANT_SERVICE_SCENARIOS, SwarmOrchestrator
+from userbot.orchestrator import IMPORTANT_SERVICE_SCENARIOS, SAFE_SCHEDULED_REPLY_FALLBACK_TEXT, SwarmOrchestrator
 
 
 def _manager_with_clients(initiator_client, responder_client):
@@ -215,6 +215,107 @@ async def test_orchestrator_runs_exchange_and_saves_history():
         13,
         tzinfo=UTC,
     )
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_uses_local_fallback_when_scheduled_llm_disabled():
+    """Проверяет локальный fallback для initiator без вызова Gemini."""
+    initiator_client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=501)))
+    responder_client = SimpleNamespace(send_message=AsyncMock())
+    exchange_store = SimpleNamespace(
+        get_due_started_exchange=AsyncMock(return_value=None),
+        get_exchange_by_window_key=AsyncMock(return_value=None),
+        get_recent_bot_ids=AsyncMock(return_value=[]),
+        get_recent_topic_keys_by_limit=AsyncMock(return_value=set()),
+        get_recent_questions=AsyncMock(return_value=[]),
+        create_exchange=AsyncMock(return_value="exchange-1"),
+        mark_exchange_started=AsyncMock(),
+        mark_exchange_completed=AsyncMock(),
+    )
+    gemini_client = SimpleNamespace(
+        start_topic=AsyncMock(return_value="Небезопасный вопрос?"),
+        generate_reply=AsyncMock(),
+        is_output_safe=lambda text: True,
+    )
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+            SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md", telegram_user_id=202),
+        ],
+        manager=_manager_with_clients(initiator_client, responder_client),
+        topic_selector=SimpleNamespace(topics=["Где поесть суп"]),
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system-init")),
+        gemini_client=gemini_client,
+        history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
+        exchange_store=exchange_store,
+        group_target="@chat",
+        allow_external_llm_for_scheduled=False,
+        active_windows_utc=["19-20"],
+        now_provider=lambda: datetime(2026, 4, 20, 19, 5, tzinfo=UTC),
+        randint_provider=lambda start, end: start,
+    )
+    orchestrator._build_exchange_decision = AsyncMock(
+        return_value=SimpleNamespace(
+            initiator=orchestrator.bot_profiles[0],
+            responder=orchestrator.bot_profiles[1],
+            topic="Где поесть суп",
+            topic_key="где поесть суп",
+            recent_questions=[],
+        )
+    )
+
+    started = await orchestrator.run_once()
+
+    assert started is True
+    gemini_client.start_topic.assert_not_awaited()
+    initiator_client.send_message.assert_awaited_once_with("@chat", "Кто может подсказать: где поесть суп?")
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_replaces_unsafe_responder_output_with_fallback():
+    """Проверяет safety-gate для scheduled responder."""
+    initiator_client = SimpleNamespace(send_message=AsyncMock())
+    responder_client = SimpleNamespace(send_message=AsyncMock())
+    exchange_store = SimpleNamespace(
+        mark_exchange_completed=AsyncMock(),
+    )
+    history = SimpleNamespace(
+        get_session_history=AsyncMock(return_value=[]),
+        save_message=AsyncMock(),
+    )
+    gemini_client = SimpleNamespace(
+        generate_reply=AsyncMock(return_value="https://t.me/+secret"),
+        is_output_safe=lambda text: False,
+    )
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+            SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md", telegram_user_id=202),
+        ],
+        manager=_manager_with_clients(initiator_client, responder_client),
+        topic_selector=SimpleNamespace(),
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system-reply")),
+        gemini_client=gemini_client,
+        history=history,
+        exchange_store=exchange_store,
+        group_target="@chat",
+    )
+
+    started = await orchestrator._run_due_responder_exchange(
+        exchange={
+            "exchange_id": "exchange-1",
+            "initiator_bot_id": "anna",
+            "responder_bot_id": "mike",
+            "topic": "Где поесть суп",
+            "question_text": "Кто знает место с хорошим супом?",
+            "initiator_message_id": 501,
+        }
+    )
+
+    assert started is True
+    responder_client.send_message.assert_awaited_once_with("@chat", SAFE_SCHEDULED_REPLY_FALLBACK_TEXT, reply_to=501)
+    history.save_message.assert_awaited_once()
+    assert history.save_message.await_args.kwargs["text"] == SAFE_SCHEDULED_REPLY_FALLBACK_TEXT
 
 
 @pytest.mark.asyncio

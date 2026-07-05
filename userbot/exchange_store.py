@@ -442,6 +442,30 @@ class ExchangeStore:
         await self._connection.close()
         self._connection = None
 
+    async def prune_older_than(self, *, retention_days: int) -> int:
+        """Удаляет старые scheduled exchange по retention window."""
+        if retention_days <= 0:
+            logger.info("Пропуск очистки scheduled_exchanges: retention_days=%s", retention_days)
+            return 0
+
+        cutoff = (datetime.now(UTC) - timedelta(days=retention_days)).strftime("%Y-%m-%d %H:%M:%S")
+        connection = await self._get_connection()
+        cursor = await connection.execute(
+            """
+            DELETE FROM scheduled_exchanges
+            WHERE COALESCE(last_activity_at, created_at) < ?
+            """,
+            (cutoff,),
+        )
+        await connection.commit()
+        deleted = int(cursor.rowcount or 0)
+        logger.info(
+            "Очистка scheduled_exchanges завершена: retention_days=%s deleted=%s",
+            retention_days,
+            deleted,
+        )
+        return deleted
+
     async def _get_connection(self) -> aiosqlite.Connection:
         if self._connection is None:
             self._ensure_parent_dir()

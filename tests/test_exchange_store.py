@@ -443,3 +443,52 @@ async def test_exchange_store_recent_queries_use_last_activity_order(exchange_st
     )
 
     assert questions == ["Второй вопрос", "Первый вопрос"]
+
+
+async def test_exchange_store_prune_older_than_deletes_only_old_rows(exchange_store):
+    """Проверяет retention-очистку старых scheduled exchange."""
+    db = await exchange_store._get_connection()
+    old_created_at = (datetime.now(UTC) - timedelta(days=40)).strftime("%Y-%m-%d %H:%M:%S")
+    new_created_at = (datetime.now(UTC) - timedelta(days=5)).strftime("%Y-%m-%d %H:%M:%S")
+    await db.executemany(
+        """
+        INSERT INTO scheduled_exchanges (
+            exchange_id,
+            initiator_bot_id,
+            responder_bot_id,
+            pair_key,
+            topic,
+            topic_key,
+            status,
+            created_at,
+            last_activity_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            ("old-exchange", "anna", "mike", "anna:mike", "Старое", "старое", "completed", old_created_at, old_created_at),
+            ("new-exchange", "anna", "mike", "anna:mike", "Новое", "новое", "completed", new_created_at, new_created_at),
+        ],
+    )
+    await db.commit()
+
+    deleted = await exchange_store.prune_older_than(retention_days=30)
+    row = await exchange_store.get_exchange("new-exchange")
+    deleted_row = await exchange_store.get_exchange("old-exchange")
+
+    assert deleted == 1
+    assert row is not None
+    assert deleted_row is None
+
+
+async def test_exchange_store_prune_skips_when_retention_disabled(exchange_store):
+    """Проверяет отсутствие очистки persisted exchange при retention_days=0."""
+    exchange_id = await exchange_store.create_exchange(
+        initiator_bot_id="anna",
+        responder_bot_id="mike",
+        topic="Оставить запись",
+    )
+
+    deleted = await exchange_store.prune_older_than(retention_days=0)
+
+    assert deleted == 0
+    assert await exchange_store.get_exchange(exchange_id) is not None

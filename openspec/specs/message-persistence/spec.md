@@ -3,9 +3,7 @@
 ## Purpose
 
 Define SQLite persistence for chat history and scheduled exchange state.
-
 ## Requirements
-
 ### Requirement: Message history table
 The system SHALL create and migrate a `messages` table and supporting indexes for persisted chat history.
 
@@ -199,3 +197,15 @@ The system SHALL create idempotent indexes that support group-scoped and chat-sc
 #### Scenario: Activity indexes are created
 - **WHEN** `ExchangeStore.init_db` runs
 - **THEN** indexes for group/chat status and `last_activity_at` lookup exist without duplicate-index failure
+
+### Requirement: History retention cleanup
+The system SHALL support deleting persisted message and scheduled exchange rows older than the configured retention window.
+
+#### Scenario: Old history is pruned at runtime bootstrap
+- **WHEN** runtime initializes persistence with a positive retention window
+- **THEN** messages and scheduled exchanges older than the cutoff are deleted before normal operation continues
+
+#### Scenario: Non-positive retention disables pruning
+- **WHEN** the configured retention window is zero or negative
+- **THEN** automatic history pruning is skipped
+

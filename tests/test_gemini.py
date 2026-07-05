@@ -184,6 +184,30 @@ def test_gemini_client_builds_client_with_proxy(monkeypatch):
     assert kwargs.get("async_client_args") == {"proxy": "http://user:pass@127.0.0.1:8080"}
 
 
+def test_gemini_client_sanitizes_sensitive_text_for_prompt():
+    """Проверяет редактирование invite и секретов перед отправкой в LLM."""
+    client = GeminiClient(api_key="test_key_123")
+
+    text = "join https://t.me/+abcdef token=supersecretvalue1234567890abc api_hash: qwerty1234567890qwerty1234567890"
+    sanitized = client.sanitize_for_prompt(text)
+
+    assert "t.me/+abcdef" not in sanitized
+    assert "supersecretvalue1234567890abc" not in sanitized
+    assert "qwerty1234567890qwerty1234567890" not in sanitized
+    assert "<redacted_secret>" in sanitized
+
+
+def test_gemini_client_rejects_unsafe_output():
+    """Проверяет safety-гейт перед публикацией текста модели."""
+    client = GeminiClient(api_key="test_key_123", max_output_chars=20, max_mentions_per_message=1)
+
+    assert client.is_output_safe("Нормальный ответ") is True
+    assert client.is_output_safe("") is False
+    assert client.is_output_safe("https://t.me/+abcdef") is False
+    assert client.is_output_safe("@one @two") is False
+    assert client.is_output_safe("Очень длинный ответ, который превышает лимит") is False
+
+
 @pytest.mark.asyncio
 async def test_gemini_client_generate_reply_uses_system_instruction(monkeypatch):
     """Проверяет передачу system instruction и содержимого запроса в SDK."""
@@ -224,6 +248,42 @@ async def test_gemini_client_generate_reply_uses_system_instruction(monkeypatch)
         captured["generate_content_kwargs"]["config"].kwargs["system_instruction"]
         == "Системная роль"
     )
+
+
+@pytest.mark.asyncio
+async def test_gemini_client_sanitizes_history_and_user_message_before_sdk_call(monkeypatch):
+    """Проверяет, что в SDK уходят уже отредактированные тексты."""
+    captured: dict[str, object] = {}
+
+    class FakeModels:
+        def generate_content(self, **kwargs):
+            captured["generate_content_kwargs"] = kwargs
+            return SimpleNamespace(text="Ответ модели")
+
+    class FakeClient:
+        def __init__(self, **kwargs) -> None:
+            self.models = FakeModels()
+
+    class FakeGenerateContentConfig:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    fake_types = SimpleNamespace(GenerateContentConfig=FakeGenerateContentConfig)
+    fake_genai = SimpleNamespace(Client=FakeClient, types=fake_types)
+
+    monkeypatch.setattr("ai.gemini._import_google_genai", lambda: fake_genai)
+
+    client = GeminiClient(api_key="test_key_123", model_name="gemini-2.5-flash")
+    await client.generate_reply(
+        system_prompt="Системная роль",
+        history=[{"role": "user", "text": "token=abcd1234abcd1234abcd1234abcd1234"}],
+        user_message="Вот ссылка https://t.me/+secret",
+    )
+
+    contents = captured["generate_content_kwargs"]["contents"]
+    assert "t.me/+secret" not in contents
+    assert "abcd1234abcd1234abcd1234abcd1234" not in contents
+    assert "<redacted_secret>" in contents
 
 
 @pytest.mark.asyncio

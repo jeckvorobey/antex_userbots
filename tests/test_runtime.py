@@ -138,7 +138,7 @@ async def test_register_swarm_handlers_registers_handler_per_bot(monkeypatch):
     runtime = SimpleNamespace(history=object(), prompt_composer=object(), gemini_client=object())
     monkeypatch.setitem(__import__("sys").modules, "telethon", SimpleNamespace(events=SimpleNamespace(NewMessage=lambda: "new-message")))
 
-    await run._register_swarm_handlers(manager, runtime)
+    await run._register_swarm_handlers(manager, runtime, lambda: SimpleNamespace())
 
     assert fake_client_anna.add_event_handler.call_count == 1
     assert fake_client_mike.add_event_handler.call_count == 1
@@ -163,7 +163,7 @@ async def test_register_swarm_handlers_skips_profiles_outside_active_pool(monkey
     runtime = SimpleNamespace(history=object(), prompt_composer=object(), gemini_client=object())
     monkeypatch.setitem(__import__("sys").modules, "telethon", SimpleNamespace(events=SimpleNamespace(NewMessage=lambda: "new-message")))
 
-    await run._register_swarm_handlers(manager, runtime)
+    await run._register_swarm_handlers(manager, runtime, lambda: SimpleNamespace())
 
     assert fake_client_anna.add_event_handler.call_count == 1
 

@@ -218,3 +218,19 @@ def test_settings_reads_gemini_resilience_options():
     assert s.gemini_max_retries == 4
     assert s.gemini_retry_backoff_seconds == 2.0
     assert s.gemini_retry_jitter_seconds == 0.4
+
+
+def test_settings_exposes_swarm_security_defaults():
+    """Проверяет кодовые defaults security-настроек swarm."""
+    with patch.dict(os.environ, BASE_ENV, clear=True):
+        from core.config import Settings
+
+        settings = Settings(_env_file=None)
+
+    assert settings.swarm_allow_external_llm_for_replies is True
+    assert settings.swarm_allow_external_llm_for_scheduled is True
+    assert settings.swarm_addressed_reply_rate_limit_count == 3
+    assert settings.swarm_addressed_reply_rate_limit_window_seconds == 60
+    assert settings.swarm_max_output_chars == 400
+    assert settings.swarm_max_mentions_per_message == 2
+    assert settings.swarm_history_retention_days == 30

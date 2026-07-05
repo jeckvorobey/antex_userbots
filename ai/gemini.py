@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import random
+import re
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -10,6 +11,12 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
+TELEGRAM_INVITE_RE = re.compile(r"https?://t\.me/(?:\+|joinchat/)\S+", re.IGNORECASE)
+SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b(api[_ -]?key|token|secret|session[_ -]?string|api[_ -]?hash)\b\s*[:=]\s*\S+"
+)
+LONG_SECRET_RE = re.compile(r"\b(?=[A-Za-z0-9_\-]{32,}\b)(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9_\-]+\b")
+MENTION_RE = re.compile(r"(?<!\w)@[A-Za-z0-9_]{3,}")
 
 
 class GeminiGenerationError(RuntimeError):
@@ -69,6 +76,8 @@ class GeminiClient:
         retry_jitter_seconds: float = 0.0,
         request_timeout_seconds: float = 45.0,
         temperature: float = 0.9,
+        max_output_chars: int = 400,
+        max_mentions_per_message: int = 2,
     ) -> None:
         """
         Инициализирует клиент Gemini.
@@ -93,6 +102,8 @@ class GeminiClient:
         self.retry_jitter_seconds = max(0.0, retry_jitter_seconds)
         self.request_timeout_seconds = max(0.1, request_timeout_seconds)
         self.temperature = min(2.0, max(0.0, temperature))
+        self.max_output_chars = max(1, max_output_chars)
+        self.max_mentions_per_message = max(0, max_mentions_per_message)
         self._client: Any | None = None
         self._types: Any | None = None
 
@@ -118,7 +129,10 @@ class GeminiClient:
             len(history),
             len(user_message),
         )
-        prompt_parts = [self._render_history(history), f"Пользователь: {user_message}"]
+        prompt_parts = [
+            self._render_history(self._sanitize_history_for_prompt(history)),
+            f"Пользователь: {self.sanitize_for_prompt(user_message)}",
+        ]
         prompt = "\n\n".join(part for part in prompt_parts if part)
         return await self._generate_text(system_prompt=system_prompt, prompt=prompt)
 
@@ -134,7 +148,7 @@ class GeminiClient:
             Начальное сообщение для старта разговора.
         """
         logger.info("Запуск генерации стартового сообщения по теме: %s", topic)
-        prompt = f"Тема разговора: {topic}"
+        prompt = f"Тема разговора: {self.sanitize_for_prompt(topic)}"
         return await self._generate_text(system_prompt=system_prompt, prompt=prompt)
 
     async def _generate_text(self, system_prompt: str, prompt: str) -> str:
@@ -280,6 +294,39 @@ class GeminiClient:
         if self._types is None:
             self._get_client()
         return self._types
+
+    def sanitize_for_prompt(self, text: str) -> str:
+        """Редактирует очевидно чувствительный текст перед отправкой в Gemini."""
+        sanitized = TELEGRAM_INVITE_RE.sub("<redacted_telegram_invite>", text)
+        sanitized = SECRET_ASSIGNMENT_RE.sub(r"\1=<redacted_secret>", sanitized)
+        sanitized = LONG_SECRET_RE.sub("<redacted_secret>", sanitized)
+        return sanitized
+
+    def is_output_safe(self, text: str) -> bool:
+        """Проверяет, что модельный текст подходит для публикации в Telegram."""
+        normalized = text.strip()
+        if not normalized:
+            return False
+        if len(normalized) > self.max_output_chars:
+            return False
+        if TELEGRAM_INVITE_RE.search(normalized):
+            return False
+        if SECRET_ASSIGNMENT_RE.search(normalized) or LONG_SECRET_RE.search(normalized):
+            return False
+        if len(MENTION_RE.findall(normalized)) > self.max_mentions_per_message:
+            return False
+        return True
+
+    def _sanitize_history_for_prompt(self, history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Возвращает копию истории с редактированными текстовыми полями."""
+        sanitized_history: list[dict[str, Any]] = []
+        for item in history:
+            sanitized_item = dict(item)
+            text = sanitized_item.get("text")
+            if isinstance(text, str):
+                sanitized_item["text"] = self.sanitize_for_prompt(text)
+            sanitized_history.append(sanitized_item)
+        return sanitized_history
 
     @staticmethod
     def _render_history(history: list[dict[str, Any]]) -> str:

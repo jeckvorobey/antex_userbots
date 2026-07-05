@@ -243,6 +243,47 @@ def test_settings_reads_multi_group_config_and_schedule_overrides(tmp_path):
     assert settings.groups[1].responder_delay_minutes == (8, 9)
 
 
+def test_settings_reads_swarm_security_section(tmp_path):
+    """Проверяет загрузку security-настроек swarm из TOML."""
+    settings_path = write_settings(
+        tmp_path,
+        """
+        [swarm.security]
+        allow_external_llm_for_replies = false
+        allow_external_llm_for_scheduled = false
+        addressed_reply_rate_limit_count = 2
+        addressed_reply_rate_limit_window_seconds = 45
+        max_output_chars = 280
+        max_mentions_per_message = 1
+        history_retention_days = 7
+
+        [[groups]]
+        id = "danang"
+        city = "Da Nang"
+        group_chat_id = -100111
+
+        [[swarm.bots]]
+        id = "anna"
+        session_env = "SESSION_STRING_ANNA"
+        persona_file = "anna.md"
+        """,
+    )
+
+    with patch.dict("os.environ", {"SESSION_STRING_ANNA": "anna-session"}, clear=False):
+        settings = Settings(
+            **BASE_SECRETS,
+            settings_path=str(settings_path),
+        )
+
+    assert settings.swarm_allow_external_llm_for_replies is False
+    assert settings.swarm_allow_external_llm_for_scheduled is False
+    assert settings.swarm_addressed_reply_rate_limit_count == 2
+    assert settings.swarm_addressed_reply_rate_limit_window_seconds == 45
+    assert settings.swarm_max_output_chars == 280
+    assert settings.swarm_max_mentions_per_message == 1
+    assert settings.swarm_history_retention_days == 7
+
+
 def test_settings_rejects_duplicate_group_ids(tmp_path):
     """Проверяет запрет дублирующихся group.id."""
     settings_path = write_settings(

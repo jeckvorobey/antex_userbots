@@ -237,11 +237,24 @@ class SwarmOrchestratorConfig(_StrictModel):
     skip_if_recent_human_activity: bool = True
 
 
+class SwarmSecurityConfig(_StrictModel):
+    """Runtime security-настройки swarm."""
+
+    allow_external_llm_for_replies: bool = True
+    allow_external_llm_for_scheduled: bool = True
+    addressed_reply_rate_limit_count: int = Field(default=3, ge=1)
+    addressed_reply_rate_limit_window_seconds: int = Field(default=60, ge=1)
+    max_output_chars: int = Field(default=400, ge=1)
+    max_mentions_per_message: int = Field(default=2, ge=0)
+    history_retention_days: int = Field(default=30, ge=0)
+
+
 class SwarmConfig(_StrictModel):
     """Секция swarm-настроек."""
 
     schedule: SwarmScheduleConfig = Field(default_factory=SwarmScheduleConfig)
     orchestrator: SwarmOrchestratorConfig = Field(default_factory=SwarmOrchestratorConfig)
+    security: SwarmSecurityConfig = Field(default_factory=SwarmSecurityConfig)
     bots: list[SwarmBotConfig] = Field(default_factory=list)
 
     @field_validator("bots")
@@ -411,6 +424,15 @@ class Settings:
         self.swarm_tick_seconds = config.swarm.orchestrator.tick_seconds
         self.swarm_silence_timeout_minutes = config.swarm.orchestrator.silence_timeout_minutes
         self.swarm_skip_if_recent_human_activity = config.swarm.orchestrator.skip_if_recent_human_activity
+        self.swarm_allow_external_llm_for_replies = config.swarm.security.allow_external_llm_for_replies
+        self.swarm_allow_external_llm_for_scheduled = config.swarm.security.allow_external_llm_for_scheduled
+        self.swarm_addressed_reply_rate_limit_count = config.swarm.security.addressed_reply_rate_limit_count
+        self.swarm_addressed_reply_rate_limit_window_seconds = (
+            config.swarm.security.addressed_reply_rate_limit_window_seconds
+        )
+        self.swarm_max_output_chars = config.swarm.security.max_output_chars
+        self.swarm_max_mentions_per_message = config.swarm.security.max_mentions_per_message
+        self.swarm_history_retention_days = config.swarm.security.history_retention_days
         self.swarm_bots = self._resolve_swarm_bots(config.swarm.bots)
         self.swarm_bot_ids = [bot.id for bot in self.swarm_bots]
         self.groups = self._resolve_groups(config.groups, config.swarm.schedule)
