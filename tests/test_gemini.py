@@ -178,7 +178,7 @@ def test_important_service_start_topic_prompt_contract():
 
     assert "important_service_question" in prompt
     assert "question_intent" in prompt
-    assert "не упоминай `@tt_exchenge_bot`" in prompt
+    assert "не упоминай `https://t.me/tt_exchenge_bot/antex`" in prompt
     assert "отсутствует, не добавляй рекламный смысл" in prompt
 
 
@@ -187,9 +187,9 @@ def test_important_service_reply_prompt_contract():
     prompt = Path("ai/prompts/reply.md").read_text(encoding="utf-8")
 
     assert "important_service_answer" in prompt
-    assert "естественно упомяни `@tt_exchenge_bot`" in prompt
+    assert "естественно упомяни miniapp-ссылку `https://t.me/tt_exchenge_bot/antex`" in prompt
     assert "каждый раз меняй формулировку" in prompt
-    assert "отсутствует, не упоминай `@tt_exchenge_bot` специально" in prompt
+    assert "отсутствует, не упоминай `https://t.me/tt_exchenge_bot/antex` специально" in prompt
 
 
 def test_gemini_client_initializes_with_api_key():
@@ -265,9 +265,11 @@ def test_gemini_client_sanitizes_sensitive_text_for_prompt():
 def test_gemini_client_rejects_unsafe_output():
     """Проверяет safety-гейт перед публикацией текста модели."""
     client = GeminiClient(api_key="test_key_123", max_output_chars=20, max_mentions_per_message=1)
+    public_link_client = GeminiClient(api_key="test_key_123", max_output_chars=120, max_mentions_per_message=1)
 
     assert client.is_output_safe("Нормальный ответ") is True
     assert client.is_output_safe("") is False
+    assert public_link_client.is_output_safe("Я бы через https://t.me/tt_exchenge_bot/antex попробовал.") is True
     assert client.is_output_safe("https://t.me/+abcdef") is False
     assert client.is_output_safe("@one @two") is False
     assert client.is_output_safe("Очень длинный ответ, который превышает лимит") is False

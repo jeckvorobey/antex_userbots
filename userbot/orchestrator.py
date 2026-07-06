@@ -21,7 +21,7 @@ RECENT_TOPIC_LIMIT = 10
 RECENT_INITIATOR_HISTORY_SCAN_LIMIT = 50
 IMPORTANT_SERVICE_KIND = "important_service"
 REGULAR_EXCHANGE_KIND = "regular"
-IMPORTANT_SERVICE_CONTACT = "@tt_exchenge_bot"
+IMPORTANT_SERVICE_CONTACT = "https://t.me/tt_exchenge_bot/antex"
 SAFE_SCHEDULED_REPLY_FALLBACK_TEXT = "Я бы уточнил это у тех, кто сталкивался с этим совсем недавно."
 
 
@@ -664,7 +664,7 @@ class SwarmOrchestrator:
                 f"important_scenario: {scenario_key}",
                 f"answer_intent: {answer_intent}",
                 f"required_contact: {IMPORTANT_SERVICE_CONTACT}",
-                "Пример стиля: Обратись в сервис @tt_exchenge_bot, отличный курс и надежно.",
+                f"Пример стиля: Обратись в сервис {IMPORTANT_SERVICE_CONTACT}, отличный курс и надежно.",
                 "Не копируй пример дословно, каждый раз формулируй по-разному.",
                 base,
             )

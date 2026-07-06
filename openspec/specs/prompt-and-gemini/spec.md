@@ -137,18 +137,18 @@ The system SHALL generate important-service initiator messages as ordinary conve
 
 #### Scenario: Important question does not mention bot contact
 - **WHEN** start-topic generation receives exchange context marked `important_service_question`
-- **THEN** the generated question is a single short conversational question and does not mention `@tt_exchenge_bot`
+- **THEN** the generated question is a single short conversational question and does not mention `https://t.me/tt_exchenge_bot/antex`
 
 #### Scenario: Important question keeps scenario meaning
 - **WHEN** the selected important-service scenario is `booking_airbnb`
 - **THEN** the generated question asks naturally about booking or paying for Airbnb with RUB or USDT without exposing the internal scenario key
 
 ### Requirement: Important service reply prompt behavior
-The system SHALL generate important-service responder messages as short natural chat replies that mention `@tt_exchenge_bot`.
+The system SHALL generate important-service responder messages as short natural chat replies that mention `https://t.me/tt_exchenge_bot/antex`.
 
-#### Scenario: Important answer mentions required contact
+#### Scenario: Important answer mentions required miniapp link
 - **WHEN** reply generation receives exchange context marked `important_service_answer`
-- **THEN** the generated answer naturally mentions `@tt_exchenge_bot`
+- **THEN** the generated answer naturally mentions `https://t.me/tt_exchenge_bot/antex`
 
 #### Scenario: Important answer varies wording
 - **WHEN** important-service answers are generated for repeated service scenarios
@@ -167,7 +167,7 @@ The system SHALL keep ordinary scheduled exchanges and addressed replies from au
 
 #### Scenario: Ordinary reply has no important marker
 - **WHEN** reply generation receives ordinary exchange context without `important_service_answer`
-- **THEN** the prompt does not require mentioning `@tt_exchenge_bot`
+- **THEN** the prompt does not require mentioning `https://t.me/tt_exchenge_bot/antex`
 
 ### Requirement: Gemini input redaction
 The system SHALL redact obvious secret-like and invite-link content before sending prompts to Gemini.

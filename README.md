@@ -46,7 +46,7 @@
 - если важный exchange был в группе в день `N`, следующий важный exchange для этой группы допустим не раньше дня `N+3`;
 - сценарии идут по кругу: обмен RUB -> Airbnb оплата/бронь -> обмен USDT -> Booking оплата/бронь;
 - вопрос звучит как обычная реплика и не упоминает контакт;
-- ответ второго бота естественно и разными формулировками упоминает `@tt_exchenge_bot`.
+- ответ второго бота естественно и разными формулировками упоминает miniapp-ссылку `https://t.me/tt_exchenge_bot/antex`.
 
 ## Что нужно для запуска
 
@@ -178,7 +178,7 @@ Runtime читает реальные файлы:
 - `important_service_question` для вопроса инициатора;
 - `important_service_answer` для ответа второго бота.
 
-Без этих markers промты должны оставаться обычными и не превращать плановые темы или addressed replies в рекламу. С marker `important_service_answer` ответ должен коротко и разговорно упомянуть `@tt_exchenge_bot`.
+Без этих markers промты должны оставаться обычными и не превращать плановые темы или addressed replies в рекламу. С marker `important_service_answer` ответ должен коротко и разговорно упомянуть `https://t.me/tt_exchenge_bot/antex`.
 
 ### 5. Подготовить persona-файлы
 
@@ -326,7 +326,7 @@ uv run pytest tests/test_reply_router.py
 2. Временно задай ближайшее `active_windows_utc`.
 3. Запусти приложение и дождись scheduler tick.
 4. Проверь, что первый important-сценарий задаёт вопрос про обмен безналичных рублей.
-5. Проверь, что ответ второго бота упоминает `@tt_exchenge_bot`.
+5. Проверь, что ответ второго бота упоминает `https://t.me/tt_exchenge_bot/antex`.
 6. Проверь в SQLite, что exchange записан с `exchange_kind = important_service` и `important_scenario`.
 
 ## Важные ограничения

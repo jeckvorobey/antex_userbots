@@ -585,7 +585,7 @@ async def test_orchestrator_important_service_replaces_regular_topic_when_due():
     assert exchange_store.create_exchange.await_args.kwargs["exchange_kind"] == "important_service"
     assert exchange_store.create_exchange.await_args.kwargs["important_scenario"] == "exchange_rub"
     assert "important_service_question" in prompt_composer.compose.await_args.kwargs["exchange_context"]
-    assert "@tt_exchenge_bot" in prompt_composer.compose.await_args.kwargs["exchange_context"]
+    assert "https://t.me/tt_exchenge_bot/antex" in prompt_composer.compose.await_args.kwargs["exchange_context"]
 
 
 @pytest.mark.asyncio
@@ -750,7 +750,9 @@ async def test_orchestrator_important_service_reply_context_mentions_required_co
         manager=_manager_with_clients(initiator_client, responder_client),
         topic_selector=SimpleNamespace(),
         prompt_composer=prompt_composer,
-        gemini_client=SimpleNamespace(generate_reply=AsyncMock(return_value="Я бы написал в @tt_exchenge_bot.")),
+        gemini_client=SimpleNamespace(
+            generate_reply=AsyncMock(return_value="Я бы через https://t.me/tt_exchenge_bot/antex попробовал.")
+        ),
         history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
         exchange_store=exchange_store,
         group_target="@chat",
@@ -762,7 +764,7 @@ async def test_orchestrator_important_service_reply_context_mentions_required_co
     context = prompt_composer.compose.await_args.kwargs["exchange_context"]
     assert "important_service_answer" in context
     assert "exchange_rub" in context
-    assert "@tt_exchenge_bot" in context
+    assert "https://t.me/tt_exchenge_bot/antex" in context
     assert "Обратись в сервис" in context
 
 
