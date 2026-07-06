@@ -52,6 +52,21 @@ The system SHALL load Telegram API credentials, Gemini API key, optional proxy, 
 - **WHEN** a configured bot references a missing or empty `session_env`
 - **THEN** settings loading fails with the missing environment variable name
 
+### Requirement: Production settings resolve production bot sessions
+The system SHALL keep `config/settings.prod.toml` loadable against the production environment variable names declared in `.env.prod`.
+
+#### Scenario: Production settings are valid TOML
+- **WHEN** `config/settings.prod.toml` is parsed
+- **THEN** parsing succeeds without TOML syntax errors
+
+#### Scenario: Production bot sessions are declared in environment file
+- **WHEN** production `[[swarm.bots]]` entries reference `session_env` names
+- **THEN** each referenced name exists in `.env.prod`
+
+#### Scenario: Production session keys are represented in settings
+- **WHEN** `.env.prod` declares `SESSION_STRING_*` keys
+- **THEN** each production session key is referenced by exactly one `[[swarm.bots]]` entry
+
 ### Requirement: Stable runtime defaults are code-managed
 The system SHALL provide code-managed defaults for repository-stable runtime paths and technical bootstrap values so that a minimal instance config does not need to repeat them.
 
@@ -132,4 +147,3 @@ The system SHALL support a dedicated `swarm.security` configuration section for 
 #### Scenario: Security overrides are applied
 - **WHEN** the TOML provides `swarm.security` override fields
 - **THEN** settings expose those overrides as effective runtime security values
-

@@ -1,6 +1,7 @@
 """Тесты TOML-конфигурации приложения."""
 
 from pathlib import Path
+import tomllib
 from unittest.mock import patch
 
 import pytest
@@ -714,3 +715,82 @@ def test_settings_rejects_persona_file_outside_profiles_dir(tmp_path, persona_fi
     with patch.dict("os.environ", env, clear=True):
         with pytest.raises(Exception, match="persona_file"):
             Settings(_env_file=None)
+
+
+def _env_file_keys(path: Path) -> set[str]:
+    """Возвращает только имена переменных из env-файла без чтения значений."""
+    keys: set[str] = set()
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _value = line.split("=", maxsplit=1)
+        keys.add(key.strip())
+    return keys
+
+
+def _require_local_prod_files() -> tuple[Path, Path]:
+    """Возвращает локальные prod-файлы или пропускает тест в чистом checkout."""
+    settings_path = Path("config/settings.prod.toml")
+    env_path = Path(".env.prod")
+    if not settings_path.exists() or not env_path.exists():
+        pytest.skip("Локальные prod-файлы отсутствуют в этом checkout")
+    return settings_path, env_path
+
+
+def test_prod_settings_toml_is_valid_and_matches_env_sessions():
+    """Проверяет prod TOML и соответствие session_env ключам .env.prod без вывода секретов."""
+    settings_path, env_path = _require_local_prod_files()
+    settings_data = tomllib.loads(settings_path.read_text(encoding="utf-8"))
+    prod_env_keys = _env_file_keys(env_path)
+    configured_session_keys = [
+        bot["session_env"]
+        for bot in settings_data["swarm"]["bots"]
+    ]
+    prod_session_keys = {
+        key
+        for key in prod_env_keys
+        if key.startswith("SESSION_STRING_")
+    }
+
+    assert configured_session_keys
+    assert len(configured_session_keys) == len(set(configured_session_keys))
+    assert set(configured_session_keys) == prod_session_keys
+
+
+def test_prod_settings_load_with_declared_session_keys():
+    """Проверяет, что production TOML проходит строгую Settings-валидацию."""
+    settings_path, _env_path = _require_local_prod_files()
+    settings_data = tomllib.loads(settings_path.read_text(encoding="utf-8"))
+    env = {
+        bot["session_env"]: "test-session"
+        for bot in settings_data["swarm"]["bots"]
+    }
+
+    with patch.dict("os.environ", env, clear=False):
+        settings = Settings(
+            **BASE_SECRETS,
+            settings_path=str(settings_path),
+        )
+
+    assert settings.swarm_bot_ids == [bot["id"] for bot in settings_data["swarm"]["bots"]]
+    assert [bot.persona_file for bot in settings.swarm_bots] == [
+        bot["persona_file"]
+        for bot in settings_data["swarm"]["bots"]
+    ]
+
+
+def test_prod_settings_persona_files_exist():
+    """Проверяет, что каждый production bot ссылается на существующий persona-файл."""
+    settings_path, _env_path = _require_local_prod_files()
+    settings_data = tomllib.loads(settings_path.read_text(encoding="utf-8"))
+    persona_dir = Path("ai/prompts/bots")
+
+    persona_files = [
+        bot["persona_file"]
+        for bot in settings_data["swarm"]["bots"]
+    ]
+
+    assert persona_files
+    for persona_file in persona_files:
+        assert (persona_dir / persona_file).exists(), f"Нет persona-файла: {persona_file}"

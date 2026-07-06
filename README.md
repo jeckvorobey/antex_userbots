@@ -81,8 +81,8 @@ cp .env.example .env
 API_ID=12345678
 API_HASH=your_telegram_api_hash
 GEMINI_API_KEY=your_gemini_api_key
-SESSION_STRING_ANNA=...
-SESSION_STRING_MIKE=...
+SESSION_STRING_DMITRY=...
+SESSION_STRING_VITALY=...
 ```
 
 Важно:
@@ -137,16 +137,16 @@ silence_timeout_minutes = 60
 skip_if_recent_human_activity = true
 
 [[swarm.bots]]
-id = "anna"
-session_env = "SESSION_STRING_ANNA"
-persona_file = "anna.md"
+id = "dmitry"
+session_env = "SESSION_STRING_DMITRY"
+persona_file = "dmitry.md"
 enabled = true
 temperature = 0.9
 
 [[swarm.bots]]
-id = "mike"
-session_env = "SESSION_STRING_MIKE"
-persona_file = "mike.md"
+id = "vitaly"
+session_env = "SESSION_STRING_VITALY"
+persona_file = "vitaly.md"
 enabled = true
 temperature = 0.8
 ```
@@ -184,9 +184,11 @@ Runtime читает реальные файлы:
 
 Проект ожидает persona-файлы в `ai/prompts/bots`, если ты не используешь внутренний override пути.
 
-Должны существовать файлы вроде:
-- `ai/prompts/bots/anna.md`
-- `ai/prompts/bots/mike.md`
+Должны существовать файлы, указанные в `persona_file`, например:
+- `ai/prompts/bots/dmitry.md`
+- `ai/prompts/bots/vitaly.md`
+
+В production-наборе `ai/prompts/bots` должен соответствовать `config/settings.prod.toml`: каждый файл используется хотя бы одним prod-ботом, а каждый prod-бот ссылается на существующий подробный профиль.
 
 Persona-файлы текущего инстанса также хранятся в git. Секреты и строки сессий в persona/prompts не добавлять.
 

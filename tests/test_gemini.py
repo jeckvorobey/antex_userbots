@@ -60,7 +60,6 @@ def test_runtime_prompt_files_are_committed():
         Path("ai/prompts/start_topic.md"),
         Path("ai/prompts/topics.md"),
         Path("ai/prompts/wind_down_hint.md"),
-        Path("ai/prompts/bots/anna.md"),
     ]
 
     for path in prompt_files:
@@ -80,6 +79,72 @@ async def test_prompt_loader_can_read_committed_runtime_prompt():
 def test_no_prompt_examples_are_required_anymore():
     """Проверяет, что старые шаблоны .example.md удалены из prompt-контракта."""
     assert not list(Path("ai/prompts").glob("**/*.example.md"))
+
+
+def _prod_persona_files() -> set[str]:
+    """Возвращает persona-файлы, объявленные в production TOML."""
+    import tomllib
+
+    settings_path = Path("config/settings.prod.toml")
+    if not settings_path.exists():
+        pytest.skip("Локальный config/settings.prod.toml отсутствует в этом checkout")
+    settings_data = tomllib.loads(settings_path.read_text(encoding="utf-8"))
+    return {
+        bot["persona_file"]
+        for bot in settings_data["swarm"]["bots"]
+    }
+
+
+def test_prod_persona_inventory_matches_settings():
+    """Проверяет, что committed persona inventory соответствует production settings."""
+    configured_personas = _prod_persona_files()
+    committed_personas = {
+        path.name
+        for path in Path("ai/prompts/bots").glob("*.md")
+    }
+
+    assert committed_personas == configured_personas
+
+
+def test_prod_personas_are_detailed_and_structured():
+    """Проверяет, что production persona-профили достаточно подробные и структурированные."""
+    required_sections = [
+        "## Характер",
+        "## Манера общения",
+        "## Поведение в чате",
+        "## Поведение в групповых обсуждениях",
+        "## Реакции",
+        "## Стиль мышления",
+        "## Интересы",
+        "## Небольшой жизненный контекст",
+        "## Индивидуальные привычки",
+        "## Поведение в конфликте",
+        "## Ограничения",
+        "## Вероятностное поведение",
+        "## Взаимоотношения",
+        "## Человеческие несовершенства",
+    ]
+
+    for persona_file in _prod_persona_files():
+        text = (Path("ai/prompts/bots") / persona_file).read_text(encoding="utf-8")
+
+        assert len(text.split()) >= 300, f"Persona слишком короткая: {persona_file}"
+        for section in required_sections:
+            assert section in text, f"В {persona_file} нет секции {section}"
+        assert "никогда не сообщает, что он AI" in text or "никогда не сообщает, что она AI" in text
+        assert "не копирует стиль других персонажей" in text
+        assert "не превращается в \"идеального помощника\"" in text
+
+
+def test_prod_personas_are_not_duplicate_templates():
+    """Проверяет, что production persona-профили не являются одинаковыми шаблонами."""
+    persona_texts = {
+        persona_file: (Path("ai/prompts/bots") / persona_file).read_text(encoding="utf-8")
+        for persona_file in _prod_persona_files()
+    }
+    unique_texts = set(persona_texts.values())
+
+    assert len(unique_texts) == len(persona_texts)
 
 
 def test_shared_topics_are_city_neutral_intents():

@@ -49,15 +49,15 @@ silence_timeout_minutes = 60
 skip_if_recent_human_activity = true
 
 [[swarm.bots]]
-id = "anna"
-session_env = "SESSION_STRING_ANNA"
-persona_file = "anna.md"
+id = "dmitry"
+session_env = "SESSION_STRING_DMITRY"
+persona_file = "dmitry.md"
 enabled = true
 temperature = 0.9
 
 [[swarm.bots]]
-id = "mike"
-session_env = "SESSION_STRING_MIKE"
-persona_file = "mike.md"
+id = "vitaly"
+session_env = "SESSION_STRING_VITALY"
+persona_file = "vitaly.md"
 enabled = true
 temperature = 0.8
