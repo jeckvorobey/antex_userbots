@@ -172,6 +172,17 @@ def test_start_topic_prompt_requires_city_adaptation():
     assert "не копируй тему дословно" in prompt
 
 
+def test_start_topic_prompt_defines_human_opening_rule():
+    """Проверяет, что общий start_topic prompt задаёт человеческие варианты начала."""
+    prompt = Path("ai/prompts/start_topic.md").read_text(encoding="utf-8").lower()
+
+    assert '"привет"' in prompt
+    assert '"всем привет"' in prompt
+    assert '"здравствуйте"' in prompt
+    assert "без вступительного слова" in prompt
+    assert "сразу задавай вопрос" in prompt
+
+
 def test_important_service_start_topic_prompt_contract():
     """Проверяет prompt-контракт important-service вопроса."""
     prompt = Path("ai/prompts/start_topic.md").read_text(encoding="utf-8")
@@ -190,6 +201,28 @@ def test_important_service_reply_prompt_contract():
     assert "естественно упомяни miniapp-ссылку `https://t.me/tt_exchenge_bot/antex`" in prompt
     assert "каждый раз меняй формулировку" in prompt
     assert "отсутствует, не упоминай `https://t.me/tt_exchenge_bot/antex` специально" in prompt
+
+
+def test_prod_persona_communication_style_avoids_marker_openers():
+    """Проверяет, что манера общения не закрепляет заметные стартовые маркеры."""
+    marker_openers = ["кстати", "слушай", "слушайте", "смотри"]
+    human_opening_patterns = [
+        "сразу",
+        "прямо",
+        "привет",
+        "без вступления",
+        "без лишнего захода",
+    ]
+
+    for persona_file in _prod_persona_files():
+        text = (Path("ai/prompts/bots") / persona_file).read_text(encoding="utf-8")
+        communication_style = text.split("## Манера общения", maxsplit=1)[1].split("## ", maxsplit=1)[0].lower()
+        restrictions = text.split("## Ограничения", maxsplit=1)[1].split("## ", maxsplit=1)[0].lower()
+
+        assert "не начинает сообщения" not in restrictions, persona_file
+        for opener in marker_openers:
+            assert opener not in communication_style, persona_file
+        assert any(pattern in communication_style for pattern in human_opening_patterns), persona_file
 
 
 def test_gemini_client_initializes_with_api_key():

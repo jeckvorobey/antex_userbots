@@ -106,6 +106,10 @@ The system SHALL generate replies by sending system instruction, rendered histor
 - **WHEN** scheduled start-topic generation is composed for a group
 - **THEN** the system instruction includes rules to transform the shared topic intent into one natural question for that group's city and not mention another city
 
+#### Scenario: Start topic uses human opening variants
+- **WHEN** scheduled start-topic generation is composed
+- **THEN** the prompt instructs Gemini to begin like an ordinary chat participant using `привет`, `всем привет`, `здравствуйте`, or by asking the question directly without an introductory word
+
 ### Requirement: Gemini resilience
 The system SHALL retry temporary Gemini failures and optionally switch to a fallback model.
 
