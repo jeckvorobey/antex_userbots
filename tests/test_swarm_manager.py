@@ -2,7 +2,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -142,3 +142,107 @@ async def test_swarm_manager_skips_bot_when_startup_fails():
     assert set(manager.clients) == {"john"}
     assert manager.swarm_user_ids == {202}
     assert manager.runtime_states["anna"].status == "error"
+
+
+@pytest.mark.asyncio
+async def test_swarm_manager_disconnects_client_cancelled_during_startup_hook():
+    """Проверяет cleanup клиента при SIGTERM во время долгого startup hook."""
+    hook_started = asyncio.Event()
+    fake_client = SimpleNamespace(
+        start=AsyncMock(),
+        stop=AsyncMock(),
+        get_current_user=AsyncMock(return_value=SimpleNamespace(id=101)),
+        run_until_disconnected=AsyncMock(),
+    )
+
+    async def startup_hook(_profile, _client):
+        hook_started.set()
+        await asyncio.Event().wait()
+
+    manager = SwarmManager(
+        bot_profiles=[SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md")],
+        client_factory=lambda _profile: fake_client,
+        startup_hook=startup_hook,
+    )
+    startup = asyncio.create_task(manager.start())
+    await hook_started.wait()
+
+    startup.cancel()
+    await asyncio.gather(startup, return_exceptions=True)
+
+    fake_client.stop.assert_awaited_once()
+    assert manager.active_bot_ids == []
+    assert manager.clients == {}
+
+
+@pytest.mark.asyncio
+async def test_swarm_manager_stops_remaining_clients_after_one_stop_error(caplog):
+    """Проверяет best-effort cleanup всех clients при единичной ошибке disconnect."""
+    broken_client = SimpleNamespace(stop=AsyncMock(side_effect=RuntimeError("disconnect failed")))
+    healthy_client = SimpleNamespace(stop=AsyncMock())
+    manager = SwarmManager(bot_profiles=[], client_factory=Mock())
+    manager.clients = {"broken": broken_client, "healthy": healthy_client}
+
+    await manager.stop()
+
+    broken_client.stop.assert_awaited_once()
+    healthy_client.stop.assert_awaited_once()
+    assert "disconnect failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_swarm_manager_times_out_hanging_client_and_stops_remaining_clients(caplog):
+    """Проверяет bounded disconnect всех registered clients."""
+
+    async def hang_forever():
+        await asyncio.Event().wait()
+
+    hanging_client = SimpleNamespace(stop=AsyncMock(side_effect=hang_forever))
+    healthy_client = SimpleNamespace(stop=AsyncMock())
+    manager = SwarmManager(
+        bot_profiles=[],
+        client_factory=Mock(),
+        client_stop_timeout_seconds=0.01,
+    )
+    manager.clients = {"hanging": hanging_client, "healthy": healthy_client}
+
+    await asyncio.wait_for(manager.stop(), timeout=0.2)
+
+    hanging_client.stop.assert_awaited_once()
+    healthy_client.stop.assert_awaited_once()
+    assert "timeout" in caplog.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_swarm_manager_times_out_unregistered_client_cancelled_during_startup(caplog):
+    """Проверяет deadline cleanup незарегистрированного startup client."""
+    hook_started = asyncio.Event()
+
+    async def startup_hook(_profile, _client):
+        hook_started.set()
+        await asyncio.Event().wait()
+
+    async def hang_forever():
+        await asyncio.Event().wait()
+
+    fake_client = SimpleNamespace(
+        start=AsyncMock(),
+        stop=AsyncMock(side_effect=hang_forever),
+        get_current_user=AsyncMock(return_value=SimpleNamespace(id=101)),
+        run_until_disconnected=AsyncMock(),
+    )
+    manager = SwarmManager(
+        bot_profiles=[SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md")],
+        client_factory=lambda _profile: fake_client,
+        startup_hook=startup_hook,
+        client_stop_timeout_seconds=0.01,
+    )
+    startup = asyncio.create_task(manager.start())
+    await hook_started.wait()
+
+    startup.cancel()
+    await asyncio.wait_for(asyncio.gather(startup, return_exceptions=True), timeout=0.2)
+
+    fake_client.stop.assert_awaited_once()
+    assert manager.clients == {}
+    assert "timeout" in caplog.text.lower()

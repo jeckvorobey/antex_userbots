@@ -5,19 +5,23 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import signal
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from urllib.parse import urlparse
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import aiosqlite
 
 from ai.gemini import GeminiClient, PromptLoader
 from ai.history import MessageHistory
 from ai.prompt_composer import PromptComposer
 from core.config import SettingsReloadWatcher, load_settings_or_exit
 from core.logging import setup_logging
+from core.runtime_lock import RuntimeInstanceLock
 from core.runtime_models import SwarmBotProfile
+from core.runtime_volume import RuntimeVolumeGuard
 from userbot.client import UserBotClient
 from userbot.exchange_store import ExchangeStore
 from userbot.orchestrator import SwarmOrchestrator
@@ -27,6 +31,44 @@ from userbot.swarm_manager import SwarmManager
 
 
 logger = logging.getLogger(__name__)
+
+
+CONTAINER_HANDOVER_DELAY_SECONDS = 5.0
+RUNTIME_LOCK_POLL_INTERVAL_SECONDS = 0.5
+RUNTIME_LOCK_TIMEOUT_SECONDS = 60.0
+SQLITE_BOOTSTRAP_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)
+RUNTIME_RESOURCE_CLOSE_TIMEOUT_SECONDS = 3.0
+
+
+async def _close_runtime_resource(resource: object) -> None:
+    """Закрывает один runtime resource не дольше cleanup deadline."""
+    close = getattr(resource, "close", None)
+    if not callable(close):
+        return
+    result = close()
+    if inspect.isawaitable(result):
+        await asyncio.wait_for(result, timeout=RUNTIME_RESOURCE_CLOSE_TIMEOUT_SECONDS)
+
+
+async def _close_runtime_resources(resources: list[object]) -> None:
+    """Параллельно и best-effort закрывает runtime resources."""
+    cleanup_results = await asyncio.gather(
+        *(_close_runtime_resource(resource) for resource in resources),
+        return_exceptions=True,
+    )
+    for resource, cleanup_result in zip(resources, cleanup_results, strict=True):
+        if isinstance(cleanup_result, TimeoutError):
+            logger.error(
+                "Timeout закрытия runtime-ресурса type=%s timeout=%.1f sec",
+                type(resource).__name__,
+                RUNTIME_RESOURCE_CLOSE_TIMEOUT_SECONDS,
+            )
+        elif isinstance(cleanup_result, BaseException):
+            logger.error(
+                "Ошибка закрытия runtime-ресурса type=%s: %s",
+                type(resource).__name__,
+                cleanup_result,
+            )
 
 
 @dataclass(slots=True)
@@ -42,12 +84,7 @@ class RuntimeContext:
 
     async def close(self) -> None:
         """Закрывает runtime-ресурсы с внешними соединениями."""
-        for resource in (self.history, self.exchange_store):
-            close = getattr(resource, "close", None)
-            if callable(close):
-                result = close()
-                if inspect.isawaitable(result):
-                    await result
+        await _close_runtime_resources([self.history, self.exchange_store])
 
 
 def _utc_now() -> datetime:
@@ -417,48 +454,82 @@ def _prune_orchestrator_cache(
             cache.pop(group_id, None)
 
 
-async def _build_runtime_context(settings: object) -> RuntimeContext:
-    """Создаёт общие runtime-зависимости swarm."""
+async def _build_runtime_context_once(settings: object) -> RuntimeContext:
+    """Однократно создаёт общие runtime-зависимости swarm."""
     history = MessageHistory(settings.db_path)
-    await history.init_db()
+    exchange_store: ExchangeStore | None = None
+    try:
+        await history.init_db()
 
-    prompt_loader = PromptLoader(settings.prompts_dir)
-    gemini_client = GeminiClient(
-        settings.gemini_api_key,
-        model_name=settings.gemini_model,
-        proxy_url=settings.proxy_url,
-        fallback_model_name=settings.gemini_fallback_model,
-        max_retries=settings.gemini_max_retries,
-        retry_backoff_seconds=settings.gemini_retry_backoff_seconds,
-        retry_jitter_seconds=settings.gemini_retry_jitter_seconds,
-        request_timeout_seconds=settings.gemini_request_timeout_seconds,
-        temperature=settings.gemini_temperature,
-        max_output_chars=getattr(settings, "swarm_max_output_chars", 400),
-        max_mentions_per_message=getattr(settings, "swarm_max_mentions_per_message", 2),
-    )
-    topic_selector = TopicSelector(settings.topics_path)
-    await topic_selector.load()
-    prompt_composer = PromptComposer(prompt_loader=prompt_loader, bot_profiles_dir=settings.bot_profiles_dir)
-    exchange_store = ExchangeStore(settings.db_path)
-    await exchange_store.init_db()
-    retention_days = getattr(settings, "swarm_history_retention_days", 30)
-    await history.prune_older_than(retention_days=retention_days)
-    await exchange_store.prune_older_than(retention_days=retention_days)
+        prompt_loader = PromptLoader(settings.prompts_dir)
+        gemini_client = GeminiClient(
+            settings.gemini_api_key,
+            model_name=settings.gemini_model,
+            proxy_url=settings.proxy_url,
+            fallback_model_name=settings.gemini_fallback_model,
+            max_retries=settings.gemini_max_retries,
+            retry_backoff_seconds=settings.gemini_retry_backoff_seconds,
+            retry_jitter_seconds=settings.gemini_retry_jitter_seconds,
+            request_timeout_seconds=settings.gemini_request_timeout_seconds,
+            temperature=settings.gemini_temperature,
+            max_output_chars=getattr(settings, "swarm_max_output_chars", 400),
+            max_mentions_per_message=getattr(settings, "swarm_max_mentions_per_message", 2),
+        )
+        topic_selector = TopicSelector(settings.topics_path)
+        await topic_selector.load()
+        prompt_composer = PromptComposer(prompt_loader=prompt_loader, bot_profiles_dir=settings.bot_profiles_dir)
+        exchange_store = ExchangeStore(settings.db_path)
+        await exchange_store.init_db()
+        retention_days = getattr(settings, "swarm_history_retention_days", 30)
+        await history.prune_older_than(retention_days=retention_days)
+        await exchange_store.prune_older_than(retention_days=retention_days)
 
-    logger.info(
-        "RuntimeContext инициализирован: db_path=%s prompts_dir=%s topics=%s",
-        settings.db_path,
-        settings.prompts_dir,
-        len(topic_selector.topics),
-    )
-    return RuntimeContext(
-        history=history,
-        prompt_loader=prompt_loader,
-        gemini_client=gemini_client,
-        topic_selector=topic_selector,
-        prompt_composer=prompt_composer,
-        exchange_store=exchange_store,
-    )
+        logger.info(
+            "RuntimeContext инициализирован: db_path=%s prompts_dir=%s topics=%s",
+            settings.db_path,
+            settings.prompts_dir,
+            len(topic_selector.topics),
+        )
+        return RuntimeContext(
+            history=history,
+            prompt_loader=prompt_loader,
+            gemini_client=gemini_client,
+            topic_selector=topic_selector,
+            prompt_composer=prompt_composer,
+            exchange_store=exchange_store,
+        )
+    except BaseException:
+        resources = [history]
+        if exchange_store is not None:
+            resources.append(exchange_store)
+        await _close_runtime_resources(resources)
+        raise
+
+
+def _is_sqlite_lock_error(exc: aiosqlite.OperationalError) -> bool:
+    """Определяет только временные SQLite lock errors, пригодные для retry."""
+    message = str(exc).lower()
+    return "database is locked" in message or "database table is locked" in message
+
+
+async def _build_runtime_context(settings: object) -> RuntimeContext:
+    """Создаёт runtime-зависимости с ограниченным retry SQLite bootstrap."""
+    for attempt in range(len(SQLITE_BOOTSTRAP_RETRY_DELAYS_SECONDS) + 1):
+        try:
+            return await _build_runtime_context_once(settings)
+        except aiosqlite.OperationalError as exc:
+            if not _is_sqlite_lock_error(exc) or attempt >= len(SQLITE_BOOTSTRAP_RETRY_DELAYS_SECONDS):
+                raise
+            delay = SQLITE_BOOTSTRAP_RETRY_DELAYS_SECONDS[attempt]
+            logger.warning(
+                "SQLite bootstrap временно заблокирован: attempt=%s/%s retry_in=%.1f sec error=%s",
+                attempt + 1,
+                len(SQLITE_BOOTSTRAP_RETRY_DELAYS_SECONDS) + 1,
+                delay,
+                exc,
+            )
+            await asyncio.sleep(delay)
+    raise AssertionError("Недостижимая ветка SQLite bootstrap retry")
 
 
 def _build_swarm_bot_profiles(settings: object) -> list[SwarmBotProfile]:
@@ -540,105 +611,110 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
             groups=current_groups,
         ),
     )
-    await manager.start()
-    if len(manager.active_bot_ids) < 2:
-        raise ValueError("Swarm mode requires at least two active bots after startup")
-    enabled_group_chat_ids = {
-        group.group_chat_id for group in current_groups if isinstance(getattr(group, "group_chat_id", None), int)
-    }
-    await _register_swarm_handlers(manager, runtime, lambda: current_settings, enabled_group_chat_ids or None)
+    supervise_tasks: list[asyncio.Task[None]] = []
+    try:
+        await manager.start()
+        if len(manager.active_bot_ids) < 2:
+            raise ValueError("Swarm mode requires at least two active bots after startup")
+        enabled_group_chat_ids = {
+            group.group_chat_id for group in current_groups if isinstance(getattr(group, "group_chat_id", None), int)
+        }
+        await _register_swarm_handlers(manager, runtime, lambda: current_settings, enabled_group_chat_ids or None)
 
-    first_client = manager.get_client(manager.active_bot_ids[0]).client
-    for group in current_groups:
-        await _log_resolved_group(first_client, group.group_chat_id, group.group_target)
-
-    reload_watcher = SettingsReloadWatcher(current_settings)
-    orchestrator_cache: dict[str, tuple[tuple[object, ...], object]] = {}
-
-    async def orchestrator_tick() -> bool:
-        nonlocal current_settings, current_groups
-        reloaded_settings = reload_watcher.poll()
-        if reloaded_settings is not None:
-            current_settings = reloaded_settings
-            current_groups = _enabled_groups_from_settings(current_settings)
-            enabled_group_chat_ids.clear()
-            enabled_group_chat_ids.update(
-                group.group_chat_id for group in current_groups if isinstance(getattr(group, "group_chat_id", None), int)
-            )
-            logger.info("settings reload: enabled_groups=%s", [group.id for group in current_groups])
-
-        any_started = False
-        _prune_orchestrator_cache(orchestrator_cache, {group.id for group in current_groups})
+        first_client = manager.get_client(manager.active_bot_ids[0]).client
         for group in current_groups:
-            resolved_group_target = await _resolve_group_target(
-                first_client,
-                getattr(group, "group_chat_id", None),
-                getattr(group, "group_target", None),
-            )
-            group_target = resolved_group_target or getattr(group, "group_target", None) or getattr(group, "group_chat_id", None)
-            group_chat_id = _extract_resolved_chat_id(resolved_group_target, getattr(group, "group_chat_id", None))
-            if group_target is None:
-                logger.warning("orchestrator: skip group without target group_id=%s", group.id)
-                continue
-            signature = _build_group_orchestrator_signature(
-                group=group,
-                group_target=group_target,
-                group_chat_id=group_chat_id,
-                skip_if_recent_human_activity=current_settings.swarm_skip_if_recent_human_activity,
-            )
+            await _log_resolved_group(first_client, group.group_chat_id, group.group_target)
 
-            def build_orchestrator(
-                *,
-                _group=group,
-                _group_target=group_target,
-                _group_chat_id=group_chat_id,
-                _settings=current_settings,
-            ) -> SwarmOrchestrator:
-                return SwarmOrchestrator(
-                    bot_profiles=bot_profiles,
-                    manager=manager,
-                    topic_selector=runtime.topic_selector,
-                    prompt_composer=runtime.prompt_composer,
-                    gemini_client=runtime.gemini_client,
-                    history=runtime.history,
-                    exchange_store=runtime.exchange_store,
-                    group_id=_group.id,
-                    group_city=_group.city,
-                    group_target=_group_target,
-                    group_chat_id=_group_chat_id,
-                    max_turns_per_exchange=_group.max_turns_per_exchange,
-                    active_windows_utc=_group.active_windows_utc,
-                    initiator_offset_minutes=_group.initiator_offset_minutes,
-                    responder_delay_minutes=_group.responder_delay_minutes,
-                    skip_if_recent_human_activity=_settings.swarm_skip_if_recent_human_activity,
-                    allow_external_llm_for_scheduled=_settings.swarm_allow_external_llm_for_scheduled,
-                    resolve_group_target=lambda telegram_client, _resolver_group=_group: _resolve_group_target(
-                        telegram_client,
-                        getattr(_resolver_group, "group_chat_id", None),
-                        getattr(_resolver_group, "group_target", None),
-                    ),
+        reload_watcher = SettingsReloadWatcher(current_settings)
+        orchestrator_cache: dict[str, tuple[tuple[object, ...], object]] = {}
+
+        async def orchestrator_tick() -> bool:
+            nonlocal current_settings, current_groups
+            reloaded_settings = reload_watcher.poll()
+            if reloaded_settings is not None:
+                current_settings = reloaded_settings
+                current_groups = _enabled_groups_from_settings(current_settings)
+                enabled_group_chat_ids.clear()
+                enabled_group_chat_ids.update(
+                    group.group_chat_id for group in current_groups if isinstance(getattr(group, "group_chat_id", None), int)
+                )
+                logger.info("settings reload: enabled_groups=%s", [group.id for group in current_groups])
+
+            any_started = False
+            _prune_orchestrator_cache(orchestrator_cache, {group.id for group in current_groups})
+            for group in current_groups:
+                resolved_group_target = await _resolve_group_target(
+                    first_client,
+                    getattr(group, "group_chat_id", None),
+                    getattr(group, "group_target", None),
+                )
+                group_target = resolved_group_target or getattr(group, "group_target", None) or getattr(group, "group_chat_id", None)
+                group_chat_id = _extract_resolved_chat_id(resolved_group_target, getattr(group, "group_chat_id", None))
+                if group_target is None:
+                    logger.warning("orchestrator: skip group without target group_id=%s", group.id)
+                    continue
+                signature = _build_group_orchestrator_signature(
+                    group=group,
+                    group_target=group_target,
+                    group_chat_id=group_chat_id,
+                    skip_if_recent_human_activity=current_settings.swarm_skip_if_recent_human_activity,
                 )
 
-            orchestrator = _get_cached_group_orchestrator(
-                orchestrator_cache,
-                group.id,
-                signature,
-                build_orchestrator,
-            )
-            any_started = await orchestrator.run_once() or any_started
-        return any_started
+                def build_orchestrator(
+                    *,
+                    _group=group,
+                    _group_target=group_target,
+                    _group_chat_id=group_chat_id,
+                    _settings=current_settings,
+                ) -> SwarmOrchestrator:
+                    return SwarmOrchestrator(
+                        bot_profiles=bot_profiles,
+                        manager=manager,
+                        topic_selector=runtime.topic_selector,
+                        prompt_composer=runtime.prompt_composer,
+                        gemini_client=runtime.gemini_client,
+                        history=runtime.history,
+                        exchange_store=runtime.exchange_store,
+                        group_id=_group.id,
+                        group_city=_group.city,
+                        group_target=_group_target,
+                        group_chat_id=_group_chat_id,
+                        max_turns_per_exchange=_group.max_turns_per_exchange,
+                        active_windows_utc=_group.active_windows_utc,
+                        initiator_offset_minutes=_group.initiator_offset_minutes,
+                        responder_delay_minutes=_group.responder_delay_minutes,
+                        skip_if_recent_human_activity=_settings.swarm_skip_if_recent_human_activity,
+                        allow_external_llm_for_scheduled=_settings.swarm_allow_external_llm_for_scheduled,
+                        resolve_group_target=lambda telegram_client, _resolver_group=_group: _resolve_group_target(
+                            telegram_client,
+                            getattr(_resolver_group, "group_chat_id", None),
+                            getattr(_resolver_group, "group_target", None),
+                        ),
+                    )
 
-    scheduler.add_job(
-        orchestrator_tick,
-        "interval",
-        seconds=current_settings.swarm_tick_seconds,
-        max_instances=1,
-        coalesce=True,
-    )
-    logger.info("SwarmOrchestrator зарегистрирован: tick_seconds=%s groups=%s", current_settings.swarm_tick_seconds, len(current_groups))
+                orchestrator = _get_cached_group_orchestrator(
+                    orchestrator_cache,
+                    group.id,
+                    signature,
+                    build_orchestrator,
+                )
+                any_started = await orchestrator.run_once() or any_started
+            return any_started
 
-    supervise_tasks = [asyncio.create_task(manager.supervise_bot(bot_id)) for bot_id in manager.active_bot_ids]
-    try:
+        scheduler.add_job(
+            orchestrator_tick,
+            "interval",
+            seconds=current_settings.swarm_tick_seconds,
+            max_instances=1,
+            coalesce=True,
+        )
+        logger.info(
+            "SwarmOrchestrator зарегистрирован: tick_seconds=%s groups=%s",
+            current_settings.swarm_tick_seconds,
+            len(current_groups),
+        )
+
+        supervise_tasks = [asyncio.create_task(manager.supervise_bot(bot_id)) for bot_id in manager.active_bot_ids]
         await asyncio.gather(*supervise_tasks)
     finally:
         for task in supervise_tasks:
@@ -647,28 +723,152 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
         await manager.stop()
 
 
+def _handle_shutdown_signal(received_signal: signal.Signals, shutdown_event: asyncio.Event) -> None:
+    """Переводит Unix signal в управляемый asyncio shutdown event."""
+    if shutdown_event.is_set():
+        return
+    logger.info("Получен сигнал остановки: signal=%s", received_signal.name)
+    shutdown_event.set()
+
+
+def _install_signal_handlers(loop: asyncio.AbstractEventLoop, shutdown_event: asyncio.Event) -> list[signal.Signals]:
+    """Устанавливает обработчики container SIGTERM и интерактивного SIGINT."""
+    installed: list[signal.Signals] = []
+    for handled_signal in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(handled_signal, _handle_shutdown_signal, handled_signal, shutdown_event)
+        except (NotImplementedError, RuntimeError):
+            logger.warning("Async signal handler недоступен: signal=%s", handled_signal.name)
+            continue
+        installed.append(handled_signal)
+    return installed
+
+
+def _remove_signal_handlers(loop: asyncio.AbstractEventLoop, installed: list[signal.Signals]) -> None:
+    """Удаляет только обработчики, установленные текущим lifecycle."""
+    for handled_signal in installed:
+        loop.remove_signal_handler(handled_signal)
+
+
+async def _wait_for_shutdown(shutdown_event: asyncio.Event, timeout_seconds: float) -> bool:
+    """Ожидает shutdown не дольше timeout и возвращает факт сигнала."""
+    if shutdown_event.is_set():
+        return True
+    if timeout_seconds <= 0:
+        return False
+    try:
+        await asyncio.wait_for(shutdown_event.wait(), timeout=timeout_seconds)
+    except TimeoutError:
+        return False
+    return True
+
+
+async def _await_phase_or_shutdown(awaitable: object, shutdown_event: asyncio.Event) -> tuple[bool, object | None]:
+    """Выполняет async startup-фазу и отменяет её при shutdown."""
+    phase_task = asyncio.ensure_future(awaitable)
+    shutdown_task = asyncio.create_task(shutdown_event.wait())
+    done, _pending = await asyncio.wait((phase_task, shutdown_task), return_when=asyncio.FIRST_COMPLETED)
+    if phase_task in done:
+        shutdown_task.cancel()
+        await asyncio.gather(shutdown_task, return_exceptions=True)
+        return True, await phase_task
+
+    phase_task.cancel()
+    await asyncio.gather(phase_task, return_exceptions=True)
+    return False, None
+
+
+async def _shutdown_scheduler(scheduler: AsyncIOScheduler) -> None:
+    """Останавливает scheduler и ожидает async-реализацию при её наличии."""
+    shutdown = getattr(scheduler, "shutdown", None)
+    if not callable(shutdown):
+        return
+    try:
+        result = shutdown(wait=False)
+        if inspect.isawaitable(result):
+            await result
+    except Exception as exc:
+        logger.error("Ошибка остановки scheduler: %s", exc)
+
+
+async def _run_application(settings: object, shutdown_event: asyncio.Event) -> None:
+    """Управляет container handover и полным lifecycle runtime-ресурсов."""
+    RuntimeVolumeGuard(settings.db_path).verify()
+    runtime_lock = RuntimeInstanceLock(
+        settings.db_path,
+        poll_interval_seconds=RUNTIME_LOCK_POLL_INTERVAL_SECONDS,
+        timeout_seconds=RUNTIME_LOCK_TIMEOUT_SECONDS,
+    )
+    runtime: RuntimeContext | None = None
+    scheduler: AsyncIOScheduler | None = None
+    scheduler_stopped = False
+    swarm_task: asyncio.Task[None] | None = None
+
+    try:
+        logger.info("Ожидание container handover перед runtime startup: %.1f sec", CONTAINER_HANDOVER_DELAY_SECONDS)
+        if await _wait_for_shutdown(shutdown_event, CONTAINER_HANDOVER_DELAY_SECONDS):
+            logger.info("Startup отменён сигналом во время container handover")
+            return
+        if not await runtime_lock.acquire(shutdown_event=shutdown_event):
+            logger.info("Startup отменён сигналом во время ожидания runtime lock")
+            return
+
+        initialized, runtime_result = await _await_phase_or_shutdown(_build_runtime_context(settings), shutdown_event)
+        if not initialized:
+            logger.info("Startup отменён сигналом во время SQLite bootstrap")
+            return
+        runtime = runtime_result
+        if not isinstance(runtime, RuntimeContext) and not hasattr(runtime, "close"):
+            raise TypeError("Runtime bootstrap вернул некорректный context")
+
+        scheduler = AsyncIOScheduler()
+        scheduler.start()
+        logger.info("Планировщик запущен")
+
+        swarm_task = asyncio.create_task(_run_swarm_mode(settings, runtime, scheduler))
+        shutdown_task = asyncio.create_task(shutdown_event.wait())
+        done, _pending = await asyncio.wait((swarm_task, shutdown_task), return_when=asyncio.FIRST_COMPLETED)
+        if swarm_task in done:
+            shutdown_task.cancel()
+            await asyncio.gather(shutdown_task, return_exceptions=True)
+            await swarm_task
+            return
+
+        logger.info("Начало graceful shutdown swarm runtime")
+        await _shutdown_scheduler(scheduler)
+        scheduler_stopped = True
+        swarm_task.cancel()
+        await asyncio.gather(swarm_task, return_exceptions=True)
+    finally:
+        if swarm_task is not None and not swarm_task.done():
+            swarm_task.cancel()
+            await asyncio.gather(swarm_task, return_exceptions=True)
+        if scheduler is not None and not scheduler_stopped:
+            await _shutdown_scheduler(scheduler)
+        if runtime is not None:
+            await runtime.close()
+        try:
+            runtime_lock.release()
+        except Exception as exc:
+            logger.error("Ошибка освобождения runtime lock: %s", exc)
+        logger.info("Swarm userbot остановлен")
+
+
 async def main() -> None:
-    """Инициализирует и запускает swarm userbot."""
+    """Инициализирует и запускает swarm userbot с graceful signal handling."""
     settings = load_settings_or_exit()
     setup_logging(settings.log_level)
     logger.info("Запуск swarm userbot")
     if settings.mode != "swarm":
         raise ValueError("Поддерживается только mode=swarm")
 
-    runtime = await _build_runtime_context(settings)
-    scheduler = AsyncIOScheduler()
-    scheduler.start()
-    logger.info("Планировщик запущен")
+    loop = asyncio.get_running_loop()
+    shutdown_event = asyncio.Event()
+    installed_signals = _install_signal_handlers(loop, shutdown_event)
     try:
-        await _run_swarm_mode(settings, runtime, scheduler)
+        await _run_application(settings, shutdown_event)
     finally:
-        shutdown = getattr(scheduler, "shutdown", None)
-        if callable(shutdown):
-            result = shutdown(wait=False)
-            if inspect.isawaitable(result):
-                await result
-        await runtime.close()
-        logger.info("Swarm userbot остановлен")
+        _remove_signal_handlers(loop, installed_signals)
 
 
 if __name__ == "__main__":

@@ -7,6 +7,8 @@ from typing import Any
 
 import aiosqlite
 
+from core.persistence import SQLITE_BUSY_TIMEOUT_SECONDS
+
 
 logger = logging.getLogger(__name__)
 
@@ -269,7 +271,7 @@ class MessageHistory:
         if self._connection is None:
             self._ensure_parent_dir()
             logger.info("Открытие SQLite-соединения: %s", self.db_path)
-            self._connection = await aiosqlite.connect(self.db_path)
+            self._connection = await aiosqlite.connect(self.db_path, timeout=SQLITE_BUSY_TIMEOUT_SECONDS)
         return self._connection
 
     def _ensure_parent_dir(self) -> None:

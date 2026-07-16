@@ -17,6 +17,8 @@
 ```text
 run.py
   -> core.config.Settings
+  -> core.runtime_volume.RuntimeVolumeGuard
+  -> core.runtime_lock.RuntimeInstanceLock
   -> RuntimeContext
        -> ai.history.MessageHistory
        -> ai.gemini.PromptLoader
@@ -30,6 +32,8 @@ run.py
   -> SettingsReloadWatcher
   -> userbot.orchestrator.SwarmOrchestrator per enabled group scheduled by APScheduler tick
 ```
+
+Container lifecycle ownership устанавливается до `RuntimeContext`: Coolify production path сначала fail-closed проверяет реальный mount `/app/data` по Linux mount table и pre-provisioned regular marker `.coolify-resource-uuid` по `COOLIFY_RESOURCE_UUID`, затем процесс ждёт короткое handover-окно, получает эксклюзивный Linux `flock` рядом с effective SQLite path и только после этого открывает SQLite и Telegram connections. Marker никогда не создаётся автоматически и его значение не логируется. `SIGTERM`/`SIGINT` останавливают scheduler и swarm tasks, ограничивают `stop()` каждого Telethon client пятью секундами, параллельно закрывают обе SQLite-сессии с трёхсекундным deadline на ресурс и освобождают runtime lock последним. Production Coolify Stop Grace Period фиксируется на 60 секундах при внутреннем worst-case cleanup budget около 13 секунд.
 
 ## Runtime Flows
 
@@ -74,6 +78,8 @@ Non-secret settings are loaded from TOML through strict pydantic models. Support
 ## Data Storage
 
 SQLite is the only persistent storage. `MessageHistory` manages the `messages` table using Telegram `chat_id` as group scope. `ExchangeStore` manages the `scheduled_exchanges` table and persisted group-scoped anti-repeat state for scheduled exchanges, including `group_id`, `group_chat_id`, and `last_activity_at` as the indexed sort key for recent/latest exchange lookups.
+
+Both stores use an explicit SQLite busy timeout, and bootstrap retries only temporary lock errors. In the Docker image the effective relative path `data/history.db` resolves to `/app/data/history.db`; Coolify must mount persistent storage at `/app/data`, where `/app/data/.coolify-resource-uuid` binds the volume to the application resource and `/app/data/history.db.runtime.lock` coordinates rolling containers on the same host. Local development paths and `:memory:` databases bypass the Coolify-only volume identity check.
 
 Important-service exchanges are stored in the same `scheduled_exchanges` lifecycle as ordinary exchanges with `exchange_kind = important_service` and an `important_scenario` key. Their cadence is evaluated per group by UTC calendar days: after a group receives an important-service exchange on day N, the next one for that group is eligible no earlier than day N+3. The scenario cycle is `exchange_rub` -> `booking_airbnb` -> `exchange_usdt` -> `booking_booking`, and important-service prompt contexts use `important_service_question` / `important_service_answer` markers so only important answers are required to mention `@tt_exchenge_bot`.
 

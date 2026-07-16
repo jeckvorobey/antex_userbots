@@ -65,11 +65,13 @@ class SwarmManager:
         client_factory: Callable[[SwarmBotProfile], UserBotClient | Any],
         startup_hook: Callable[[SwarmBotProfile, UserBotClient | Any], Any] | None = None,
         reconnect_backoff_seconds: tuple[float, ...] = (1.0, 3.0, 10.0, 30.0),
+        client_stop_timeout_seconds: float = 5.0,
     ) -> None:
         self.bot_profiles = bot_profiles
         self.client_factory = client_factory
         self.startup_hook = startup_hook
         self.reconnect_backoff_seconds = reconnect_backoff_seconds
+        self.client_stop_timeout_seconds = max(0.01, client_stop_timeout_seconds)
         self.clients: dict[str, UserBotClient | Any] = {}
         self.runtime_states: dict[str, BotRuntimeState] = {
             profile.id: BotRuntimeState(bot_id=profile.id) for profile in bot_profiles if profile.enabled
@@ -95,9 +97,13 @@ class SwarmManager:
     async def stop(self) -> None:
         """Останавливает все активные клиенты и завершает supervise loops."""
         self._stop_event.set()
-        for bot_id, client in self.clients.items():
+        clients = list(self.clients.items())
+        for bot_id, _client in clients:
             logger.info("swarm: остановка клиента bot_id=%s", bot_id)
-            await client.stop()
+        await asyncio.gather(
+            *(self._stop_client(bot_id, client) for bot_id, client in clients),
+            return_exceptions=True,
+        )
         for state in self.runtime_states.values():
             state.mark_stopped()
 
@@ -157,25 +163,48 @@ class SwarmManager:
     async def _start_single_bot(self, profile: SwarmBotProfile) -> None:
         """Запускает одного бота и регистрирует его runtime-state."""
         client = self.client_factory(profile)
-        await client.start()
-        if self.startup_hook is not None:
-            result = self.startup_hook(profile, client)
-            if asyncio.iscoroutine(result):
-                await result
-        current_user = await client.get_current_user()
-        telegram_user_id = getattr(current_user, "id", None)
+        registered = False
+        try:
+            await client.start()
+            if self.startup_hook is not None:
+                result = self.startup_hook(profile, client)
+                if asyncio.iscoroutine(result):
+                    await result
+            current_user = await client.get_current_user()
+            telegram_user_id = getattr(current_user, "id", None)
 
-        self.clients[profile.id] = client
-        if profile.id not in self.active_bot_ids:
-            self.active_bot_ids.append(profile.id)
-        self._gates.setdefault(profile.id, _BotGate())
+            self.clients[profile.id] = client
+            registered = True
+            if profile.id not in self.active_bot_ids:
+                self.active_bot_ids.append(profile.id)
+            self._gates.setdefault(profile.id, _BotGate())
 
-        profile.telegram_user_id = telegram_user_id
-        state = self.runtime_states[profile.id]
-        state.mark_started()
-        if isinstance(telegram_user_id, int):
-            self.swarm_user_ids.add(telegram_user_id)
-        logger.info("swarm: bot_id=%s успешно запущен me.id=%s", profile.id, telegram_user_id)
+            profile.telegram_user_id = telegram_user_id
+            state = self.runtime_states[profile.id]
+            state.mark_started()
+            if isinstance(telegram_user_id, int):
+                self.swarm_user_ids.add(telegram_user_id)
+            logger.info("swarm: bot_id=%s успешно запущен me.id=%s", profile.id, telegram_user_id)
+        except BaseException:
+            if not registered:
+                await self._stop_client(profile.id, client)
+            raise
+
+    async def _stop_client(self, bot_id: str, client: UserBotClient | Any) -> None:
+        """Best-effort останавливает client в пределах shutdown deadline."""
+        try:
+            await asyncio.wait_for(
+                client.stop(),
+                timeout=self.client_stop_timeout_seconds,
+            )
+        except TimeoutError:
+            logger.error(
+                "swarm: timeout остановки клиента bot_id=%s timeout=%.1f sec",
+                bot_id,
+                self.client_stop_timeout_seconds,
+            )
+        except BaseException as exc:
+            logger.error("swarm: ошибка остановки клиента bot_id=%s: %s", bot_id, exc)
 
     async def _reconnect_bot(self, profile: SwarmBotProfile, state: BotRuntimeState, exc: Exception | None = None) -> None:
         """Перезапускает клиента с backoff."""

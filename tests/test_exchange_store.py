@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 import sqlite3
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -23,6 +24,19 @@ async def exchange_store():
 def test_normalize_signature_compacts_text():
     """Проверяет нормализацию сигнатуры для anti-repeat."""
     assert normalize_signature("  Один   и тот же   вопрос?! ") == "один и тот же вопрос"
+
+
+async def test_exchange_store_connection_uses_explicit_busy_timeout(monkeypatch):
+    """Проверяет тот же busy timeout, что используется историей сообщений."""
+    import userbot.exchange_store as exchange_store_module
+
+    connection = type("Connection", (), {"row_factory": None, "close": AsyncMock()})()
+    connect = AsyncMock(return_value=connection)
+    monkeypatch.setattr(exchange_store_module.aiosqlite, "connect", connect)
+    store = ExchangeStore("history.db")
+
+    assert await store._get_connection() is connection
+    connect.assert_awaited_once_with("history.db", timeout=exchange_store_module.SQLITE_BUSY_TIMEOUT_SECONDS)
 
 
 async def test_exchange_store_persists_recent_bot_ids_topics_and_signatures(exchange_store):

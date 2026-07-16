@@ -115,3 +115,94 @@ The system SHALL not log private Telegram invite hashes.
 #### Scenario: Invite link resolve is skipped with redacted log
 - **WHEN** group resolution receives a private invite link
 - **THEN** direct `get_entity` is skipped and logs contain a redacted marker instead of the invite hash
+
+### Requirement: Exclusive swarm runtime ownership
+The process MUST acquire an exclusive inter-process runtime lock derived from the effective SQLite path before it opens SQLite connections or starts Telegram clients.
+
+#### Scenario: New container overlaps an active container
+- **WHEN** a new container starts while another swarm process holds the runtime lock on the shared persistent volume
+- **THEN** the new process waits without opening SQLite or Telegram connections until the old process releases the lock
+
+#### Scenario: Runtime lock is acquired
+- **WHEN** no active process holds the runtime lock after the startup handover delay
+- **THEN** the process acquires the lock, logs the non-secret lock path, and continues runtime initialization
+
+#### Scenario: Runtime lock path is replaced by a symbolic link
+- **WHEN** the runtime lock path resolves to a symbolic link or another non-regular file
+- **THEN** startup rejects that path without following it or changing the linked file
+
+#### Scenario: Runtime lock file permissions are normalized
+- **WHEN** the process opens an existing regular runtime lock file
+- **THEN** it restricts the file mode to owner read and write permissions before acquiring the kernel lock
+
+#### Scenario: Runtime lock wait expires
+- **WHEN** another process keeps the runtime lock beyond the bounded startup timeout
+- **THEN** startup fails with a clear error before SQLite or Telegram initialization
+
+#### Scenario: In-memory tests do not require a file lock
+- **WHEN** the effective SQLite path is `:memory:`
+- **THEN** runtime ownership behaves as a no-op and does not create a lock file
+
+### Requirement: Signal-driven graceful shutdown
+The process MUST treat `SIGTERM` and `SIGINT` as graceful shutdown requests throughout startup and normal operation.
+
+#### Scenario: Signal during normal supervision
+- **WHEN** the process receives a shutdown signal while bot supervision is active
+- **THEN** it stops scheduler work, cancels and awaits supervision tasks, disconnects all Telegram clients, closes both SQLite connections, and releases the runtime lock last
+
+#### Scenario: Signal during bot startup
+- **WHEN** the process receives a shutdown signal while a Telegram client is in a startup hook
+- **THEN** the partially started client is disconnected and the remaining runtime resources are closed before the process exits
+
+#### Scenario: Signal while waiting for ownership
+- **WHEN** the process receives a shutdown signal during the handover delay or runtime lock wait
+- **THEN** the wait stops promptly and the process exits without opening SQLite or Telegram connections
+
+### Requirement: Complete client cleanup
+The swarm manager MUST attempt to stop every created Telegram client during shutdown, including clients that fail or are cancelled before active-pool registration.
+
+#### Scenario: Startup hook fails after client connection
+- **WHEN** a client connects but its startup hook fails or is cancelled
+- **THEN** that client is disconnected before the error or cancellation propagates
+
+#### Scenario: One client stop fails
+- **WHEN** stopping one client raises an error during shutdown
+- **THEN** the manager logs the failure and still attempts to stop all remaining clients
+
+### Requirement: Fail-closed Coolify volume identity validation
+Before opening SQLite or Telegram connections in the Coolify production path, the process MUST verify that the effective database parent is the expected `/app/data` mount and that a pre-provisioned regular marker matches the non-empty `COOLIFY_RESOURCE_UUID`.
+
+#### Scenario: Correct Coolify volume is mounted
+- **WHEN** `/app/data` is present in the Linux mount table and its regular `.coolify-resource-uuid` marker matches `COOLIFY_RESOURCE_UUID`
+- **THEN** startup logs successful non-secret volume validation and proceeds to the handover delay and runtime lock
+
+#### Scenario: Production data directory is not a mount point
+- **WHEN** the effective database resolves under `/app/data` but `/app/data` is absent from the Linux mount table
+- **THEN** startup fails before creating a runtime lock, SQLite file, or Telegram connection
+
+#### Scenario: Volume marker is missing or mismatched
+- **WHEN** the production mount marker is absent, empty, a symbolic link, a non-regular file, or does not match `COOLIFY_RESOURCE_UUID`
+- **THEN** startup fails without creating or replacing the marker and without opening SQLite or Telegram connections
+
+#### Scenario: Local and in-memory execution
+- **WHEN** the database is `:memory:` or its effective parent is outside `/app/data` without Coolify runtime indicators
+- **THEN** Coolify volume validation is skipped so local tests and development remain supported
+
+### Requirement: Bounded graceful cleanup
+Every graceful-shutdown or partial-startup external-resource cleanup operation MUST have a finite deadline, MUST log timeout/error without secrets, and MUST allow cleanup of the remaining resources before the runtime lock is released.
+
+#### Scenario: Registered Telegram client stop hangs
+- **WHEN** one registered client does not complete `stop()` within the client cleanup timeout
+- **THEN** the manager logs that bot timeout and still attempts to stop every remaining client
+
+#### Scenario: Cancellation occurs during one client startup
+- **WHEN** shutdown cancels a client during startup and that unregistered client does not stop within the client cleanup timeout
+- **THEN** startup cleanup times out, manager cleanup continues for registered clients, and application shutdown proceeds
+
+#### Scenario: SQLite resource close hangs
+- **WHEN** one persistence resource does not close within its cleanup timeout
+- **THEN** the timeout is logged, the other persistence resource is still closed, and the runtime lock is released after both cleanup attempts finish
+
+#### Scenario: Cleanup completes within Coolify grace budget
+- **WHEN** all cleanup operations reach either completion or their configured deadlines
+- **THEN** the application finishes its internal shutdown budget with margin below the documented production Coolify stop grace period
