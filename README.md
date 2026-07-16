@@ -225,9 +225,6 @@ uv run python run.py
 ```
 
 Что произойдёт после запуска:
-- production-запуск в Coolify проверит реальный mount `/app/data` и его identity marker до создания SQLite/Telegram connections;
-- процесс установит обработчики `SIGTERM`/`SIGINT` и подождёт короткое окно container handover;
-- процесс получит эксклюзивный runtime lock рядом с SQLite-файлом;
 - загрузится `.env` и TOML-конфиг;
 - инициализируется SQLite;
 - загрузятся темы и промты;
@@ -238,86 +235,6 @@ uv run python run.py
 - в логах появится информация о группах и активных ботах.
 
 Если всё настроено правильно, приложение будет работать как постоянный фоновый worker.
-
-## Деплой в Coolify без конфликта SQLite и Telegram-сессий
-
-[Rolling update Coolify](https://coolify.io/docs/knowledge-base/rolling-updates) сначала запускает новый container и только затем останавливает старый. Для этого worker безопасный handover устроен так:
-
-```text
-new container
-  -> короткая startup-пауза
-  -> ожидание data/history.db.runtime.lock
-old container получает SIGTERM
-  -> scheduler stop
-  -> отмена startup/supervise tasks
-  -> disconnect всех Telethon clients
-  -> close MessageHistory и ExchangeStore
-  -> release runtime lock
-new container
-  -> acquire runtime lock
-  -> SQLite bootstrap
-  -> Telegram startup
-```
-
-Обязательные настройки production:
-
-- Coolify persistent storage должен иметь постоянное имя и быть смонтирован в container destination `/app/data`;
-- effective SQLite path внутри image — `/app/data/history.db`;
-- runtime lock path — `/app/data/history.db.runtime.lock`;
-- `/app/data/.coolify-resource-uuid` должен содержать predefined runtime variable `COOLIFY_RESOURCE_UUID` текущего приложения;
-- один persistent volume нельзя одновременно использовать несколькими постоянно активными swarm replicas;
-- в Coolify 4.1+ нужно выставить `Advanced → Operations → Stop Grace Period = 60 seconds`; image явно использует `STOPSIGNAL SIGTERM`;
-- volume должен быть локальным Docker volume/bind mount на одном host, а не NFS storage с неопределённой семантикой SQLite/`flock`;
-- lock-файл открывается только как обычный файл без перехода по symbolic link и принудительно получает права `0600`;
-- пустой `.runtime.lock` после остановки удалять не нужно: владение существует только пока процесс удерживает kernel lock.
-
-По [официальному storage contract Coolify](https://coolify.io/docs/knowledge-base/persistent-storage) persistent volume задаётся именем и container destination, а [predefined runtime variables](https://coolify.io/docs/knowledge-base/environment-variables) включают `COOLIFY_RESOURCE_UUID`. Guard сверяет этот UUID с marker и отдельно проверяет `/proc/self/mountinfo`: существование каталога `/app/data` само по себе недостаточно, потому что без mount SQLite незаметно появилась бы в ephemeral image layer. Marker не создаётся автоматически и UUID не выводится в lifecycle logs. Per-application Stop Grace Period доступен в `Advanced → Operations` начиная с Coolify 4.1 ([официальное изменение](https://github.com/coollabsio/coolify/pull/9746)).
-
-### Первый deploy версии с volume guard
-
-Порядок важен: marker нужно создать **в текущем работающем старом container до запуска нового image**. В Coolify открой Terminal приложения и выполни:
-
-```sh
-set -eu
-test -n "${COOLIFY_RESOURCE_UUID:-}"
-umask 077
-marker_tmp="/app/data/.coolify-resource-uuid.tmp.$$"
-printf '%s\n' "$COOLIFY_RESOURCE_UUID" > "$marker_tmp"
-chmod 600 "$marker_tmp"
-mv -f "$marker_tmp" /app/data/.coolify-resource-uuid
-test "$(cat /app/data/.coolify-resource-uuid)" = "$COOLIFY_RESOURCE_UUID"
-```
-
-Команда не печатает UUID, создаёт файл на том же volume и атомарно заменяет marker. Затем:
-
-1. Открой `Advanced → Operations` приложения.
-2. Установи `Stop Grace Period` в `60` секунд и сохрани.
-3. Только после этого запусти deployment новой версии.
-4. На следующем rolling deployment проверь в deploy log `docker stop --time=60` и полный lifecycle старого container до `Swarm userbot остановлен`.
-
-Внутренний worst-case cleanup budget составляет около 13 секунд: до 5 секунд для частично запускавшегося client, до 5 секунд параллельно для зарегистрированных clients и до 3 секунд параллельно для SQLite resources. Coolify grace в 60 секунд оставляет запас на scheduler/process overhead. При первом deploy версии с runtime lock старый image ещё не умеет его удерживать, поэтому приложение дополнительно ждёт короткую handover-паузу и повторяет SQLite bootstrap только при временном `database is locked`.
-
-Ожидаемые lifecycle-логи нового container:
-
-```text
-Coolify runtime volume подтверждён
-Ожидание container handover перед runtime startup
-Runtime lock занят другим процессом, ожидание
-Runtime lock получен
-RuntimeContext инициализирован
-```
-
-Ожидаемые логи старого container при redeploy:
-
-```text
-Получен сигнал остановки: signal=SIGTERM
-Начало graceful shutdown swarm runtime
-swarm: остановка клиента bot_id=...
-Runtime lock освобождён
-Swarm userbot остановлен
-```
-
-Если startup завершился ошибкой volume validation, не создавай новую БД и не удаляй marker: сначала исправь persistent storage destination/name или сверяй resource, которому принадлежит volume. Если новый container завершился по timeout ожидания runtime lock, сначала нужно найти второй container/process, использующий тот же `/app/data`; удаление SQLite journal/WAL/lock-файлов не является исправлением.
 
 ## Reload групп
 
@@ -417,7 +334,6 @@ uv run pytest tests/test_reply_router.py
 - проект рассчитан на `swarm`-режим;
 - запуск приложения выполняется только через `uv run python run.py`;
 - база данных только SQLite;
-- один SQLite-файл обслуживается только одним активным swarm runtime, а rolling containers координируются через runtime lock;
 - сетевые и БД-операции сделаны асинхронно;
 - persona каждого бота должна загружаться из `persona_file`;
 - все сообщения должны сохраняться в БД;

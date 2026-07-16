@@ -110,7 +110,6 @@ async def test_main_runs_swarm_mode(monkeypatch):
     monkeypatch.setattr(run, "_build_runtime_context", AsyncMock(return_value=runtime_context))
     monkeypatch.setattr(run, "AsyncIOScheduler", lambda: scheduler)
     monkeypatch.setattr(run, "_run_swarm_mode", AsyncMock())
-    monkeypatch.setattr(run, "CONTAINER_HANDOVER_DELAY_SECONDS", 0.0)
 
     await run.main()
 

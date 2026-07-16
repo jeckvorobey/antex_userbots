@@ -10,8 +10,6 @@ from pathlib import Path
 
 import aiosqlite
 
-from core.persistence import SQLITE_BUSY_TIMEOUT_SECONDS
-
 
 logger = logging.getLogger(__name__)
 
@@ -471,7 +469,7 @@ class ExchangeStore:
     async def _get_connection(self) -> aiosqlite.Connection:
         if self._connection is None:
             self._ensure_parent_dir()
-            self._connection = await aiosqlite.connect(self.db_path, timeout=SQLITE_BUSY_TIMEOUT_SECONDS)
+            self._connection = await aiosqlite.connect(self.db_path)
             self._connection.row_factory = aiosqlite.Row
         return self._connection
 

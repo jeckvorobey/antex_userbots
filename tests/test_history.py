@@ -1,8 +1,5 @@
 """Тесты для модуля хранения истории диалогов."""
 
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
-
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
@@ -84,19 +81,6 @@ async def test_init_db_creates_parent_directory(tmp_path):
         assert db_path.exists()
     finally:
         await history.close()
-
-
-async def test_history_connection_uses_explicit_busy_timeout(monkeypatch):
-    """Проверяет единый timeout ожидания кратковременного SQLite writer lock."""
-    import ai.history as history_module
-
-    connection = SimpleNamespace(close=AsyncMock())
-    connect = AsyncMock(return_value=connection)
-    monkeypatch.setattr(history_module.aiosqlite, "connect", connect)
-    history = MessageHistory(db_path="history.db")
-
-    assert await history._get_connection() is connection
-    connect.assert_awaited_once_with("history.db", timeout=history_module.SQLITE_BUSY_TIMEOUT_SECONDS)
 
 
 async def test_get_session_history_returns_messages_for_chat(history):

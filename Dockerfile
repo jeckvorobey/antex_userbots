@@ -3,7 +3,8 @@ FROM python:3.13-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    UV_LINK_MODE=copy
+    UV_LINK_MODE=copy \
+    DB_PATH=/data/history.db
 
 WORKDIR /app
 
@@ -23,11 +24,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 COPY . .
 
 RUN useradd --create-home --uid 10001 appuser \
-    && mkdir -p /app/data \
-    && chown -R appuser:appuser /app
+    && mkdir -p /data /app/data \
+    && chown -R appuser:appuser /app /data
 
 USER appuser
-
-STOPSIGNAL SIGTERM
 
 CMD ["python", "run.py"]
