@@ -15,25 +15,33 @@ BASE_ENV = {
 }
 
 
+@pytest.fixture(autouse=True)
+def isolate_cwd(tmp_path, monkeypatch):
+    """Изолирует cwd, чтобы тесты не зависели от локального config/settings.toml."""
+    monkeypatch.chdir(tmp_path)
+
+
 def test_settings_loads_required_fields():
     """Проверяет, что обязательные поля загружаются из переменных окружения."""
     with patch.dict(os.environ, BASE_ENV, clear=True):
         from core.config import Settings
 
-        s = Settings()
+        s = Settings(_env_file=None)
         assert s.api_id == 12345678
         assert s.api_hash == "test_api_hash_abc"
         assert s.gemini_api_key == "test_gemini_key_xyz"
 
 
-def test_settings_reads_session_string():
-    """Проверяет, что строковая сессия загружается из переменной окружения."""
-    env = {**BASE_ENV, "SESSION_STRING": "test-session-string"}
+def test_settings_ignores_legacy_session_string():
+    """Проверяет, что legacy session env key не входит в runtime-контракт."""
+    legacy_key = "SESSION" + "_STRING"
+    env = {**BASE_ENV, legacy_key: "test-session-string"}
     with patch.dict(os.environ, env, clear=True):
         from core.config import Settings
 
-        s = Settings()
-        assert s.session_string == "test-session-string"
+        s = Settings(_env_file=None)
+
+    assert not hasattr(s, "session_string")
 
 
 def test_settings_missing_required_field_raises():
@@ -41,7 +49,6 @@ def test_settings_missing_required_field_raises():
     env_without_api_id = {
         "API_HASH": "test_hash",
         "GEMINI_API_KEY": "test_key",
-        "SESSION_STRING": "test-session-string",
     }
     with patch.dict(os.environ, env_without_api_id, clear=True):
         from core.config import Settings
@@ -51,7 +58,7 @@ def test_settings_missing_required_field_raises():
 
 
 def test_settings_missing_session_string_is_allowed_for_swarm_setup():
-    """Проверяет, что legacy SESSION_STRING больше не обязателен."""
+    """Проверяет, что legacy session env key не требуется для swarm setup."""
     env_without_session_string = {
         "API_ID": "12345678",
         "API_HASH": "test_hash",
@@ -62,23 +69,24 @@ def test_settings_missing_session_string_is_allowed_for_swarm_setup():
 
         settings = Settings(_env_file=None)
 
-    assert settings.session_string is None
+    assert not hasattr(settings, "session_string")
 
 
-def test_settings_rejects_empty_session_string():
-    """Проверяет, что пустая строковая сессия отклоняется валидацией."""
+def test_settings_ignores_empty_legacy_session_string():
+    """Проверяет, что пустой legacy session env key игнорируется."""
+    legacy_key = "SESSION" + "_STRING"
     env = {
         "API_ID": "12345678",
         "API_HASH": "test_hash",
         "GEMINI_API_KEY": "test_key",
-        "SESSION_STRING": "   ",
+        legacy_key: "   ",
     }
     with patch.dict(os.environ, env, clear=True):
         from core.config import Settings
 
         settings = Settings(_env_file=None)
 
-    assert settings.session_string is None
+    assert not hasattr(settings, "session_string")
 
 
 def test_load_settings_or_exit_logs_validation_error(monkeypatch, caplog, tmp_path):
@@ -105,16 +113,17 @@ def test_settings_has_db_path():
     with patch.dict(os.environ, BASE_ENV, clear=True):
         from core.config import Settings
 
-        s = Settings()
+        s = Settings(_env_file=None)
         assert s.db_path is not None
         assert len(s.db_path) > 0
 
 
-def test_get_settings_returns_settings_instance():
+def test_get_settings_returns_settings_instance(monkeypatch, tmp_path):
     """Проверяет, что публичная фабрика возвращает объект Settings."""
     with patch.dict(os.environ, BASE_ENV, clear=True):
         from core.config import Settings, get_settings
 
+        monkeypatch.chdir(tmp_path)
         get_settings.cache_clear()
         settings = get_settings()
 
@@ -128,7 +137,7 @@ def test_settings_reads_proxy_url():
     with patch.dict(os.environ, env, clear=True):
         from core.config import Settings
 
-        s = Settings()
+        s = Settings(_env_file=None)
 
         assert s.proxy_url == "http://user:pass@127.0.0.1:8080"
 
@@ -211,3 +220,17 @@ def test_settings_reads_gemini_resilience_options():
     assert s.gemini_retry_jitter_seconds == 0.4
 
 
+def test_settings_exposes_swarm_security_defaults():
+    """Проверяет кодовые defaults security-настроек swarm."""
+    with patch.dict(os.environ, BASE_ENV, clear=True):
+        from core.config import Settings
+
+        settings = Settings(_env_file=None)
+
+    assert settings.swarm_allow_external_llm_for_replies is True
+    assert settings.swarm_allow_external_llm_for_scheduled is True
+    assert settings.swarm_addressed_reply_rate_limit_count == 3
+    assert settings.swarm_addressed_reply_rate_limit_window_seconds == 60
+    assert settings.swarm_max_output_chars == 400
+    assert settings.swarm_max_mentions_per_message == 2
+    assert settings.swarm_history_retention_days == 30

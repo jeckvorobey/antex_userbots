@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 from dotenv import dotenv_values
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -72,50 +72,16 @@ class Secrets(BaseSettings):
     api_id: int
     api_hash: str
     gemini_api_key: str
-    session_string: OptionalStr = None
     proxy_url: OptionalStr = None
     group_chat_id: OptionalChatId = None
     group_target: OptionalStr = None
-    settings_path: str = "settings.toml"
+    settings_path: OptionalStr = None
 
 
 class _StrictModel(BaseModel):
     """Базовая модель TOML-секций с запретом неизвестных ключей."""
 
     model_config = ConfigDict(extra="forbid")
-
-
-class AppModeConfig(_StrictModel):
-    """Секция режима приложения."""
-
-    mode: Literal["swarm"] = "swarm"
-
-
-class PathsConfig(_StrictModel):
-    """Пути к локальным ресурсам проекта, не покрытым профильными секциями."""
-
-    reply_rules_path: str = "ai/prompts/reply_rules.md"
-
-
-class StorageConfig(_StrictModel):
-    """Пути к хранилищу."""
-
-    db_path: str = "data/history.db"
-
-
-class TargetConfig(_StrictModel):
-    """Целевая Telegram-группа для swarm."""
-
-    group_chat_id: int | None = None
-    group_target: OptionalStr = None
-
-
-class PromptsConfig(_StrictModel):
-    """Пути к промтам и профилям ботов."""
-
-    base_dir: str = "ai/prompts"
-    topics_path: str = "ai/prompts/topics.md"
-    bot_profiles_dir: str = "ai/prompts/bots"
 
 
 class GeminiConfig(_StrictModel):
@@ -128,12 +94,6 @@ class GeminiConfig(_StrictModel):
     retry_backoff_seconds: float = Field(default=1.0, ge=0.0)
     retry_jitter_seconds: float = Field(default=0.3, ge=0.0)
     request_timeout_seconds: float = Field(default=45.0, gt=0.0)
-
-
-class TelegramConfig(_StrictModel):
-    """Несекретные параметры Telegram."""
-
-    whitelist_user_ids: list[int] = Field(default_factory=list)
 
 
 class LoggingConfig(_StrictModel):
@@ -151,6 +111,12 @@ class SwarmBotConfig(_StrictModel):
     enabled: bool = True
     temperature: float = Field(default=0.9, ge=0.0, le=2.0)
 
+    @field_validator("persona_file")
+    @classmethod
+    def validate_persona_file(cls, value: str) -> str:
+        """Запрещает выход persona_file за пределы bot_profiles_dir."""
+        return _validate_relative_persona_file(value)
+
 
 class SwarmBotRuntimeConfig(_StrictModel):
     """Развёрнутая runtime-конфигурация userbot с реальной строкой сессии."""
@@ -162,6 +128,12 @@ class SwarmBotRuntimeConfig(_StrictModel):
     enabled: bool = True
     temperature: float = Field(default=0.9, ge=0.0, le=2.0)
 
+    @field_validator("persona_file")
+    @classmethod
+    def validate_persona_file(cls, value: str) -> str:
+        """Запрещает выход persona_file за пределы bot_profiles_dir."""
+        return _validate_relative_persona_file(value)
+
 
 class SwarmScheduleConfig(_StrictModel):
     """Расписание swarm-обменов."""
@@ -170,8 +142,6 @@ class SwarmScheduleConfig(_StrictModel):
     initiator_offset_minutes: MinuteRange = (0, 30)
     responder_delay_minutes: MinuteRange = (3, 10)
     max_turns_per_exchange: int = Field(default=2, ge=1)
-    # Deprecated: сохраняем чтение старых TOML, orchestrator использует bot-based cooldown.
-    pair_cooldown_slots: int = Field(default=1, ge=0)
 
     @field_validator("active_windows_utc")
     @classmethod
@@ -202,6 +172,63 @@ class SwarmScheduleConfig(_StrictModel):
         return (start, end)
 
 
+class GroupScheduleOverride(_StrictModel):
+    """Переопределения расписания для конкретной группы."""
+
+    active_windows_utc: list[str] | None = None
+    initiator_offset_minutes: MinuteRange | None = None
+    responder_delay_minutes: MinuteRange | None = None
+    max_turns_per_exchange: int | None = Field(default=None, ge=1)
+
+    @field_validator("active_windows_utc")
+    @classmethod
+    def validate_active_windows_utc(cls, value: list[str] | None) -> list[str] | None:
+        """Проверяет список UTC-окон, если он задан для группы."""
+        if value is None:
+            return None
+        return SwarmScheduleConfig.validate_active_windows_utc(value)
+
+    @field_validator("initiator_offset_minutes", "responder_delay_minutes", mode="before")
+    @classmethod
+    def validate_minute_range(cls, value: object) -> object:
+        """Проверяет необязательный диапазон минут."""
+        if value is None:
+            return None
+        return SwarmScheduleConfig.validate_minute_range(value)
+
+
+class GroupConfig(_StrictModel):
+    """Конфигурация одной Telegram-группы swarm."""
+
+    id: RequiredStr
+    city: RequiredStr
+    enabled: bool = True
+    group_chat_id: OptionalChatId = None
+    group_target: OptionalStr = None
+    schedule: GroupScheduleOverride = Field(default_factory=GroupScheduleOverride)
+
+    @model_validator(mode="after")
+    def validate_target(self) -> "GroupConfig":
+        """Требует хотя бы один способ найти группу."""
+        if self.group_chat_id is None and self.group_target is None:
+            raise ValueError("group must define group_chat_id or group_target")
+        return self
+
+
+class GroupRuntimeConfig(_StrictModel):
+    """Группа с вычисленным эффективным расписанием."""
+
+    id: str
+    city: str
+    enabled: bool = True
+    group_chat_id: int | None = None
+    group_target: str | None = None
+    active_windows_utc: list[str] = Field(default_factory=list)
+    initiator_offset_minutes: MinuteRange = (0, 30)
+    responder_delay_minutes: MinuteRange = (3, 10)
+    max_turns_per_exchange: int = 2
+
+
 class SwarmOrchestratorConfig(_StrictModel):
     """Параметры центрального orchestrator."""
 
@@ -210,15 +237,24 @@ class SwarmOrchestratorConfig(_StrictModel):
     skip_if_recent_human_activity: bool = True
 
 
+class SwarmSecurityConfig(_StrictModel):
+    """Runtime security-настройки swarm."""
+
+    allow_external_llm_for_replies: bool = True
+    allow_external_llm_for_scheduled: bool = True
+    addressed_reply_rate_limit_count: int = Field(default=3, ge=1)
+    addressed_reply_rate_limit_window_seconds: int = Field(default=60, ge=1)
+    max_output_chars: int = Field(default=400, ge=1)
+    max_mentions_per_message: int = Field(default=2, ge=0)
+    history_retention_days: int = Field(default=30, ge=0)
+
+
 class SwarmConfig(_StrictModel):
     """Секция swarm-настроек."""
 
-    enabled: bool = False
-    max_parallel_bots: int = Field(default=20, ge=1)
-    ignore_messages_from_swarm: bool = True
-    reply_only_to_addressed_bot: bool = True
     schedule: SwarmScheduleConfig = Field(default_factory=SwarmScheduleConfig)
     orchestrator: SwarmOrchestratorConfig = Field(default_factory=SwarmOrchestratorConfig)
+    security: SwarmSecurityConfig = Field(default_factory=SwarmSecurityConfig)
     bots: list[SwarmBotConfig] = Field(default_factory=list)
 
     @field_validator("bots")
@@ -237,15 +273,22 @@ class SwarmConfig(_StrictModel):
 class AppConfig(_StrictModel):
     """Полная несекретная TOML-конфигурация."""
 
-    app: AppModeConfig = Field(default_factory=AppModeConfig)
-    paths: PathsConfig = Field(default_factory=PathsConfig)
-    storage: StorageConfig = Field(default_factory=StorageConfig)
-    target: TargetConfig = Field(default_factory=TargetConfig)
-    prompts: PromptsConfig = Field(default_factory=PromptsConfig)
+    groups: list[GroupConfig] = Field(default_factory=list)
     gemini: GeminiConfig = Field(default_factory=GeminiConfig)
-    telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     swarm: SwarmConfig = Field(default_factory=SwarmConfig)
+
+    @field_validator("groups")
+    @classmethod
+    def validate_unique_group_ids(cls, value: list[GroupConfig]) -> list[GroupConfig]:
+        """Проверяет уникальность идентификаторов групп."""
+        seen: set[str] = set()
+        for group in value:
+            normalized_group_id = group.id.strip().lower()
+            if normalized_group_id in seen:
+                raise ValueError(f"duplicate group id: {group.id}")
+            seen.add(normalized_group_id)
+        return value
 
 
 def _read_pair(value: object, label: str) -> tuple[int, int]:
@@ -258,7 +301,24 @@ def _read_pair(value: object, label: str) -> tuple[int, int]:
     return first, second
 
 
+def _validate_relative_persona_file(value: str) -> str:
+    """Проверяет, что persona_file является относительным именем внутри директории профилей."""
+    normalized = value.strip()
+    if normalized == "":
+        raise ValueError("persona_file не должен быть пустым")
+    path = Path(normalized)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError("persona_file должен быть относительным путём внутри bot_profiles_dir")
+    return normalized
+
+
 _UNSET = object()
+DEFAULT_SETTINGS_PATH = "config/settings.toml"
+DEFAULT_MODE = "swarm"
+DEFAULT_DB_PATH = "data/history.db"
+DEFAULT_PROMPTS_DIR = "ai/prompts"
+DEFAULT_TOPICS_PATH = "ai/prompts/topics.md"
+DEFAULT_BOT_PROFILES_DIR = "ai/prompts/bots"
 
 
 def _load_toml_config(settings_path: str | Path | None, *, require_exists: bool = False) -> AppConfig:
@@ -300,7 +360,6 @@ class Settings:
             "api_id",
             "api_hash",
             "gemini_api_key",
-            "session_string",
             "proxy_url",
             "group_chat_id",
             "group_target",
@@ -313,7 +372,7 @@ class Settings:
             for key in secret_keys:
                 setattr(self, key, secret_overrides.get(key, getattr(secrets, key)))
             if settings_path_override is _UNSET:
-                settings_path = getattr(secrets, "settings_path", "settings.toml")
+                settings_path = getattr(secrets, "settings_path", None) or DEFAULT_SETTINGS_PATH
                 settings_path_required = "settings_path" in secrets.model_fields_set
             else:
                 settings_path = settings_path_override
@@ -322,14 +381,16 @@ class Settings:
             for key in secret_keys:
                 setattr(self, key, secret_overrides.get(key))
             if settings_path_override is _UNSET:
-                settings_path = os.environ.get("SETTINGS_PATH")
-                settings_path_required = settings_path is not None
+                settings_path = os.environ.get("SETTINGS_PATH") or DEFAULT_SETTINGS_PATH
+                settings_path_required = "SETTINGS_PATH" in os.environ
             else:
                 settings_path = settings_path_override
                 settings_path_required = settings_path is not None
 
         app_config = _load_toml_config(settings_path, require_exists=settings_path_required)
-        self.settings_path = str(settings_path or "settings.toml")
+        self.settings_path = str(settings_path or DEFAULT_SETTINGS_PATH)
+        self._settings_path_required = settings_path_required
+        self._env_file = _env_file
         self._apply_app_config(app_config)
 
         for key, value in overrides.items():
@@ -339,17 +400,12 @@ class Settings:
 
     def _apply_app_config(self, config: AppConfig) -> None:
         """Пробрасывает секции TOML в публичные поля Settings."""
-        self.mode = config.app.mode
+        self.mode = DEFAULT_MODE
 
-        self.db_path = config.storage.db_path
-        self.topics_path = config.prompts.topics_path
-        self.reply_rules_path = config.paths.reply_rules_path
-        self.prompts_dir = config.prompts.base_dir
-        self.bot_profiles_dir = config.prompts.bot_profiles_dir
-        if self.group_chat_id is None and config.target.group_chat_id is not None:
-            self.group_chat_id = config.target.group_chat_id
-        if self.group_target is None and config.target.group_target is not None:
-            self.group_target = config.target.group_target
+        self.db_path = DEFAULT_DB_PATH
+        self.topics_path = DEFAULT_TOPICS_PATH
+        self.prompts_dir = DEFAULT_PROMPTS_DIR
+        self.bot_profiles_dir = DEFAULT_BOT_PROFILES_DIR
 
         self.gemini_model = config.gemini.model
         self.gemini_fallback_model = config.gemini.fallback_model
@@ -359,27 +415,32 @@ class Settings:
         self.gemini_retry_jitter_seconds = config.gemini.retry_jitter_seconds
         self.gemini_request_timeout_seconds = config.gemini.request_timeout_seconds
 
-        self.whitelist_user_ids = ",".join(str(user_id) for user_id in config.telegram.whitelist_user_ids)
-
         self.log_level = config.logging.level
 
-        self.swarm_enabled = config.swarm.enabled or self.mode == "swarm"
-        self.swarm_max_parallel_bots = config.swarm.max_parallel_bots
-        self.swarm_ignore_messages_from_swarm = config.swarm.ignore_messages_from_swarm
-        self.swarm_reply_only_to_addressed_bot = config.swarm.reply_only_to_addressed_bot
         self.swarm_schedule_active_windows_utc = list(config.swarm.schedule.active_windows_utc)
         self.swarm_initiator_offset_minutes = config.swarm.schedule.initiator_offset_minutes
         self.swarm_responder_delay_minutes = config.swarm.schedule.responder_delay_minutes
         self.swarm_max_turns_per_exchange = config.swarm.schedule.max_turns_per_exchange
-        self.swarm_pair_cooldown_slots = config.swarm.schedule.pair_cooldown_slots
         self.swarm_tick_seconds = config.swarm.orchestrator.tick_seconds
         self.swarm_silence_timeout_minutes = config.swarm.orchestrator.silence_timeout_minutes
         self.swarm_skip_if_recent_human_activity = config.swarm.orchestrator.skip_if_recent_human_activity
+        self.swarm_allow_external_llm_for_replies = config.swarm.security.allow_external_llm_for_replies
+        self.swarm_allow_external_llm_for_scheduled = config.swarm.security.allow_external_llm_for_scheduled
+        self.swarm_addressed_reply_rate_limit_count = config.swarm.security.addressed_reply_rate_limit_count
+        self.swarm_addressed_reply_rate_limit_window_seconds = (
+            config.swarm.security.addressed_reply_rate_limit_window_seconds
+        )
+        self.swarm_max_output_chars = config.swarm.security.max_output_chars
+        self.swarm_max_mentions_per_message = config.swarm.security.max_mentions_per_message
+        self.swarm_history_retention_days = config.swarm.security.history_retention_days
         self.swarm_bots = self._resolve_swarm_bots(config.swarm.bots)
         self.swarm_bot_ids = [bot.id for bot in self.swarm_bots]
-
-        if self.mode == "swarm":
-            self.whitelist_user_ids = ""
+        self.groups = self._resolve_groups(config.groups, config.swarm.schedule)
+        self.enabled_groups = [group for group in self.groups if group.enabled]
+        if self.groups:
+            first_group = self.enabled_groups[0] if self.enabled_groups else self.groups[0]
+            self.group_chat_id = self.group_chat_id if self.group_chat_id is not None else first_group.group_chat_id
+            self.group_target = self.group_target if self.group_target is not None else first_group.group_target
 
     def _resolve_swarm_bots(self, bots: list[SwarmBotConfig]) -> list[SwarmBotRuntimeConfig]:
         """Разворачивает session_env каждого swarm-бота в фактическую строку сессии."""
@@ -401,6 +462,87 @@ class Settings:
                 )
             )
         return resolved_bots
+
+    def _resolve_groups(self, groups: list[GroupConfig], defaults: SwarmScheduleConfig) -> list[GroupRuntimeConfig]:
+        """Вычисляет эффективные настройки групп с наследованием расписания."""
+        source_groups = list(groups)
+        if not source_groups and (self.group_chat_id is not None or self.group_target is not None):
+            source_groups.append(
+                GroupConfig(
+                    id="legacy",
+                    city="legacy",
+                    enabled=True,
+                    group_chat_id=self.group_chat_id,
+                    group_target=self.group_target,
+                )
+            )
+
+        resolved: list[GroupRuntimeConfig] = []
+        for group in source_groups:
+            schedule = group.schedule
+            resolved.append(
+                GroupRuntimeConfig(
+                    id=group.id.strip(),
+                    city=group.city.strip(),
+                    enabled=group.enabled,
+                    group_chat_id=group.group_chat_id,
+                    group_target=group.group_target,
+                    active_windows_utc=list(
+                        defaults.active_windows_utc if schedule.active_windows_utc is None else schedule.active_windows_utc
+                    ),
+                    initiator_offset_minutes=(
+                        defaults.initiator_offset_minutes
+                        if schedule.initiator_offset_minutes is None
+                        else schedule.initiator_offset_minutes
+                    ),
+                    responder_delay_minutes=(
+                        defaults.responder_delay_minutes
+                        if schedule.responder_delay_minutes is None
+                        else schedule.responder_delay_minutes
+                    ),
+                    max_turns_per_exchange=(
+                        defaults.max_turns_per_exchange
+                        if schedule.max_turns_per_exchange is None
+                        else schedule.max_turns_per_exchange
+                    ),
+                )
+            )
+        return resolved
+
+
+class SettingsReloadWatcher:
+    """Проверяет изменение TOML-файла и возвращает новый Settings без мутации старого."""
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self._last_mtime = self._read_mtime(settings.settings_path)
+
+    def poll(self) -> Settings | None:
+        """Возвращает новые settings, если файл изменился."""
+        current_mtime = self._read_mtime(self.settings.settings_path)
+        if current_mtime == self._last_mtime:
+            return None
+        self._last_mtime = current_mtime
+        reloaded = Settings(
+            _env_file=self.settings._env_file,
+            api_id=self.settings.api_id,
+            api_hash=self.settings.api_hash,
+            gemini_api_key=self.settings.gemini_api_key,
+            proxy_url=self.settings.proxy_url,
+            group_chat_id=self.settings.group_chat_id,
+            group_target=self.settings.group_target,
+            settings_path=self.settings.settings_path,
+        )
+        self.settings = reloaded
+        return reloaded
+
+    @staticmethod
+    def _read_mtime(settings_path: str) -> int | None:
+        """Читает mtime файла в наносекундах."""
+        path = Path(settings_path)
+        if not path.exists():
+            return None
+        return path.stat().st_mtime_ns
 
 
 @lru_cache(maxsize=1)

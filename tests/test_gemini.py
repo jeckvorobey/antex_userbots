@@ -52,34 +52,177 @@ async def test_prompt_loader_preserves_full_content():
         assert result == content
 
 
-def test_prompt_examples_are_committed_without_runtime_names():
-    """Проверяет, что в репозитории есть шаблоны, а не production-промты."""
-    examples = [
-        Path("ai/prompts/system.example.md"),
-        Path("ai/prompts/reply.example.md"),
-        Path("ai/prompts/start_topic.example.md"),
-        Path("ai/prompts/topics.example.md"),
-        Path("ai/prompts/reply_rules.example.md"),
-        Path("ai/prompts/wind_down_hint.example.md"),
-        Path("ai/prompts/bots/persona.example.md"),
+def test_runtime_prompt_files_are_committed():
+    """Проверяет, что production-промты одного инстанса лежат в репозитории."""
+    prompt_files = [
+        Path("ai/prompts/system.md"),
+        Path("ai/prompts/reply.md"),
+        Path("ai/prompts/start_topic.md"),
+        Path("ai/prompts/topics.md"),
+        Path("ai/prompts/wind_down_hint.md"),
     ]
 
-    for path in examples:
-        assert path.exists(), f"Нет example-файла: {path}"
+    for path in prompt_files:
+        assert path.exists(), f"Нет prompt-файла: {path}"
         assert path.read_text(encoding="utf-8").strip()
 
 
 @pytest.mark.asyncio
-async def test_prompt_loader_can_read_copied_example_prompt(tmp_path):
-    """Проверяет, что example-шаблон можно скопировать в runtime-имя без изменения загрузчика."""
-    source = Path("ai/prompts/system.example.md")
-    target = tmp_path / "system.md"
-    target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
-
-    loader = PromptLoader(prompts_dir=str(tmp_path))
+async def test_prompt_loader_can_read_committed_runtime_prompt():
+    """Проверяет, что loader читает реальный runtime prompt."""
+    loader = PromptLoader(prompts_dir="ai/prompts")
     system_prompt = await loader.load("system")
 
-    assert "System prompt example" in system_prompt
+    assert "Telegram" in system_prompt
+
+
+def test_no_prompt_examples_are_required_anymore():
+    """Проверяет, что старые шаблоны .example.md удалены из prompt-контракта."""
+    assert not list(Path("ai/prompts").glob("**/*.example.md"))
+
+
+def _prod_persona_files() -> set[str]:
+    """Возвращает persona-файлы, объявленные в production TOML."""
+    import tomllib
+
+    settings_path = Path("config/settings.prod.toml")
+    if not settings_path.exists():
+        pytest.skip("Локальный config/settings.prod.toml отсутствует в этом checkout")
+    settings_data = tomllib.loads(settings_path.read_text(encoding="utf-8"))
+    return {
+        bot["persona_file"]
+        for bot in settings_data["swarm"]["bots"]
+    }
+
+
+def test_prod_persona_inventory_matches_settings():
+    """Проверяет, что committed persona inventory соответствует production settings."""
+    configured_personas = _prod_persona_files()
+    committed_personas = {
+        path.name
+        for path in Path("ai/prompts/bots").glob("*.md")
+    }
+
+    assert committed_personas == configured_personas
+
+
+def test_prod_personas_are_detailed_and_structured():
+    """Проверяет, что production persona-профили достаточно подробные и структурированные."""
+    required_sections = [
+        "## Характер",
+        "## Манера общения",
+        "## Поведение в чате",
+        "## Поведение в групповых обсуждениях",
+        "## Реакции",
+        "## Стиль мышления",
+        "## Интересы",
+        "## Небольшой жизненный контекст",
+        "## Индивидуальные привычки",
+        "## Поведение в конфликте",
+        "## Ограничения",
+        "## Вероятностное поведение",
+        "## Взаимоотношения",
+        "## Человеческие несовершенства",
+    ]
+
+    for persona_file in _prod_persona_files():
+        text = (Path("ai/prompts/bots") / persona_file).read_text(encoding="utf-8")
+
+        assert len(text.split()) >= 300, f"Persona слишком короткая: {persona_file}"
+        for section in required_sections:
+            assert section in text, f"В {persona_file} нет секции {section}"
+        assert "никогда не сообщает, что он AI" in text or "никогда не сообщает, что она AI" in text
+        assert "не копирует стиль других персонажей" in text
+        assert "не превращается в \"идеального помощника\"" in text
+
+
+def test_prod_personas_are_not_duplicate_templates():
+    """Проверяет, что production persona-профили не являются одинаковыми шаблонами."""
+    persona_texts = {
+        persona_file: (Path("ai/prompts/bots") / persona_file).read_text(encoding="utf-8")
+        for persona_file in _prod_persona_files()
+    }
+    unique_texts = set(persona_texts.values())
+
+    assert len(unique_texts) == len(persona_texts)
+
+
+def test_shared_topics_are_city_neutral_intents():
+    """Проверяет, что общий topics.md не содержит готовые вопросы под один город."""
+    topics_path = Path("ai/prompts/topics.md")
+    city_markers = {"нячанг", "danang", "da nang", "батум", "batumi"}
+    topic_lines = [
+        line.strip()
+        for line in topics_path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#") and line.strip() != "---"
+    ]
+
+    assert topic_lines
+    assert all("?" not in line for line in topic_lines)
+    lowered = "\n".join(topic_lines).lower()
+    assert not any(marker in lowered for marker in city_markers)
+
+
+def test_start_topic_prompt_requires_city_adaptation():
+    """Проверяет, что start_topic prompt адаптирует общий intent под город группы."""
+    prompt = Path("ai/prompts/start_topic.md").read_text(encoding="utf-8").lower()
+
+    assert "город" in prompt
+    assert "не упоминай другой город" in prompt
+    assert "не копируй тему дословно" in prompt
+
+
+def test_start_topic_prompt_defines_human_opening_rule():
+    """Проверяет, что общий start_topic prompt задаёт человеческие варианты начала."""
+    prompt = Path("ai/prompts/start_topic.md").read_text(encoding="utf-8").lower()
+
+    assert '"привет"' in prompt
+    assert '"всем привет"' in prompt
+    assert '"здравствуйте"' in prompt
+    assert "без вступительного слова" in prompt
+    assert "сразу задавай вопрос" in prompt
+
+
+def test_important_service_start_topic_prompt_contract():
+    """Проверяет prompt-контракт important-service вопроса."""
+    prompt = Path("ai/prompts/start_topic.md").read_text(encoding="utf-8")
+
+    assert "important_service_question" in prompt
+    assert "question_intent" in prompt
+    assert "не упоминай `https://t.me/tt_exchenge_bot/antex`" in prompt
+    assert "отсутствует, не добавляй рекламный смысл" in prompt
+
+
+def test_important_service_reply_prompt_contract():
+    """Проверяет prompt-контракт important-service ответа."""
+    prompt = Path("ai/prompts/reply.md").read_text(encoding="utf-8")
+
+    assert "important_service_answer" in prompt
+    assert "естественно упомяни miniapp-ссылку `https://t.me/tt_exchenge_bot/antex`" in prompt
+    assert "каждый раз меняй формулировку" in prompt
+    assert "отсутствует, не упоминай `https://t.me/tt_exchenge_bot/antex` специально" in prompt
+
+
+def test_prod_persona_communication_style_avoids_marker_openers():
+    """Проверяет, что манера общения не закрепляет заметные стартовые маркеры."""
+    marker_openers = ["кстати", "слушай", "слушайте", "смотри"]
+    human_opening_patterns = [
+        "сразу",
+        "прямо",
+        "привет",
+        "без вступления",
+        "без лишнего захода",
+    ]
+
+    for persona_file in _prod_persona_files():
+        text = (Path("ai/prompts/bots") / persona_file).read_text(encoding="utf-8")
+        communication_style = text.split("## Манера общения", maxsplit=1)[1].split("## ", maxsplit=1)[0].lower()
+        restrictions = text.split("## Ограничения", maxsplit=1)[1].split("## ", maxsplit=1)[0].lower()
+
+        assert "не начинает сообщения" not in restrictions, persona_file
+        for opener in marker_openers:
+            assert opener not in communication_style, persona_file
+        assert any(pattern in communication_style for pattern in human_opening_patterns), persona_file
 
 
 def test_gemini_client_initializes_with_api_key():
@@ -139,6 +282,32 @@ def test_gemini_client_builds_client_with_proxy(monkeypatch):
     assert kwargs.get("async_client_args") == {"proxy": "http://user:pass@127.0.0.1:8080"}
 
 
+def test_gemini_client_sanitizes_sensitive_text_for_prompt():
+    """Проверяет редактирование invite и секретов перед отправкой в LLM."""
+    client = GeminiClient(api_key="test_key_123")
+
+    text = "join https://t.me/+abcdef token=supersecretvalue1234567890abc api_hash: qwerty1234567890qwerty1234567890"
+    sanitized = client.sanitize_for_prompt(text)
+
+    assert "t.me/+abcdef" not in sanitized
+    assert "supersecretvalue1234567890abc" not in sanitized
+    assert "qwerty1234567890qwerty1234567890" not in sanitized
+    assert "<redacted_secret>" in sanitized
+
+
+def test_gemini_client_rejects_unsafe_output():
+    """Проверяет safety-гейт перед публикацией текста модели."""
+    client = GeminiClient(api_key="test_key_123", max_output_chars=20, max_mentions_per_message=1)
+    public_link_client = GeminiClient(api_key="test_key_123", max_output_chars=120, max_mentions_per_message=1)
+
+    assert client.is_output_safe("Нормальный ответ") is True
+    assert client.is_output_safe("") is False
+    assert public_link_client.is_output_safe("Я бы через https://t.me/tt_exchenge_bot/antex попробовал.") is True
+    assert client.is_output_safe("https://t.me/+abcdef") is False
+    assert client.is_output_safe("@one @two") is False
+    assert client.is_output_safe("Очень длинный ответ, который превышает лимит") is False
+
+
 @pytest.mark.asyncio
 async def test_gemini_client_generate_reply_uses_system_instruction(monkeypatch):
     """Проверяет передачу system instruction и содержимого запроса в SDK."""
@@ -179,6 +348,42 @@ async def test_gemini_client_generate_reply_uses_system_instruction(monkeypatch)
         captured["generate_content_kwargs"]["config"].kwargs["system_instruction"]
         == "Системная роль"
     )
+
+
+@pytest.mark.asyncio
+async def test_gemini_client_sanitizes_history_and_user_message_before_sdk_call(monkeypatch):
+    """Проверяет, что в SDK уходят уже отредактированные тексты."""
+    captured: dict[str, object] = {}
+
+    class FakeModels:
+        def generate_content(self, **kwargs):
+            captured["generate_content_kwargs"] = kwargs
+            return SimpleNamespace(text="Ответ модели")
+
+    class FakeClient:
+        def __init__(self, **kwargs) -> None:
+            self.models = FakeModels()
+
+    class FakeGenerateContentConfig:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    fake_types = SimpleNamespace(GenerateContentConfig=FakeGenerateContentConfig)
+    fake_genai = SimpleNamespace(Client=FakeClient, types=fake_types)
+
+    monkeypatch.setattr("ai.gemini._import_google_genai", lambda: fake_genai)
+
+    client = GeminiClient(api_key="test_key_123", model_name="gemini-2.5-flash")
+    await client.generate_reply(
+        system_prompt="Системная роль",
+        history=[{"role": "user", "text": "token=abcd1234abcd1234abcd1234abcd1234"}],
+        user_message="Вот ссылка https://t.me/+secret",
+    )
+
+    contents = captured["generate_content_kwargs"]["contents"]
+    assert "t.me/+secret" not in contents
+    assert "abcd1234abcd1234abcd1234abcd1234" not in contents
+    assert "<redacted_secret>" in contents
 
 
 @pytest.mark.asyncio

@@ -61,3 +61,18 @@ async def test_prompt_composer_uses_explicit_persona_file(tmp_path):
     system_prompt = await composer.compose("system", bot_id="anna", persona_file="special.md")
 
     assert system_prompt == "Базовый system\n\nОсобая persona"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("persona_file", ["../secret.md", "/tmp/secret.md"])
+async def test_prompt_composer_rejects_persona_file_outside_profiles_dir(tmp_path, persona_file: str):
+    """Проверяет запрет чтения persona за пределами bot_profiles_dir."""
+    prompts_dir = tmp_path / "bots"
+    prompts_dir.mkdir()
+    composer = PromptComposer(
+        prompt_loader=StubPromptLoader({"system": "Базовый system"}),
+        bot_profiles_dir=str(prompts_dir),
+    )
+
+    with pytest.raises(ValueError, match="persona_file"):
+        await composer.compose("system", bot_id="anna", persona_file=persona_file)

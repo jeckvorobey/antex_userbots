@@ -35,6 +35,8 @@ class ExchangeStore:
             """
             CREATE TABLE IF NOT EXISTS scheduled_exchanges (
                 exchange_id TEXT PRIMARY KEY,
+                group_id TEXT,
+                group_chat_id INTEGER,
                 initiator_bot_id TEXT NOT NULL,
                 responder_bot_id TEXT NOT NULL,
                 pair_key TEXT NOT NULL,
@@ -46,15 +48,20 @@ class ExchangeStore:
                 initiator_scheduled_at TIMESTAMP,
                 responder_scheduled_at TIMESTAMP,
                 initiator_message_id INTEGER,
+                exchange_kind TEXT NOT NULL DEFAULT 'regular',
+                important_scenario TEXT,
                 status TEXT NOT NULL DEFAULT 'planned',
                 skip_reason TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 started_at TIMESTAMP,
-                completed_at TIMESTAMP
+                completed_at TIMESTAMP,
+                last_activity_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
         await connection.commit()
+        await self._ensure_column(connection, "group_id", "TEXT")
+        await self._ensure_column(connection, "group_chat_id", "INTEGER")
         await self._ensure_column(connection, "pair_key", "TEXT")
         await self._ensure_column(connection, "window_key", "TEXT")
         await self._ensure_column(connection, "topic_key", "TEXT")
@@ -63,9 +70,15 @@ class ExchangeStore:
         await self._ensure_column(connection, "initiator_scheduled_at", "TIMESTAMP")
         await self._ensure_column(connection, "responder_scheduled_at", "TIMESTAMP")
         await self._ensure_column(connection, "initiator_message_id", "INTEGER")
+        await self._ensure_column(connection, "exchange_kind", "TEXT NOT NULL DEFAULT 'regular'")
+        await self._ensure_column(connection, "important_scenario", "TEXT")
         await self._ensure_column(connection, "skip_reason", "TEXT")
+        await self._ensure_column(connection, "created_at", "TIMESTAMP")
         await self._ensure_column(connection, "started_at", "TIMESTAMP")
         await self._ensure_column(connection, "completed_at", "TIMESTAMP")
+        await self._ensure_column(connection, "last_activity_at", "TIMESTAMP")
+        await self._backfill_last_activity_at(connection)
+        await self._ensure_indexes(connection)
         logger.info("Таблица scheduled_exchanges готова")
 
     async def create_exchange(
@@ -74,9 +87,13 @@ class ExchangeStore:
         initiator_bot_id: str,
         responder_bot_id: str,
         topic: str,
+        group_id: str | None = None,
+        group_chat_id: int | None = None,
         topic_key: str | None = None,
         window_key: str | None = None,
         initiator_scheduled_at: datetime | None = None,
+        exchange_kind: str = "regular",
+        important_scenario: str | None = None,
     ) -> str:
         """Создаёт запись planned exchange и возвращает её идентификатор."""
         exchange_id = str(uuid.uuid4())
@@ -87,6 +104,8 @@ class ExchangeStore:
             """
             INSERT INTO scheduled_exchanges (
                 exchange_id,
+                group_id,
+                group_chat_id,
                 initiator_bot_id,
                 responder_bot_id,
                 pair_key,
@@ -94,12 +113,17 @@ class ExchangeStore:
                 topic,
                 topic_key,
                 initiator_scheduled_at,
+                exchange_kind,
+                important_scenario,
+                last_activity_at,
                 status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'planned')
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 'planned')
             """,
             (
                 exchange_id,
+                group_id,
+                group_chat_id,
                 initiator_bot_id,
                 responder_bot_id,
                 pair_key,
@@ -107,19 +131,40 @@ class ExchangeStore:
                 topic,
                 normalized_topic_key,
                 self._serialize_timestamp(initiator_scheduled_at),
+                exchange_kind,
+                important_scenario,
             ),
         )
         await connection.commit()
         logger.info(
-            "Создан planned exchange: exchange_id=%s initiator=%s responder=%s topic_key=%s window_key=%s initiator_due=%s",
+            "Создан planned exchange: exchange_id=%s group_id=%s group_chat_id=%s initiator=%s responder=%s topic_key=%s window_key=%s kind=%s important_scenario=%s initiator_due=%s",
             exchange_id,
+            group_id,
+            group_chat_id,
             initiator_bot_id,
             responder_bot_id,
             normalized_topic_key,
             window_key,
+            exchange_kind,
+            important_scenario,
             self._serialize_timestamp(initiator_scheduled_at),
         )
         return exchange_id
+
+    async def get_exchange(self, exchange_id: str) -> dict[str, object] | None:
+        """Возвращает exchange по идентификатору."""
+        connection = await self._get_connection()
+        async with connection.execute(
+            """
+            SELECT *
+            FROM scheduled_exchanges
+            WHERE exchange_id = ?
+            LIMIT 1
+            """,
+            (exchange_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return dict(row) if row is not None else None
 
     async def mark_exchange_started(
         self,
@@ -140,7 +185,8 @@ class ExchangeStore:
                 question_text = ?,
                 question_signature = ?,
                 responder_scheduled_at = ?,
-                started_at = CURRENT_TIMESTAMP
+                started_at = CURRENT_TIMESTAMP,
+                last_activity_at = CURRENT_TIMESTAMP
             WHERE exchange_id = ?
             """,
             (
@@ -161,7 +207,8 @@ class ExchangeStore:
             """
             UPDATE scheduled_exchanges
             SET status = 'completed',
-                completed_at = CURRENT_TIMESTAMP
+                completed_at = CURRENT_TIMESTAMP,
+                last_activity_at = CURRENT_TIMESTAMP
             WHERE exchange_id = ?
             """,
             (exchange_id,),
@@ -169,31 +216,15 @@ class ExchangeStore:
         await connection.commit()
         logger.info("Exchange помечен как completed: exchange_id=%s", exchange_id)
 
-    async def mark_exchange_skipped(self, exchange_id: str, skip_reason: str) -> None:
-        """Помечает exchange как пропущенный."""
-        connection = await self._get_connection()
-        await connection.execute(
-            """
-            UPDATE scheduled_exchanges
-            SET status = 'skipped',
-                skip_reason = ?,
-                completed_at = CURRENT_TIMESTAMP
-            WHERE exchange_id = ?
-            """,
-            (skip_reason, exchange_id),
-        )
-        await connection.commit()
-        logger.info("Exchange пропущен: exchange_id=%s reason=%s", exchange_id, skip_reason)
-
-    async def get_recent_bot_ids(self, limit: int) -> list[str]:
+    async def get_recent_bot_ids(self, limit: int, *, group_id: str | None = None, group_chat_id: int | None = None) -> list[str]:
         """Возвращает последние уникальные bot_id, которые писали scheduled-сообщения."""
         if limit <= 0:
             return []
         connection = await self._get_connection()
+        filter_sql, filter_params = self._build_group_filter(group_id=group_id, group_chat_id=group_chat_id)
         async with connection.execute(
-            """
-            SELECT bot_id
-            FROM (
+            f"""
+            WITH bot_events AS (
                 SELECT
                     initiator_bot_id AS bot_id,
                     COALESCE(started_at, created_at) AS event_at,
@@ -202,6 +233,7 @@ class ExchangeStore:
                 FROM scheduled_exchanges
                 WHERE status IN ('started', 'completed')
                   AND started_at IS NOT NULL
+                  {filter_sql}
 
                 UNION ALL
 
@@ -213,136 +245,195 @@ class ExchangeStore:
                 FROM scheduled_exchanges
                 WHERE status = 'completed'
                   AND completed_at IS NOT NULL
-            ) bot_events
-            ORDER BY datetime(event_at) DESC, exchange_rowid DESC, event_order DESC
+                  {filter_sql}
+            ),
+            latest_bot_events AS (
+                SELECT bot_id, event_at, exchange_rowid, event_order
+                FROM (
+                    SELECT
+                        bot_id,
+                        event_at,
+                        exchange_rowid,
+                        event_order,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY bot_id
+                            ORDER BY event_at DESC, exchange_rowid DESC, event_order DESC
+                        ) AS bot_rank
+                    FROM bot_events
+                )
+                WHERE bot_rank = 1
+            )
+            SELECT bot_id
+            FROM latest_bot_events
+            ORDER BY event_at DESC, exchange_rowid DESC, event_order DESC
+            LIMIT ?
             """,
+            (*filter_params, *filter_params, limit),
         ) as cursor:
             rows = await cursor.fetchall()
 
-        recent_bot_ids: list[str] = []
-        seen_bot_ids: set[str] = set()
-        for row in rows:
-            bot_id = row[0]
-            if not isinstance(bot_id, str) or bot_id in seen_bot_ids:
-                continue
-            recent_bot_ids.append(bot_id)
-            seen_bot_ids.add(bot_id)
-            if len(recent_bot_ids) >= limit:
-                break
+        recent_bot_ids = [row[0] for row in rows if isinstance(row[0], str)]
 
         logger.info("Загружены последние scheduled bot_id: count=%s", len(recent_bot_ids))
         return recent_bot_ids
 
-    async def get_exchange_by_window_key(self, window_key: str) -> dict[str, object] | None:
+    async def get_exchange_by_window_key(
+        self,
+        window_key: str,
+        *,
+        group_id: str | None = None,
+        group_chat_id: int | None = None,
+    ) -> dict[str, object] | None:
         """Возвращает exchange, уже зарегистрированный в текущем окне."""
         connection = await self._get_connection()
+        filter_sql, filter_params = self._build_group_filter(group_id=group_id, group_chat_id=group_chat_id)
         async with connection.execute(
-            """
+            f"""
             SELECT *
             FROM scheduled_exchanges
             WHERE window_key = ?
+              {filter_sql}
             ORDER BY created_at DESC
             LIMIT 1
             """,
-            (window_key,),
+            (window_key, *filter_params),
         ) as cursor:
             row = await cursor.fetchone()
         return dict(row) if row is not None else None
 
-    async def get_due_planned_exchange(self, *, now: datetime) -> dict[str, object] | None:
-        """Возвращает ближайший planned exchange, которому пора отправить вопрос."""
-        connection = await self._get_connection()
-        async with connection.execute(
-            """
-            SELECT *
-            FROM scheduled_exchanges
-            WHERE status = 'planned'
-              AND initiator_scheduled_at IS NOT NULL
-              AND datetime(initiator_scheduled_at) <= datetime(?)
-            ORDER BY datetime(initiator_scheduled_at) ASC, created_at ASC
-            LIMIT 1
-            """,
-            (self._serialize_timestamp(now),),
-        ) as cursor:
-            row = await cursor.fetchone()
-        return dict(row) if row is not None else None
-
-    async def get_due_started_exchange(self, *, now: datetime) -> dict[str, object] | None:
+    async def get_due_started_exchange(
+        self,
+        *,
+        now: datetime,
+        group_id: str | None = None,
+        group_chat_id: int | None = None,
+    ) -> dict[str, object] | None:
         """Возвращает ближайший started exchange, которому пора отправить ответ."""
         connection = await self._get_connection()
+        filter_sql, filter_params = self._build_group_filter(group_id=group_id, group_chat_id=group_chat_id)
         async with connection.execute(
-            """
+            f"""
             SELECT *
             FROM scheduled_exchanges
             WHERE status = 'started'
               AND responder_scheduled_at IS NOT NULL
-              AND datetime(responder_scheduled_at) <= datetime(?)
-            ORDER BY datetime(responder_scheduled_at) ASC, started_at ASC
+              AND responder_scheduled_at <= ?
+              {filter_sql}
+            ORDER BY responder_scheduled_at ASC, started_at ASC
             LIMIT 1
             """,
-            (self._serialize_timestamp(now),),
+            (self._serialize_timestamp(now), *filter_params),
         ) as cursor:
             row = await cursor.fetchone()
         return dict(row) if row is not None else None
 
-    async def get_recent_topic_keys_by_limit(self, limit: int) -> set[str]:
+    async def get_recent_topic_keys_by_limit(
+        self,
+        limit: int,
+        *,
+        group_id: str | None = None,
+        group_chat_id: int | None = None,
+    ) -> set[str]:
         """Возвращает topic_key из последних started/completed exchange."""
         if limit <= 0:
             return set()
         connection = await self._get_connection()
+        filter_sql, filter_params = self._build_group_filter(group_id=group_id, group_chat_id=group_chat_id)
         async with connection.execute(
-            """
+            f"""
             SELECT topic_key
             FROM scheduled_exchanges
             WHERE status IN ('started', 'completed')
-            ORDER BY datetime(COALESCE(started_at, created_at)) DESC, rowid DESC
+              {filter_sql}
+            ORDER BY last_activity_at DESC, rowid DESC
             LIMIT ?
             """,
-            (limit,),
+            (*filter_params, limit),
         ) as cursor:
             rows = await cursor.fetchall()
         topic_keys = {row[0] for row in rows if isinstance(row[0], str)}
         logger.info("Загружены последние topic_key по limit=%s: count=%s", limit, len(topic_keys))
         return topic_keys
 
-    async def get_recent_question_signatures(self, *, since: timedelta) -> set[str]:
+    async def get_recent_question_signatures(
+        self,
+        *,
+        since: timedelta,
+        group_id: str | None = None,
+        group_chat_id: int | None = None,
+    ) -> set[str]:
         """Возвращает сигнатуры недавно использованных вопросов."""
         threshold = self._threshold_timestamp(since)
         connection = await self._get_connection()
+        filter_sql, filter_params = self._build_group_filter(group_id=group_id, group_chat_id=group_chat_id)
         async with connection.execute(
-            """
+            f"""
             SELECT DISTINCT question_signature
             FROM scheduled_exchanges
             WHERE question_signature IS NOT NULL
               AND status IN ('started', 'completed')
-              AND datetime(COALESCE(started_at, created_at)) >= datetime(?)
+              AND last_activity_at >= ?
+              {filter_sql}
             """,
-            (threshold,),
+            (threshold, *filter_params),
         ) as cursor:
             rows = await cursor.fetchall()
         signatures = {row[0] for row in rows if isinstance(row[0], str)}
         logger.info("Загружены recent question_signature: count=%s since=%s", len(signatures), threshold)
         return signatures
 
-    async def get_recent_questions(self, *, since: timedelta, limit: int = 10) -> list[str]:
+    async def get_recent_questions(
+        self,
+        *,
+        since: timedelta,
+        limit: int = 10,
+        group_id: str | None = None,
+        group_chat_id: int | None = None,
+    ) -> list[str]:
         """Возвращает последние вопросы для prompt context."""
         threshold = self._threshold_timestamp(since)
         connection = await self._get_connection()
+        filter_sql, filter_params = self._build_group_filter(group_id=group_id, group_chat_id=group_chat_id)
         async with connection.execute(
-            """
+            f"""
             SELECT COALESCE(question_text, topic)
             FROM scheduled_exchanges
             WHERE status IN ('started', 'completed')
-              AND datetime(COALESCE(started_at, created_at)) >= datetime(?)
-            ORDER BY COALESCE(started_at, created_at) DESC
+              AND last_activity_at >= ?
+              {filter_sql}
+            ORDER BY last_activity_at DESC, rowid DESC
             LIMIT ?
             """,
-            (threshold, limit),
+            (threshold, *filter_params, limit),
         ) as cursor:
             rows = await cursor.fetchall()
         questions = [row[0] for row in rows if isinstance(row[0], str)]
         logger.info("Загружены recent questions для контекста: count=%s", len(questions))
         return questions
+
+    async def get_latest_important_service_exchange(
+        self,
+        *,
+        group_id: str | None = None,
+        group_chat_id: int | None = None,
+    ) -> dict[str, object] | None:
+        """Возвращает последний important-service exchange для группы."""
+        connection = await self._get_connection()
+        filter_sql, filter_params = self._build_group_filter(group_id=group_id, group_chat_id=group_chat_id)
+        async with connection.execute(
+            f"""
+            SELECT *
+            FROM scheduled_exchanges
+            WHERE exchange_kind = 'important_service'
+              AND status IN ('started', 'completed')
+              {filter_sql}
+            ORDER BY last_activity_at DESC, rowid DESC
+            LIMIT 1
+            """,
+            filter_params,
+        ) as cursor:
+            row = await cursor.fetchone()
+        return dict(row) if row is not None else None
 
     async def close(self) -> None:
         """Закрывает SQLite-соединение."""
@@ -350,6 +441,30 @@ class ExchangeStore:
             return
         await self._connection.close()
         self._connection = None
+
+    async def prune_older_than(self, *, retention_days: int) -> int:
+        """Удаляет старые scheduled exchange по retention window."""
+        if retention_days <= 0:
+            logger.info("Пропуск очистки scheduled_exchanges: retention_days=%s", retention_days)
+            return 0
+
+        cutoff = (datetime.now(UTC) - timedelta(days=retention_days)).strftime("%Y-%m-%d %H:%M:%S")
+        connection = await self._get_connection()
+        cursor = await connection.execute(
+            """
+            DELETE FROM scheduled_exchanges
+            WHERE COALESCE(last_activity_at, created_at) < ?
+            """,
+            (cutoff,),
+        )
+        await connection.commit()
+        deleted = int(cursor.rowcount or 0)
+        logger.info(
+            "Очистка scheduled_exchanges завершена: retention_days=%s deleted=%s",
+            retention_days,
+            deleted,
+        )
+        return deleted
 
     async def _get_connection(self) -> aiosqlite.Connection:
         if self._connection is None:
@@ -374,6 +489,87 @@ class ExchangeStore:
         except aiosqlite.OperationalError as exc:
             if "duplicate column" not in str(exc).lower():
                 raise
+
+    async def _backfill_last_activity_at(self, connection: aiosqlite.Connection) -> None:
+        """Заполняет persisted sort key для legacy exchange rows."""
+        await connection.execute(
+            """
+            UPDATE scheduled_exchanges
+            SET last_activity_at = COALESCE(completed_at, started_at, created_at)
+            WHERE last_activity_at IS NULL
+              AND COALESCE(completed_at, started_at, created_at) IS NOT NULL
+            """
+        )
+        await connection.commit()
+
+    async def _ensure_indexes(self, connection: aiosqlite.Connection) -> None:
+        """Создаёт индексы для горячих запросов scheduled exchange."""
+        index_statements = [
+            """
+            CREATE INDEX IF NOT EXISTS idx_scheduled_exchanges_group_window_created
+            ON scheduled_exchanges (group_id, group_chat_id, window_key, created_at DESC)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_scheduled_exchanges_chat_window_created
+            ON scheduled_exchanges (group_chat_id, window_key, created_at DESC)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_scheduled_exchanges_group_due_responder
+            ON scheduled_exchanges (group_id, group_chat_id, status, responder_scheduled_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_scheduled_exchanges_chat_due_responder
+            ON scheduled_exchanges (group_chat_id, status, responder_scheduled_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_scheduled_exchanges_group_recent_started
+            ON scheduled_exchanges (group_id, group_chat_id, status, started_at, created_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_scheduled_exchanges_chat_recent_started
+            ON scheduled_exchanges (group_chat_id, status, started_at, created_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_scheduled_exchanges_group_recent_completed
+            ON scheduled_exchanges (group_id, group_chat_id, status, completed_at, started_at, created_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_scheduled_exchanges_chat_recent_completed
+            ON scheduled_exchanges (group_chat_id, status, completed_at, started_at, created_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_scheduled_exchanges_group_important_recent
+            ON scheduled_exchanges (group_id, group_chat_id, exchange_kind, status, last_activity_at DESC)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_scheduled_exchanges_chat_important_recent
+            ON scheduled_exchanges (group_chat_id, exchange_kind, status, last_activity_at DESC)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_scheduled_exchanges_group_activity_recent
+            ON scheduled_exchanges (group_id, group_chat_id, status, last_activity_at DESC)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_scheduled_exchanges_chat_activity_recent
+            ON scheduled_exchanges (group_chat_id, status, last_activity_at DESC)
+            """,
+        ]
+        for statement in index_statements:
+            await connection.execute(statement)
+        await connection.commit()
+
+    @staticmethod
+    def _build_group_filter(*, group_id: str | None, group_chat_id: int | None) -> tuple[str, tuple[object, ...]]:
+        """Строит SQL-фильтр group scope для anti-repeat запросов."""
+        clauses: list[str] = []
+        params: list[object] = []
+        if group_id is not None:
+            clauses.append("AND group_id = ?")
+            params.append(group_id)
+        if group_chat_id is not None:
+            clauses.append("AND group_chat_id = ?")
+            params.append(group_chat_id)
+        return ("\n                  " + "\n                  ".join(clauses) if clauses else "", tuple(params))
 
     @staticmethod
     def build_pair_key(initiator_bot_id: str, responder_bot_id: str) -> str:

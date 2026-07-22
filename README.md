@@ -4,7 +4,7 @@
 
 Проще говоря:
 - несколько Telegram-аккаунтов запускаются в одном процессе;
-- каждый аккаунт сидит в одной целевой группе и остаётся онлайн;
+- каждый аккаунт сидит в нескольких настроенных городских группах и остаётся онлайн;
 - если человек отвечает `reply` на сообщение конкретного аккаунта, отвечает только этот аккаунт;
 - по расписанию приложение само запускает небольшие диалоги между ботами;
 - история сообщений и история таких обменов сохраняется в SQLite;
@@ -17,8 +17,9 @@
 
 ### 1. Ответ на адресный `reply`
 
-Если человек в группе отвечает на сообщение бота через Telegram `reply`, приложение:
+Если человек в enabled группе отвечает на сообщение бота через Telegram `reply`, приложение:
 - понимает, какому именно аккаунту адресован ответ;
+- игнорирует группы, которых нет в конфиге или которые выключены;
 - игнорирует остальные аккаунты swarm;
 - собирает историю диалога из SQLite;
 - подставляет persona нужного бота и базовые промты;
@@ -29,14 +30,23 @@
 ### 2. Плановый обмен между ботами
 
 По расписанию orchestrator:
-- проверяет, что текущее время входит в разрешённое UTC-окно;
+- проверяет каждую enabled группу отдельно;
+- проверяет, что текущее время входит в разрешённое UTC-окно группы;
 - может пропустить запуск, если недавно была активность от человека;
 - выбирает пару `бот A -> бот B`;
-- выбирает тему;
+- выбирает важный service-вопрос, если он due для группы, иначе обычную тему;
 - сверяется с persisted history, чтобы не повторять недавние темы и вопросы;
 - генерирует стартовое сообщение от `A`;
 - затем генерирует ответ от `B`;
-- сохраняет весь exchange в SQLite.
+- сохраняет весь exchange в SQLite с `group_id` и реальным `group_chat_id`.
+
+Важные service-вопросы встроены в тот же плановый режим:
+- считаются отдельно для каждой группы;
+- используют те же `active_windows_utc`, human-activity gate и правило одного exchange на окно;
+- если важный exchange был в группе в день `N`, следующий важный exchange для этой группы допустим не раньше дня `N+3`;
+- сценарии идут по кругу: обмен RUB -> Airbnb оплата/бронь -> обмен USDT -> Booking оплата/бронь;
+- вопрос звучит как обычная реплика и не упоминает контакт;
+- ответ второго бота естественно и разными формулировками упоминает miniapp-ссылку `https://t.me/tt_exchenge_bot/antex`.
 
 ## Что нужно для запуска
 
@@ -71,14 +81,14 @@ cp .env.example .env
 API_ID=12345678
 API_HASH=your_telegram_api_hash
 GEMINI_API_KEY=your_gemini_api_key
-SETTINGS_PATH=config/settings.toml
-SESSION_STRING_ANNA=...
-SESSION_STRING_MIKE=...
+SESSION_STRING_DMITRY=...
+SESSION_STRING_VITALY=...
 ```
 
 Важно:
 - имя переменной `SESSION_STRING_*` должно совпадать с `session_env` у бота в TOML;
 - `SESSION_STRING_*` нельзя коммитить и нельзя логировать.
+- `config/settings.toml` подхватывается автоматически; `SETTINGS_PATH` больше не нужен для обычного запуска.
 
 ### 3. Создать файл настроек
 
@@ -91,40 +101,35 @@ cp config/settings.example.toml config/settings.toml
 Минимальный пример:
 
 ```toml
-[app]
-mode = "swarm"
-
-[target]
-group_chat_id = -1001234567890
-group_target = "@my_group"
-
-[storage]
-db_path = "data/history.db"
-
-[prompts]
-base_dir = "ai/prompts"
-topics_path = "ai/prompts/topics.md"
-bot_profiles_dir = "ai/prompts/bots"
-
 [gemini]
 model = "gemini-2.5-flash"
-fallback_model = "gemini-2.5-flash-lite"
-temperature = 0.9
 
 [logging]
 level = "INFO"
-
-[swarm]
-enabled = true
-reply_only_to_addressed_bot = true
 
 [swarm.schedule]
 active_windows_utc = ["10-11", "16-18"]
 initiator_offset_minutes = [0, 30]
 responder_delay_minutes = [3, 10]
 max_turns_per_exchange = 2
-# Deprecated: оставлено для совместимости, выбор идет по последним 3 userbot.
-pair_cooldown_slots = 1
+
+[[groups]]
+id = "danang"
+city = "Da Nang"
+enabled = true
+group_chat_id = -1001234567890
+group_target = "@danang_group"
+
+[[groups]]
+id = "batumi"
+city = "Batumi"
+enabled = true
+group_chat_id = -1009876543210
+group_target = "@batumi_group"
+
+[groups.schedule]
+active_windows_utc = ["14-16"]
+responder_delay_minutes = [5, 12]
 
 [swarm.orchestrator]
 tick_seconds = 30
@@ -132,59 +137,62 @@ silence_timeout_minutes = 60
 skip_if_recent_human_activity = true
 
 [[swarm.bots]]
-id = "anna"
-session_env = "SESSION_STRING_ANNA"
-persona_file = "anna.md"
+id = "dmitry"
+session_env = "SESSION_STRING_DMITRY"
+persona_file = "dmitry.md"
 enabled = true
 temperature = 0.9
 
 [[swarm.bots]]
-id = "mike"
-session_env = "SESSION_STRING_MIKE"
-persona_file = "mike.md"
+id = "vitaly"
+session_env = "SESSION_STRING_VITALY"
+persona_file = "vitaly.md"
 enabled = true
 temperature = 0.8
 ```
 
 На что обратить внимание:
-- `group_chat_id` и `group_target` должны указывать на одну и ту же группу;
-- `db_path` это путь к SQLite-файлу;
-- `bot_profiles_dir` это папка с persona-файлами;
+- группы задаются через `[[groups]]`; старый `[target]` в TOML больше не поддерживается;
+- старые секции `[app]`, `[storage]` и `[prompts]` больше не входят в публичный TOML-контракт;
+- `group.id` должен быть уникальным;
+- каждая группа должна иметь `group_chat_id` или `group_target`;
+- если у группы есть `[groups.schedule]`, неуказанные поля наследуются из `[swarm.schedule]`;
+- `data/history.db`, `ai/prompts/`, `ai/prompts/topics.md` и `ai/prompts/bots/` теперь задаются кодовыми defaults;
 - каждый `persona_file` должен реально существовать;
 - для каждого `session_env` должна быть переменная в `.env`;
-- реальные файлы `ai/prompts/**/*.md` локальные для инстанса и не коммитятся;
-- в git лежат только шаблоны `ai/prompts/**/*.example.md`.
+- реальные файлы `ai/prompts/**/*.md` являются частью этого production-инстанса и хранятся в git;
+- `topics.md` содержит общие topic-intents, а не готовые вопросы под конкретный город.
 
 ### 4. Подготовить промты
 
-Runtime читает реальные файлы без `.example`:
+Runtime читает реальные файлы:
 - `ai/prompts/system.md`
 - `ai/prompts/reply.md`
 - `ai/prompts/start_topic.md`
 - `ai/prompts/topics.md`
-- `ai/prompts/reply_rules.md`
 - `ai/prompts/wind_down_hint.md`
 
-В репозитории лежат только примеры с суффиксом `.example.md`. Для нового инстанса скопируй нужные шаблоны в такие же имена без `.example` и заполни их под конкретную группу.
+Эти файлы уже лежат в репозитории. `start_topic.md` отвечает за превращение общей темы из `topics.md` в один вопрос для города текущей группы.
+
+Для важных service-вопросов orchestrator добавляет в prompt context markers:
+- `important_service_question` для вопроса инициатора;
+- `important_service_answer` для ответа второго бота.
+
+Без этих markers промты должны оставаться обычными и не превращать плановые темы или addressed replies в рекламу. С marker `important_service_answer` ответ должен коротко и разговорно упомянуть `https://t.me/tt_exchenge_bot/antex`.
 
 ### 5. Подготовить persona-файлы
 
-Проект ожидает persona-файлы в директории, указанной в `bot_profiles_dir`.
+Проект ожидает persona-файлы в `ai/prompts/bots`, если ты не используешь внутренний override пути.
 
-Если у тебя в конфиге:
+Должны существовать файлы, указанные в `persona_file`, например:
+- `ai/prompts/bots/dmitry.md`
+- `ai/prompts/bots/vitaly.md`
 
-```toml
-[prompts]
-bot_profiles_dir = "ai/prompts/bots"
-```
+В production-наборе `ai/prompts/bots` должен соответствовать `config/settings.prod.toml`: каждый файл используется хотя бы одним prod-ботом, а каждый prod-бот ссылается на существующий подробный профиль.
 
-то должны существовать файлы вроде:
-- `ai/prompts/bots/anna.md`
-- `ai/prompts/bots/mike.md`
+Persona-файлы текущего инстанса также хранятся в git. Секреты и строки сессий в persona/prompts не добавлять.
 
-Шаблон persona-файла находится в `ai/prompts/bots/persona.example.md`. Реальные persona-файлы тоже локальные и не коммитятся.
-
-### 6. Получить `SESSION_STRING` для каждого аккаунта
+### 6. Получить `SESSION_STRING_*` для каждого аккаунта
 
 Для каждого Telegram-аккаунта нужно один раз получить строку сессии.
 
@@ -221,11 +229,19 @@ uv run python run.py
 - инициализируется SQLite;
 - загрузятся темы и промты;
 - поднимутся все включённые swarm-аккаунты;
-- зарегистрируются обработчики входящих `reply`;
-- запустится scheduler для плановых обменов;
-- в логах появится информация о целевой группе и активных ботах.
+- все включённые аккаунты проверят membership во всех enabled группах;
+- зарегистрируются обработчики входящих `reply` с фильтром enabled group chat id;
+- запустится scheduler для плановых обменов по каждой enabled группе;
+- в логах появится информация о группах и активных ботах.
 
 Если всё настроено правильно, приложение будет работать как постоянный фоновый worker.
+
+## Reload групп
+
+Во время работы scheduler проверяет `config/settings.toml` по `mtime`. Если файл изменился:
+- добавленные или включённые группы попадут в следующие scheduler ticks;
+- выключенные группы перестанут получать scheduled exchanges и addressed replies;
+- боты не перезапускаются, изменения списка ботов и `SESSION_STRING_*` по-прежнему требуют restart.
 
 ## Как понять, что запуск прошёл нормально
 
@@ -233,7 +249,7 @@ uv run python run.py
 - нет `Ошибка конфигурации` при старте;
 - в логах видно, что таблицы SQLite созданы или готовы;
 - в логах видно запуск каждого `bot_id`;
-- в логах видно, что целевая группа успешно определена;
+- в логах видно, что enabled группы успешно определены;
 - процесс не завершается сразу после старта.
 
 Если приложение не стартует, сначала проверь:
@@ -241,7 +257,7 @@ uv run python run.py
 - существует ли `config/settings.toml`;
 - совпадают ли `session_env` и реальные имена переменных в `.env`;
 - существуют ли persona-файлы;
-- корректны ли `group_chat_id` и `group_target`.
+- корректны ли `group_chat_id` и `group_target` в `[[groups]]`.
 
 ## Как протестировать проект
 
@@ -259,8 +275,7 @@ uv run pytest
 - reply router;
 - orchestrator;
 - scheduler;
-- runtime и bootstrap;
-- вспомогательные скрипты.
+- runtime и bootstrap.
 
 ### Быстрая проверка, что тесты вообще собираются
 
@@ -291,7 +306,7 @@ uv run pytest tests/test_reply_router.py
 1. Запусти приложение.
 2. Убедись, что все нужные аккаунты вошли в группу.
 3. Напиши сообщение одному из ботов или дождись его сообщения.
-4. Ответь на это сообщение через `reply`.
+4. Ответь на это сообщение через `reply` в enabled группе.
 5. Проверь, что отвечает именно тот аккаунт, которому был адресован `reply`.
 6. Проверь, что в логах есть запись о маршрутизации и отправке ответа.
 7. Проверь, что SQLite-файл появился и обновляется.
@@ -302,44 +317,37 @@ uv run pytest tests/test_reply_router.py
 2. Запусти приложение.
 3. Подожди несколько scheduler tick.
 4. Проверь, что orchestrator выбрал пару ботов и тему.
-5. Проверь, что в группе появился обмен `A -> B`.
-6. Проверь, что exchange записался в SQLite.
+5. Проверь, что в каждой enabled группе появился отдельный обмен `A -> B`.
+6. Проверь, что exchange записался в SQLite с нужным `group_id`.
 
-## Вспомогательные скрипты
+Для проверки важного service-вопроса:
 
-В проекте есть дополнительные утилиты.
-
-### Посмотреть информацию о текущем Telegram-пользователе
-
-```bash
-uv run python scripts/get_info.py
-```
-
-Скрипт:
-- логинится текущим аккаунтом;
-- собирает публичные атрибуты пользователя;
-- сохраняет отчёт в `tg_user_info/info.txt`.
-
-### Обновить профиль аккаунта
-
-```bash
-uv run python scripts/update_profile.py
-```
-
-Скрипт в интерактивном режиме может:
-- обновить имя;
-- обновить фамилию;
-- обновить username;
-- обновить аватар.
+1. Используй группу, где в SQLite нет недавних `important_service` exchanges, или тестовую БД.
+2. Временно задай ближайшее `active_windows_utc`.
+3. Запусти приложение и дождись scheduler tick.
+4. Проверь, что первый important-сценарий задаёт вопрос про обмен безналичных рублей.
+5. Проверь, что ответ второго бота упоминает `https://t.me/tt_exchenge_bot/antex`.
+6. Проверь в SQLite, что exchange записан с `exchange_kind = important_service` и `important_scenario`.
 
 ## Важные ограничения
 
 - проект рассчитан на `swarm`-режим;
+- запуск приложения выполняется только через `uv run python run.py`;
 - база данных только SQLite;
 - сетевые и БД-операции сделаны асинхронно;
 - persona каждого бота должна загружаться из `persona_file`;
 - все сообщения должны сохраняться в БД;
 - секреты из `.env` нельзя публиковать.
+
+## Миграция старого конфига
+
+Если у тебя старый `config/settings.toml`, убери из него:
+- `[app]`
+- `[storage]`
+- `[prompts]`
+- `SETTINGS_PATH` из `.env`
+
+После этого проверь, что в файле остались только реально нужные override-секции вроде `[gemini]`, `[logging]`, `[swarm.schedule]`, `[swarm.orchestrator]`, `[[groups]]` и `[[swarm.bots]]`.
 
 ## Коротко: минимальный путь до первого запуска
 

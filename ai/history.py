@@ -1,7 +1,7 @@
 """Модуль хранения истории диалогов в SQLite через aiosqlite."""
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +58,8 @@ class MessageHistory:
         await self._ensure_column(connection, "exchange_id", "TEXT")
         await self._ensure_column(connection, "message_origin", "TEXT")
         await self._ensure_column(connection, "reply_to_message_id", "INTEGER")
+        await self._ensure_column(connection, "created_at", "TIMESTAMP")
+        await self._ensure_indexes(connection)
         logger.info("Таблица истории сообщений готова")
 
     async def save_message(
@@ -242,6 +244,26 @@ class MessageHistory:
         await self._connection.close()
         self._connection = None
 
+    async def prune_older_than(self, *, retention_days: int) -> int:
+        """Удаляет старые сообщения по retention window."""
+        if retention_days <= 0:
+            logger.info("Пропуск очистки history: retention_days=%s", retention_days)
+            return 0
+
+        cutoff = _to_utc_sqlite_timestamp(datetime.now(UTC) - timedelta(days=retention_days))
+        connection = await self._get_connection()
+        cursor = await connection.execute(
+            """
+            DELETE FROM messages
+            WHERE created_at < ?
+            """,
+            (cutoff,),
+        )
+        await connection.commit()
+        deleted = int(cursor.rowcount or 0)
+        logger.info("Очистка history завершена: retention_days=%s deleted=%s", retention_days, deleted)
+        return deleted
+
     async def _get_connection(self) -> aiosqlite.Connection:
         """Возвращает общее подключение к SQLite, необходимое для :memory:."""
         if self._connection is None:
@@ -267,3 +289,31 @@ class MessageHistory:
         except aiosqlite.OperationalError as exc:
             if "duplicate column" not in str(exc).lower():
                 raise
+
+    async def _ensure_indexes(self, connection: aiosqlite.Connection) -> None:
+        """Создаёт индексы для горячих запросов истории."""
+        index_statements = [
+            """
+            CREATE INDEX IF NOT EXISTS idx_messages_user_id_id
+            ON messages (user_id, id DESC)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_messages_chat_id_id
+            ON messages (chat_id, id DESC)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_messages_chat_bot_id
+            ON messages (chat_id, bot_id, id DESC)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_messages_chat_created_at
+            ON messages (chat_id, created_at, id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_messages_chat_bot_created_at
+            ON messages (chat_id, bot_id, created_at, id)
+            """,
+        ]
+        for statement in index_statements:
+            await connection.execute(statement)
+        await connection.commit()

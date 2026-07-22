@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import time
+from collections import deque
+from collections.abc import Callable
 import logging
 from typing import Any
 
@@ -13,6 +16,27 @@ from userbot.swarm_manager import SwarmManager
 
 
 logger = logging.getLogger(__name__)
+SAFE_REPLY_FALLBACK_TEXT = "Не могу безопасно ответить на это прямо сейчас."
+
+
+class _ReplyRateLimiter:
+    """Скользящее окно ограничений для addressed reply."""
+
+    def __init__(self) -> None:
+        self._events: dict[tuple[int | None, int | None, str], deque[float]] = {}
+
+    def allow(self, *, chat_id: int | None, sender_id: int | None, bot_id: str, limit: int, window_seconds: int) -> bool:
+        """Возвращает, можно ли обработать очередной reply в текущем окне."""
+        key = (chat_id, sender_id, bot_id)
+        now = time.monotonic()
+        threshold = now - window_seconds
+        bucket = self._events.setdefault(key, deque())
+        while bucket and bucket[0] < threshold:
+            bucket.popleft()
+        if len(bucket) >= limit:
+            return False
+        bucket.append(now)
+        return True
 
 
 class AddressedReplyRouter:
@@ -26,17 +50,28 @@ class AddressedReplyRouter:
         prompt_composer: PromptComposer | Any,
         gemini_client: GeminiClient | Any,
         swarm_user_ids: set[int],
+        enabled_group_chat_ids: set[int] | None = None,
         manager: SwarmManager | Any | None = None,
+        security_settings_getter: Callable[[], Any] | None = None,
+        rate_limiter: _ReplyRateLimiter | None = None,
     ) -> None:
         self.bot_profile = bot_profile
         self.history = history
         self.prompt_composer = prompt_composer
         self.gemini_client = gemini_client
         self.swarm_user_ids = swarm_user_ids
+        self.enabled_group_chat_ids = enabled_group_chat_ids
         self.manager = manager
+        self.security_settings_getter = security_settings_getter or (lambda: None)
+        self.rate_limiter = rate_limiter or _ReplyRateLimiter()
 
     async def handle_event(self, event: Any) -> bool:
         """Обрабатывает входящее сообщение, если оно адресовано текущему боту."""
+        chat_id = getattr(event, "chat_id", None)
+        if self.enabled_group_chat_ids is not None and chat_id not in self.enabled_group_chat_ids:
+            logger.info("router: bot_id=%s ignore event outside enabled groups chat_id=%s", self.bot_profile.id, chat_id)
+            return False
+
         sender_id = getattr(event, "sender_id", None)
         if sender_id in self.swarm_user_ids:
             logger.info("router: bot_id=%s ignore sender from swarm sender_id=%s", self.bot_profile.id, sender_id)
@@ -68,6 +103,21 @@ class AddressedReplyRouter:
             getattr(event, "id", None),
             sender_id,
         )
+        security_settings = self.security_settings_getter()
+        if not self.rate_limiter.allow(
+            chat_id=chat_id,
+            sender_id=sender_id,
+            bot_id=self.bot_profile.id,
+            limit=getattr(security_settings, "swarm_addressed_reply_rate_limit_count", 3),
+            window_seconds=getattr(security_settings, "swarm_addressed_reply_rate_limit_window_seconds", 60),
+        ):
+            logger.warning(
+                "router: bot_id=%s throttled addressed reply sender_id=%s chat_id=%s",
+                self.bot_profile.id,
+                sender_id,
+                chat_id,
+            )
+            return False
 
         if self.manager is None:
             return await self._process_reply(event=event, reply_message=reply_message)
@@ -87,11 +137,20 @@ class AddressedReplyRouter:
             bot_id=self.bot_profile.id,
             persona_file=self.bot_profile.persona_file,
         )
-        response_text = await self.gemini_client.generate_reply(
-            system_prompt=system_prompt,
-            history=history,
-            user_message=user_text,
-        )
+        security_settings = self.security_settings_getter()
+        if getattr(security_settings, "swarm_allow_external_llm_for_replies", True):
+            response_text = await self.gemini_client.generate_reply(
+                system_prompt=system_prompt,
+                history=history,
+                user_message=user_text,
+            )
+            output_safe_checker = getattr(self.gemini_client, "is_output_safe", lambda _text: True)
+            if not output_safe_checker(response_text):
+                logger.warning("router: bot_id=%s replaced unsafe Gemini reply", self.bot_profile.id)
+                response_text = SAFE_REPLY_FALLBACK_TEXT
+        else:
+            logger.info("router: bot_id=%s uses local fallback because reply LLM is disabled", self.bot_profile.id)
+            response_text = SAFE_REPLY_FALLBACK_TEXT
 
         await self.history.save_message(
             user_id=sender_id,

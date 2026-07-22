@@ -139,7 +139,7 @@ def _build_telegram_client(
     """Создаёт экземпляр TelegramClient с ленивым импортом Telethon."""
     normalized_session_string = session_string.strip()
     if not normalized_session_string:
-        raise ValueError("SESSION_STRING не должен быть пустым")
+        raise ValueError("Строка Telethon-сессии не должна быть пустой")
 
     try:
         from telethon import TelegramClient

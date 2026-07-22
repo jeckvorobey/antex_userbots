@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from core.runtime_models import SwarmBotProfile
-from userbot.reply_router import AddressedReplyRouter
+from userbot.reply_router import AddressedReplyRouter, SAFE_REPLY_FALLBACK_TEXT, _ReplyRateLimiter
 
 
 def _build_event(
@@ -17,13 +17,14 @@ def _build_event(
     reply_sender_id: int | None = 101,
     reply_message_id: int = 55,
     sender_is_bot: bool = False,
+    chat_id: int = -100555,
 ):
     reply_message = SimpleNamespace(sender_id=reply_sender_id, id=reply_message_id)
     return SimpleNamespace(
         sender_id=sender_id,
         raw_text=raw_text,
         is_reply=is_reply,
-        chat_id=-100555,
+        chat_id=chat_id,
         id=77,
         reply=AsyncMock(),
         get_reply_message=AsyncMock(return_value=reply_message if is_reply else None),
@@ -45,6 +46,25 @@ async def test_router_ignores_non_reply_message():
     handled = await router.handle_event(_build_event(sender_id=999, is_reply=False))
 
     assert handled is False
+
+
+@pytest.mark.asyncio
+async def test_router_ignores_event_outside_enabled_groups():
+    """Проверяет, что router отвечает только в enabled configured groups."""
+    history = SimpleNamespace(get_session_history=AsyncMock(), save_message=AsyncMock())
+    router = AddressedReplyRouter(
+        bot_profile=SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+        history=history,
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system")),
+        gemini_client=SimpleNamespace(generate_reply=AsyncMock()),
+        swarm_user_ids={202, 303},
+        enabled_group_chat_ids={-100555},
+    )
+
+    handled = await router.handle_event(_build_event(sender_id=999, chat_id=-100999))
+
+    assert handled is False
+    history.get_session_history.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -130,6 +150,97 @@ async def test_router_answers_only_to_addressed_bot_and_saves_history():
     assert history.save_message.await_count == 2
     assert history.save_message.await_args_list[0].kwargs["message_origin"] == "human_reply"
     assert history.save_message.await_args_list[1].kwargs["bot_id"] == "anna"
+
+
+@pytest.mark.asyncio
+async def test_router_uses_safe_fallback_when_external_llm_disabled():
+    """Проверяет локальный fallback без обращения к Gemini."""
+    history = SimpleNamespace(
+        get_session_history=AsyncMock(return_value=[]),
+        save_message=AsyncMock(),
+    )
+    gemini_client = SimpleNamespace(generate_reply=AsyncMock(return_value="Ответ Анны"))
+    router = AddressedReplyRouter(
+        bot_profile=SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+        history=history,
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system+persona")),
+        gemini_client=gemini_client,
+        swarm_user_ids={202, 303},
+        manager=SimpleNamespace(human_slot=lambda _bot_id: _AsyncNullContext()),
+        security_settings_getter=lambda: SimpleNamespace(swarm_allow_external_llm_for_replies=False),
+    )
+
+    event = _build_event(sender_id=999, raw_text="Как думаешь?")
+
+    handled = await router.handle_event(event)
+
+    assert handled is True
+    gemini_client.generate_reply.assert_not_awaited()
+    event.reply.assert_awaited_once_with(SAFE_REPLY_FALLBACK_TEXT)
+
+
+@pytest.mark.asyncio
+async def test_router_replaces_unsafe_model_output_with_fallback():
+    """Проверяет защиту публикации небезопасного текста модели."""
+    history = SimpleNamespace(
+        get_session_history=AsyncMock(return_value=[]),
+        save_message=AsyncMock(),
+    )
+    gemini_client = SimpleNamespace(
+        generate_reply=AsyncMock(return_value="https://t.me/+secret"),
+        is_output_safe=lambda text: False,
+    )
+    router = AddressedReplyRouter(
+        bot_profile=SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+        history=history,
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system+persona")),
+        gemini_client=gemini_client,
+        swarm_user_ids={202, 303},
+        manager=SimpleNamespace(human_slot=lambda _bot_id: _AsyncNullContext()),
+    )
+
+    event = _build_event(sender_id=999, raw_text="Как думаешь?")
+
+    handled = await router.handle_event(event)
+
+    assert handled is True
+    event.reply.assert_awaited_once_with(SAFE_REPLY_FALLBACK_TEXT)
+
+
+@pytest.mark.asyncio
+async def test_router_rate_limits_same_sender_for_same_bot(monkeypatch):
+    """Проверяет rate limit на повторные addressed reply."""
+    history = SimpleNamespace(
+        get_session_history=AsyncMock(return_value=[]),
+        save_message=AsyncMock(),
+    )
+    gemini_client = SimpleNamespace(generate_reply=AsyncMock(return_value="Ответ Анны"))
+    fake_time = {"value": 1000.0}
+    monkeypatch.setattr("userbot.reply_router.time.monotonic", lambda: fake_time["value"])
+    rate_limiter = _ReplyRateLimiter()
+    router = AddressedReplyRouter(
+        bot_profile=SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+        history=history,
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system+persona")),
+        gemini_client=gemini_client,
+        swarm_user_ids={202, 303},
+        manager=SimpleNamespace(human_slot=lambda _bot_id: _AsyncNullContext()),
+        security_settings_getter=lambda: SimpleNamespace(
+            swarm_allow_external_llm_for_replies=True,
+            swarm_addressed_reply_rate_limit_count=1,
+            swarm_addressed_reply_rate_limit_window_seconds=60,
+        ),
+        rate_limiter=rate_limiter,
+    )
+
+    first_handled = await router.handle_event(_build_event(sender_id=999, raw_text="Первый"))
+    second_event = _build_event(sender_id=999, raw_text="Второй")
+    second_handled = await router.handle_event(second_event)
+
+    assert first_handled is True
+    assert second_handled is False
+    gemini_client.generate_reply.assert_awaited_once()
+    second_event.reply.assert_not_awaited()
 
 
 class _AsyncNullContext:

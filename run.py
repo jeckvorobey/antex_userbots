@@ -7,6 +7,7 @@ import inspect
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from urllib.parse import urlparse
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -14,7 +15,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from ai.gemini import GeminiClient, PromptLoader
 from ai.history import MessageHistory
 from ai.prompt_composer import PromptComposer
-from core.config import load_settings_or_exit
+from core.config import SettingsReloadWatcher, load_settings_or_exit
 from core.logging import setup_logging
 from core.runtime_models import SwarmBotProfile
 from userbot.client import UserBotClient
@@ -78,6 +79,13 @@ def _is_invite_link(target: str | None) -> bool:
         return False
     normalized = target.strip()
     return normalized.startswith(("https://t.me/+", "http://t.me/+", "https://t.me/joinchat/", "http://t.me/joinchat/"))
+
+
+def _redact_group_target(target: object) -> object:
+    """Скрывает приватные invite-ссылки Telegram в логах."""
+    if isinstance(target, str) and _is_invite_link(target):
+        return "<private invite link>"
+    return target
 
 
 def _normalize_public_group_target(target: str) -> str:
@@ -154,6 +162,14 @@ def _extract_join_result_target(join_result: object | None) -> object | None:
     return join_result
 
 
+def _extract_resolved_chat_id(resolved_target: object | None, fallback_chat_id: int | None) -> int | None:
+    """Извлекает реальный chat_id группы из resolved entity или fallback."""
+    if fallback_chat_id is not None:
+        return fallback_chat_id
+    target_id = getattr(resolved_target, "id", None)
+    return target_id if isinstance(target_id, int) else None
+
+
 async def _resolve_group_target(
     telegram_client: object | None,
     group_chat_id: int | None,
@@ -179,7 +195,7 @@ async def _resolve_group_target(
     normalized_group_target = group_target.strip() if isinstance(group_target, str) else None
     if normalized_group_target:
         if _is_invite_link(normalized_group_target):
-            logger.info("Пропуск get_entity для invite link target=%s", normalized_group_target)
+            logger.info("Пропуск get_entity для invite link target=%s", _redact_group_target(normalized_group_target))
             return None
         get_entity = getattr(telegram_client, "get_entity", None)
         if get_entity is None:
@@ -266,6 +282,38 @@ def _build_group_membership_startup_hook(
     return startup_hook
 
 
+def _build_multi_group_membership_startup_hook(
+    *,
+    groups: list[object],
+    join_delay_minutes: tuple[int, int] = (1, 3),
+):
+    """Строит startup hook, который проверяет membership для всех enabled groups."""
+
+    async def startup_hook(profile: SwarmBotProfile, client_wrapper: UserBotClient) -> dict[str, object | None]:
+        delay = pick_random_delay(join_delay_minutes)
+        delay_seconds = delay.total_seconds()
+        logger.info(
+            "swarm: bot_id=%s ожидает случайную задержку перед multi-group membership check: %.1f sec",
+            profile.id,
+            delay_seconds,
+        )
+        await asyncio.sleep(delay_seconds)
+        resolved: dict[str, object | None] = {}
+        for group in groups:
+            if not getattr(group, "enabled", True):
+                continue
+            group_id = getattr(group, "id")
+            resolved[group_id] = await _ensure_group_membership(
+                client_wrapper,
+                getattr(group, "group_chat_id", None),
+                getattr(group, "group_target", None),
+                profile.id,
+            )
+        return resolved
+
+    return startup_hook
+
+
 async def _log_resolved_group(
     telegram_client: object | None,
     group_chat_id: int | None,
@@ -275,14 +323,14 @@ async def _log_resolved_group(
     logger.info(
         "Целевая группа настроена: GROUP_CHAT_ID=%s GROUP_TARGET=%s",
         group_chat_id,
-        group_target,
+        _redact_group_target(group_target),
     )
     resolved_group_target = await _resolve_group_target(telegram_client, group_chat_id, group_target)
     if resolved_group_target is None:
         logger.warning(
             "Не удалось определить целевую группу при инициализации: GROUP_CHAT_ID=%s, GROUP_TARGET=%s",
             group_chat_id,
-            group_target,
+            _redact_group_target(group_target),
         )
         return
 
@@ -292,6 +340,81 @@ async def _log_resolved_group(
         getattr(resolved_group_target, "id", None),
         getattr(resolved_group_target, "username", None),
     )
+
+
+def _enabled_groups_from_settings(settings: object) -> list[object]:
+    """Возвращает enabled groups или legacy group fallback."""
+    groups = list(getattr(settings, "enabled_groups", []) or [])
+    if groups:
+        return groups
+    group_chat_id = getattr(settings, "group_chat_id", None)
+    group_target = getattr(settings, "group_target", None)
+    if group_chat_id is None and group_target is None:
+        return []
+    return [
+        SimpleNamespace(
+            id="legacy",
+            city="legacy",
+            enabled=True,
+            group_chat_id=group_chat_id,
+            group_target=group_target,
+            active_windows_utc=list(getattr(settings, "swarm_schedule_active_windows_utc", [])),
+            initiator_offset_minutes=getattr(settings, "swarm_initiator_offset_minutes", (0, 30)),
+            responder_delay_minutes=getattr(settings, "swarm_responder_delay_minutes", (3, 10)),
+            max_turns_per_exchange=getattr(settings, "swarm_max_turns_per_exchange", 2),
+        )
+    ]
+
+
+def _build_group_orchestrator_signature(
+    *,
+    group: object,
+    group_target: object,
+    group_chat_id: int | None,
+    skip_if_recent_human_activity: bool,
+) -> tuple[object, ...]:
+    """Строит стабильную подпись group runtime-настроек для кеша orchestrator."""
+    return (
+        getattr(group, "id", None),
+        getattr(group, "city", None),
+        getattr(group, "group_chat_id", None),
+        getattr(group, "group_target", None),
+        group_chat_id,
+        getattr(group_target, "id", None),
+        getattr(group_target, "username", None),
+        group_target if isinstance(group_target, (str, int)) else None,
+        tuple(getattr(group, "active_windows_utc", []) or []),
+        tuple(getattr(group, "initiator_offset_minutes", (0, 30))),
+        tuple(getattr(group, "responder_delay_minutes", (3, 10))),
+        getattr(group, "max_turns_per_exchange", 2),
+        skip_if_recent_human_activity,
+    )
+
+
+def _get_cached_group_orchestrator(
+    cache: dict[str, tuple[tuple[object, ...], object]],
+    group_id: str,
+    signature: tuple[object, ...],
+    factory,
+) -> object:
+    """Возвращает кешированный orchestrator или пересоздаёт его при смене подписи."""
+    cached = cache.get(group_id)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+
+    orchestrator = factory()
+    cache[group_id] = (signature, orchestrator)
+    return orchestrator
+
+
+def _prune_orchestrator_cache(
+    cache: dict[str, tuple[tuple[object, ...], object]],
+    active_group_ids: set[str],
+) -> None:
+    """Удаляет orchestrator-ы для отключённых или удалённых групп."""
+    for group_id in list(cache):
+        if group_id not in active_group_ids:
+            cache.pop(group_id, None)
 
 
 async def _build_runtime_context(settings: object) -> RuntimeContext:
@@ -310,12 +433,17 @@ async def _build_runtime_context(settings: object) -> RuntimeContext:
         retry_jitter_seconds=settings.gemini_retry_jitter_seconds,
         request_timeout_seconds=settings.gemini_request_timeout_seconds,
         temperature=settings.gemini_temperature,
+        max_output_chars=getattr(settings, "swarm_max_output_chars", 400),
+        max_mentions_per_message=getattr(settings, "swarm_max_mentions_per_message", 2),
     )
     topic_selector = TopicSelector(settings.topics_path)
     await topic_selector.load()
     prompt_composer = PromptComposer(prompt_loader=prompt_loader, bot_profiles_dir=settings.bot_profiles_dir)
     exchange_store = ExchangeStore(settings.db_path)
     await exchange_store.init_db()
+    retention_days = getattr(settings, "swarm_history_retention_days", 30)
+    await history.prune_older_than(retention_days=retention_days)
+    await exchange_store.prune_older_than(retention_days=retention_days)
 
     logger.info(
         "RuntimeContext инициализирован: db_path=%s prompts_dir=%s topics=%s",
@@ -351,7 +479,12 @@ def _build_swarm_bot_profiles(settings: object) -> list[SwarmBotProfile]:
     return profiles
 
 
-async def _register_swarm_handlers(manager: SwarmManager, runtime: RuntimeContext) -> None:
+async def _register_swarm_handlers(
+    manager: SwarmManager,
+    runtime: RuntimeContext,
+    settings_getter,
+    enabled_group_chat_ids: set[int] | None = None,
+) -> None:
     """Регистрирует addressed-reply handlers на всех клиентах swarm."""
     try:
         from telethon import events
@@ -373,7 +506,9 @@ async def _register_swarm_handlers(manager: SwarmManager, runtime: RuntimeContex
             prompt_composer=runtime.prompt_composer,
             gemini_client=runtime.gemini_client,
             swarm_user_ids=manager.swarm_user_ids,
+            enabled_group_chat_ids=enabled_group_chat_ids,
             manager=manager,
+            security_settings_getter=settings_getter,
         )
 
         async def on_new_message(event: object, *, _router: AddressedReplyRouter = router) -> None:
@@ -388,6 +523,10 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
     bot_profiles = _build_swarm_bot_profiles(settings)
     if len(bot_profiles) < 2:
         raise ValueError("Swarm mode requires at least two enabled bots")
+    current_settings = settings
+    current_groups = _enabled_groups_from_settings(current_settings)
+    if not current_groups:
+        raise ValueError("Swarm mode requires at least one enabled group")
 
     manager = SwarmManager(
         bot_profiles=bot_profiles,
@@ -397,52 +536,106 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
             api_hash=settings.api_hash,
             proxy_url=settings.proxy_url,
         ),
-        startup_hook=_build_group_membership_startup_hook(
-            group_chat_id=settings.group_chat_id,
-            group_target=settings.group_target,
+        startup_hook=_build_multi_group_membership_startup_hook(
+            groups=current_groups,
         ),
     )
     await manager.start()
     if len(manager.active_bot_ids) < 2:
         raise ValueError("Swarm mode requires at least two active bots after startup")
-    await _register_swarm_handlers(manager, runtime)
+    enabled_group_chat_ids = {
+        group.group_chat_id for group in current_groups if isinstance(getattr(group, "group_chat_id", None), int)
+    }
+    await _register_swarm_handlers(manager, runtime, lambda: current_settings, enabled_group_chat_ids or None)
 
     first_client = manager.get_client(manager.active_bot_ids[0]).client
-    await _log_resolved_group(first_client, settings.group_chat_id, settings.group_target)
-    resolved_group_target = await _resolve_group_target(first_client, settings.group_chat_id, settings.group_target)
-    group_target = resolved_group_target or settings.group_target or settings.group_chat_id
-    if group_target is None:
-        raise ValueError("Swarm mode requires GROUP_CHAT_ID or GROUP_TARGET")
+    for group in current_groups:
+        await _log_resolved_group(first_client, group.group_chat_id, group.group_target)
 
-    orchestrator = SwarmOrchestrator(
-        bot_profiles=bot_profiles,
-        manager=manager,
-        topic_selector=runtime.topic_selector,
-        prompt_composer=runtime.prompt_composer,
-        gemini_client=runtime.gemini_client,
-        history=runtime.history,
-        exchange_store=runtime.exchange_store,
-        group_target=group_target,
-        group_chat_id=settings.group_chat_id,
-        max_turns_per_exchange=settings.swarm_max_turns_per_exchange,
-        active_windows_utc=settings.swarm_schedule_active_windows_utc,
-        initiator_offset_minutes=settings.swarm_initiator_offset_minutes,
-        responder_delay_minutes=settings.swarm_responder_delay_minutes,
-        skip_if_recent_human_activity=settings.swarm_skip_if_recent_human_activity,
-        resolve_group_target=lambda telegram_client: _resolve_group_target(
-            telegram_client,
-            settings.group_chat_id,
-            settings.group_target,
-        ),
-    )
+    reload_watcher = SettingsReloadWatcher(current_settings)
+    orchestrator_cache: dict[str, tuple[tuple[object, ...], object]] = {}
+
+    async def orchestrator_tick() -> bool:
+        nonlocal current_settings, current_groups
+        reloaded_settings = reload_watcher.poll()
+        if reloaded_settings is not None:
+            current_settings = reloaded_settings
+            current_groups = _enabled_groups_from_settings(current_settings)
+            enabled_group_chat_ids.clear()
+            enabled_group_chat_ids.update(
+                group.group_chat_id for group in current_groups if isinstance(getattr(group, "group_chat_id", None), int)
+            )
+            logger.info("settings reload: enabled_groups=%s", [group.id for group in current_groups])
+
+        any_started = False
+        _prune_orchestrator_cache(orchestrator_cache, {group.id for group in current_groups})
+        for group in current_groups:
+            resolved_group_target = await _resolve_group_target(
+                first_client,
+                getattr(group, "group_chat_id", None),
+                getattr(group, "group_target", None),
+            )
+            group_target = resolved_group_target or getattr(group, "group_target", None) or getattr(group, "group_chat_id", None)
+            group_chat_id = _extract_resolved_chat_id(resolved_group_target, getattr(group, "group_chat_id", None))
+            if group_target is None:
+                logger.warning("orchestrator: skip group without target group_id=%s", group.id)
+                continue
+            signature = _build_group_orchestrator_signature(
+                group=group,
+                group_target=group_target,
+                group_chat_id=group_chat_id,
+                skip_if_recent_human_activity=current_settings.swarm_skip_if_recent_human_activity,
+            )
+
+            def build_orchestrator(
+                *,
+                _group=group,
+                _group_target=group_target,
+                _group_chat_id=group_chat_id,
+                _settings=current_settings,
+            ) -> SwarmOrchestrator:
+                return SwarmOrchestrator(
+                    bot_profiles=bot_profiles,
+                    manager=manager,
+                    topic_selector=runtime.topic_selector,
+                    prompt_composer=runtime.prompt_composer,
+                    gemini_client=runtime.gemini_client,
+                    history=runtime.history,
+                    exchange_store=runtime.exchange_store,
+                    group_id=_group.id,
+                    group_city=_group.city,
+                    group_target=_group_target,
+                    group_chat_id=_group_chat_id,
+                    max_turns_per_exchange=_group.max_turns_per_exchange,
+                    active_windows_utc=_group.active_windows_utc,
+                    initiator_offset_minutes=_group.initiator_offset_minutes,
+                    responder_delay_minutes=_group.responder_delay_minutes,
+                    skip_if_recent_human_activity=_settings.swarm_skip_if_recent_human_activity,
+                    allow_external_llm_for_scheduled=_settings.swarm_allow_external_llm_for_scheduled,
+                    resolve_group_target=lambda telegram_client, _resolver_group=_group: _resolve_group_target(
+                        telegram_client,
+                        getattr(_resolver_group, "group_chat_id", None),
+                        getattr(_resolver_group, "group_target", None),
+                    ),
+                )
+
+            orchestrator = _get_cached_group_orchestrator(
+                orchestrator_cache,
+                group.id,
+                signature,
+                build_orchestrator,
+            )
+            any_started = await orchestrator.run_once() or any_started
+        return any_started
+
     scheduler.add_job(
-        orchestrator.run_once,
+        orchestrator_tick,
         "interval",
-        seconds=settings.swarm_tick_seconds,
+        seconds=current_settings.swarm_tick_seconds,
         max_instances=1,
         coalesce=True,
     )
-    logger.info("SwarmOrchestrator зарегистрирован: tick_seconds=%s", settings.swarm_tick_seconds)
+    logger.info("SwarmOrchestrator зарегистрирован: tick_seconds=%s groups=%s", current_settings.swarm_tick_seconds, len(current_groups))
 
     supervise_tasks = [asyncio.create_task(manager.supervise_bot(bot_id)) for bot_id in manager.active_bot_ids]
     try:
