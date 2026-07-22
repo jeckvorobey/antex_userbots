@@ -2,6 +2,10 @@
 
 `tg_userbot` is a Python 3.11+ Telegram userbot that runs multiple Telethon user accounts in one `swarm` process. The application is started through `run.py`, keeps enabled accounts online across multiple configured Telegram groups, routes addressed human replies to the matching account, starts scheduled `A -> B` bot exchanges per group, persists message and exchange state in SQLite, and uses Gemini for generated text.
 
+## Repository
+
+The canonical Git repository is `git@github.com:jeckvorobey/antex_userbots.git`. The repository uses the `origin` remote only; mirror remotes are not part of the project configuration.
+
 ## Stack
 
 - Python 3.11+
