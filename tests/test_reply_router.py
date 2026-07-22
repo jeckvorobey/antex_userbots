@@ -6,7 +6,14 @@ from unittest.mock import AsyncMock
 import pytest
 
 from core.runtime_models import SwarmBotProfile
+import userbot.reply_router as reply_router
 from userbot.reply_router import AddressedReplyRouter, SAFE_REPLY_FALLBACK_TEXT, _ReplyRateLimiter
+
+
+@pytest.fixture(autouse=True)
+def _replace_addressed_reply_delay(monkeypatch):
+    """Исключает реальное четырёхминутное ожидание из unit-тестов router-а."""
+    monkeypatch.setattr(reply_router, "asyncio", SimpleNamespace(sleep=AsyncMock()), raising=False)
 
 
 def _build_event(
@@ -153,6 +160,27 @@ async def test_router_answers_only_to_addressed_bot_and_saves_history():
 
 
 @pytest.mark.asyncio
+async def test_router_waits_four_minutes_before_sending_addressed_reply(monkeypatch):
+    """Проверяет обязательную задержку перед публикацией адресного ответа."""
+    sleep = AsyncMock()
+    monkeypatch.setattr(reply_router, "asyncio", SimpleNamespace(sleep=sleep), raising=False)
+    router = AddressedReplyRouter(
+        bot_profile=SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+        history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system+persona")),
+        gemini_client=SimpleNamespace(generate_reply=AsyncMock(return_value="Ответ Анны")),
+        swarm_user_ids={202, 303},
+    )
+    event = _build_event(sender_id=999)
+
+    handled = await router.handle_event(event)
+
+    assert handled is True
+    sleep.assert_awaited_once_with(240)
+    event.reply.assert_awaited_once_with("Ответ Анны")
+
+
+@pytest.mark.asyncio
 async def test_router_uses_safe_fallback_when_external_llm_disabled():
     """Проверяет локальный fallback без обращения к Gemini."""
     history = SimpleNamespace(
@@ -176,6 +204,28 @@ async def test_router_uses_safe_fallback_when_external_llm_disabled():
 
     assert handled is True
     gemini_client.generate_reply.assert_not_awaited()
+    event.reply.assert_awaited_once_with(SAFE_REPLY_FALLBACK_TEXT)
+
+
+@pytest.mark.asyncio
+async def test_router_waits_four_minutes_before_sending_safe_fallback(monkeypatch):
+    """Проверяет обязательную задержку перед публикацией safe fallback."""
+    sleep = AsyncMock()
+    monkeypatch.setattr(reply_router, "asyncio", SimpleNamespace(sleep=sleep), raising=False)
+    router = AddressedReplyRouter(
+        bot_profile=SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+        history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system+persona")),
+        gemini_client=SimpleNamespace(generate_reply=AsyncMock()),
+        swarm_user_ids={202, 303},
+        security_settings_getter=lambda: SimpleNamespace(swarm_allow_external_llm_for_replies=False),
+    )
+    event = _build_event(sender_id=999)
+
+    handled = await router.handle_event(event)
+
+    assert handled is True
+    sleep.assert_awaited_once_with(240)
     event.reply.assert_awaited_once_with(SAFE_REPLY_FALLBACK_TEXT)
 
 

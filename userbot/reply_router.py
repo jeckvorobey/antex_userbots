@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections import deque
 from collections.abc import Callable
@@ -17,6 +18,7 @@ from userbot.swarm_manager import SwarmManager
 
 logger = logging.getLogger(__name__)
 SAFE_REPLY_FALLBACK_TEXT = "Не могу безопасно ответить на это прямо сейчас."
+ADDRESSED_REPLY_DELAY_SECONDS = 4 * 60
 
 
 class _ReplyRateLimiter:
@@ -161,6 +163,13 @@ class AddressedReplyRouter:
             message_origin="human_reply",
             reply_to_message_id=reply_to_message_id,
         )
+        logger.info(
+            "router: bot_id=%s waiting %s seconds before human reply event_id=%s",
+            self.bot_profile.id,
+            ADDRESSED_REPLY_DELAY_SECONDS,
+            getattr(event, "id", None),
+        )
+        await asyncio.sleep(ADDRESSED_REPLY_DELAY_SECONDS)
         await event.reply(response_text)
         await self.history.save_message(
             user_id=sender_id,
