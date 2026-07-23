@@ -7,6 +7,7 @@ import inspect
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from random import randint
 from types import SimpleNamespace
 from urllib.parse import urlparse
 
@@ -22,11 +23,20 @@ from userbot.client import UserBotClient
 from userbot.exchange_store import ExchangeStore
 from userbot.orchestrator import SwarmOrchestrator
 from userbot.reply_router import AddressedReplyRouter
-from userbot.scheduler import TopicSelector, pick_random_delay
+from userbot.scheduler import TopicSelector
 from userbot.swarm_manager import SwarmManager
 
 
 logger = logging.getLogger(__name__)
+
+
+STARTUP_MEMBERSHIP_DELAY_SECONDS = (30, 60)
+
+
+def _pick_startup_membership_delay_seconds() -> float:
+    """Выбирает секундовую задержку перед проверкой membership при startup."""
+    start_seconds, end_seconds = STARTUP_MEMBERSHIP_DELAY_SECONDS
+    return float(randint(start_seconds, end_seconds))
 
 
 @dataclass(slots=True)
@@ -68,11 +78,6 @@ def _iter_candidate_chat_ids(chat_id: int) -> set[int]:
     return candidates
 
 
-def _chat_id_matches(expected_chat_id: int, actual_chat_id: object) -> bool:
-    """Проверяет, соответствует ли найденный идентификатор настроенному chat_id."""
-    return isinstance(actual_chat_id, int) and actual_chat_id in _iter_candidate_chat_ids(expected_chat_id)
-
-
 def _is_invite_link(target: str | None) -> bool:
     """Определяет, является ли target приватной invite-ссылкой Telegram."""
     if not isinstance(target, str):
@@ -111,44 +116,87 @@ def _extract_public_target_slug(target: str | None) -> str | None:
     return None
 
 
-def _dialog_matches_group(dialog: object, group_chat_id: int | None, group_target: str | None) -> bool:
-    """Проверяет, относится ли dialog к целевой группе по id или публичному username."""
-    dialog_id = getattr(dialog, "id", None)
-    entity = getattr(dialog, "entity", None)
-    entity_id = getattr(entity, "id", None)
-    if group_chat_id is not None and (
-        _chat_id_matches(group_chat_id, dialog_id) or _chat_id_matches(group_chat_id, entity_id)
+@dataclass(slots=True)
+class _GroupDialogIndex:
+    """Индекс доступных клиенту Telegram-групп по id и public username."""
+
+    by_chat_id: dict[int, object]
+    by_username: dict[str, object]
+
+
+def _add_group_to_dialog_index(
+    dialog_index: _GroupDialogIndex,
+    resolved_target: object,
+    *,
+    group_chat_id: int | None = None,
+    group_target: str | None = None,
+) -> object:
+    """Добавляет dialog/entity в индекс и возвращает используемую entity."""
+    entity = getattr(resolved_target, "entity", None) or resolved_target
+    for candidate_id in (
+        group_chat_id,
+        getattr(resolved_target, "id", None),
+        getattr(entity, "id", None),
     ):
-        return True
+        if isinstance(candidate_id, int):
+            dialog_index.by_chat_id[candidate_id] = entity
+
+    configured_slug = _extract_public_target_slug(group_target)
+    if configured_slug:
+        dialog_index.by_username[configured_slug] = entity
+    for candidate_username in (
+        getattr(resolved_target, "username", None),
+        getattr(entity, "username", None),
+    ):
+        if isinstance(candidate_username, str) and candidate_username.strip():
+            dialog_index.by_username[candidate_username.strip().casefold()] = entity
+    return entity
+
+
+async def _build_group_dialog_index(telegram_client: object | None) -> _GroupDialogIndex:
+    """Один раз индексирует все доступные Telegram-диалоги клиента."""
+    dialog_index = _GroupDialogIndex(by_chat_id={}, by_username={})
+    if telegram_client is None:
+        return dialog_index
+
+    iter_dialogs = getattr(telegram_client, "iter_dialogs", None)
+    if iter_dialogs is None:
+        return dialog_index
+
+    async for dialog in iter_dialogs():
+        _add_group_to_dialog_index(dialog_index, dialog)
+    return dialog_index
+
+
+def _find_group_in_dialog_index(
+    dialog_index: _GroupDialogIndex,
+    group_chat_id: int | None,
+    group_target: str | None,
+) -> object | None:
+    """Ищет entity группы в предварительно построенном индексе."""
+    if group_chat_id is not None:
+        for candidate_id in _iter_candidate_chat_ids(group_chat_id):
+            resolved_target = dialog_index.by_chat_id.get(candidate_id)
+            if resolved_target is not None:
+                return resolved_target
 
     expected_slug = _extract_public_target_slug(group_target)
-    if not expected_slug:
-        return False
-
-    for candidate in (getattr(dialog, "username", None), getattr(entity, "username", None)):
-        if isinstance(candidate, str) and candidate.strip().casefold() == expected_slug:
-            return True
-    return False
+    if expected_slug:
+        return dialog_index.by_username.get(expected_slug)
+    return None
 
 
 async def _resolve_joined_group_dialog(
     telegram_client: object | None,
     group_chat_id: int | None,
     group_target: str | None = None,
+    *,
+    dialog_index: _GroupDialogIndex | None = None,
 ) -> object | None:
     """Возвращает dialog/entity только если клиент уже состоит в целевой группе."""
-    if telegram_client is None:
-        return None
-
-    iter_dialogs = getattr(telegram_client, "iter_dialogs", None)
-    if iter_dialogs is None:
-        return None
-
-    async for dialog in iter_dialogs():
-        if _dialog_matches_group(dialog, group_chat_id, group_target):
-            entity = getattr(dialog, "entity", None)
-            return entity or dialog
-    return None
+    if dialog_index is None:
+        dialog_index = await _build_group_dialog_index(telegram_client)
+    return _find_group_in_dialog_index(dialog_index, group_chat_id, group_target)
 
 
 def _extract_join_result_target(join_result: object | None) -> object | None:
@@ -170,6 +218,38 @@ def _extract_resolved_chat_id(resolved_target: object | None, fallback_chat_id: 
     return target_id if isinstance(target_id, int) else None
 
 
+def _group_target_cache_key(group_chat_id: int | None, group_target: str | None) -> tuple[int | None, str | None]:
+    """Строит стабильный ключ кэша для настроенной Telegram-группы."""
+    normalized_target = group_target.strip() if isinstance(group_target, str) else None
+    public_slug = _extract_public_target_slug(normalized_target)
+    if public_slug:
+        normalized_target = f"@{public_slug}"
+    return group_chat_id, normalized_target
+
+
+def _get_resolved_group_target_cache(telegram_client: object) -> dict[tuple[int | None, str | None], object]:
+    """Возвращает раздельный по группам кэш resolved entity клиента."""
+    resolved_targets = getattr(telegram_client, "_resolved_group_targets", None)
+    if isinstance(resolved_targets, dict):
+        return resolved_targets
+    resolved_targets = {}
+    setattr(telegram_client, "_resolved_group_targets", resolved_targets)
+    return resolved_targets
+
+
+def _cache_resolved_group_target(
+    telegram_client: object | None,
+    group_chat_id: int | None,
+    group_target: str | None,
+    resolved_target: object,
+) -> None:
+    """Сохраняет entity независимо от кэшированных entity других групп."""
+    if telegram_client is None:
+        return
+    cache = _get_resolved_group_target_cache(telegram_client)
+    cache[_group_target_cache_key(group_chat_id, group_target)] = resolved_target
+
+
 async def _resolve_group_target(
     telegram_client: object | None,
     group_chat_id: int | None,
@@ -179,20 +259,18 @@ async def _resolve_group_target(
     if telegram_client is None:
         return None
 
-    cached_chat_id = getattr(telegram_client, "_resolved_group_chat_id", None)
-    cached_group_target = getattr(telegram_client, "_resolved_group_target", None)
-    cached_target = getattr(telegram_client, "_resolved_group_chat_target", None)
-    if cached_chat_id == group_chat_id and cached_group_target == group_target and cached_target is not None:
+    normalized_group_target = group_target.strip() if isinstance(group_target, str) else None
+    cache_key = _group_target_cache_key(group_chat_id, group_target)
+    resolved_targets = _get_resolved_group_target_cache(telegram_client)
+    cached_target = resolved_targets.get(cache_key)
+    if cached_target is not None:
         return cached_target
 
     joined_group_target = await _resolve_joined_group_dialog(telegram_client, group_chat_id, group_target)
     if joined_group_target is not None:
-        setattr(telegram_client, "_resolved_group_chat_id", group_chat_id)
-        setattr(telegram_client, "_resolved_group_target", group_target)
-        setattr(telegram_client, "_resolved_group_chat_target", joined_group_target)
+        _cache_resolved_group_target(telegram_client, group_chat_id, group_target, joined_group_target)
         return joined_group_target
 
-    normalized_group_target = group_target.strip() if isinstance(group_target, str) else None
     if normalized_group_target:
         if _is_invite_link(normalized_group_target):
             logger.info("Пропуск get_entity для invite link target=%s", _redact_group_target(normalized_group_target))
@@ -206,9 +284,7 @@ async def _resolve_group_target(
         except ValueError:
             logger.warning("Не удалось резолвить target группы '%s' через get_entity", normalized_group_target)
             return None
-        setattr(telegram_client, "_resolved_group_chat_id", group_chat_id)
-        setattr(telegram_client, "_resolved_group_target", normalized_group_target)
-        setattr(telegram_client, "_resolved_group_chat_target", resolved_target)
+        _cache_resolved_group_target(telegram_client, group_chat_id, group_target, resolved_target)
         return resolved_target
 
     logger.warning("Не удалось найти entity целевой группы: GROUP_CHAT_ID=%s GROUP_TARGET=%s", group_chat_id, group_target)
@@ -220,11 +296,19 @@ async def _ensure_group_membership(
     group_chat_id: int | None,
     group_target: str | None,
     bot_id: str,
+    *,
+    dialog_index: _GroupDialogIndex | None = None,
 ) -> object | None:
     """Гарантирует доступ клиента к целевой группе, при необходимости выполняя вступление."""
     telegram_client = client_wrapper.client
-    resolved_target = await _resolve_joined_group_dialog(telegram_client, group_chat_id, group_target)
+    resolved_target = await _resolve_joined_group_dialog(
+        telegram_client,
+        group_chat_id,
+        group_target,
+        dialog_index=dialog_index,
+    )
     if resolved_target is not None:
+        _cache_resolved_group_target(telegram_client, group_chat_id, group_target, resolved_target)
         logger.info("swarm: bot_id=%s уже имеет доступ к целевой группе", bot_id)
         return resolved_target
 
@@ -247,12 +331,20 @@ async def _ensure_group_membership(
         logger.info("swarm: bot_id=%s пытается вступить в публичную группу: %s", bot_id, public_target)
         join_result = await client_wrapper.join_group(public_target)
 
-    resolved_target = await _resolve_joined_group_dialog(telegram_client, group_chat_id, group_target)
+    resolved_target = _extract_join_result_target(join_result)
     if resolved_target is None:
-        resolved_target = _extract_join_result_target(join_result)
+        resolved_target = await _resolve_joined_group_dialog(telegram_client, group_chat_id, group_target)
     if resolved_target is None:
         resolved_target = await _resolve_group_target(telegram_client, group_chat_id, group_target)
     if resolved_target is not None:
+        _cache_resolved_group_target(telegram_client, group_chat_id, group_target, resolved_target)
+        if dialog_index is not None:
+            _add_group_to_dialog_index(
+                dialog_index,
+                resolved_target,
+                group_chat_id=group_chat_id,
+                group_target=group_target,
+            )
         logger.info("swarm: bot_id=%s успешно получил доступ к целевой группе после автovступления", bot_id)
         return resolved_target
 
@@ -264,13 +356,11 @@ def _build_group_membership_startup_hook(
     *,
     group_chat_id: int | None,
     group_target: str | None,
-    join_delay_minutes: tuple[int, int] = (1, 3),
 ):
     """Строит startup hook с случайной задержкой перед membership check."""
 
     async def startup_hook(profile: SwarmBotProfile, client_wrapper: UserBotClient) -> object | None:
-        delay = pick_random_delay(join_delay_minutes)
-        delay_seconds = delay.total_seconds()
+        delay_seconds = _pick_startup_membership_delay_seconds()
         logger.info(
             "swarm: bot_id=%s ожидает случайную задержку перед membership check: %.1f sec",
             profile.id,
@@ -285,19 +375,18 @@ def _build_group_membership_startup_hook(
 def _build_multi_group_membership_startup_hook(
     *,
     groups: list[object],
-    join_delay_minutes: tuple[int, int] = (1, 3),
 ):
     """Строит startup hook, который проверяет membership для всех enabled groups."""
 
     async def startup_hook(profile: SwarmBotProfile, client_wrapper: UserBotClient) -> dict[str, object | None]:
-        delay = pick_random_delay(join_delay_minutes)
-        delay_seconds = delay.total_seconds()
+        delay_seconds = _pick_startup_membership_delay_seconds()
         logger.info(
             "swarm: bot_id=%s ожидает случайную задержку перед multi-group membership check: %.1f sec",
             profile.id,
             delay_seconds,
         )
         await asyncio.sleep(delay_seconds)
+        dialog_index = await _build_group_dialog_index(client_wrapper.client)
         resolved: dict[str, object | None] = {}
         for group in groups:
             if not getattr(group, "enabled", True):
@@ -308,6 +397,7 @@ def _build_multi_group_membership_startup_hook(
                 getattr(group, "group_chat_id", None),
                 getattr(group, "group_target", None),
                 profile.id,
+                dialog_index=dialog_index,
             )
         return resolved
 

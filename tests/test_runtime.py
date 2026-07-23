@@ -558,8 +558,153 @@ async def test_ensure_group_membership_skips_join_when_public_dialog_is_already_
 
 
 @pytest.mark.asyncio
+async def test_multi_group_membership_scans_dialogs_once_for_all_groups(monkeypatch):
+    """Проверяет единый индекс dialog для всех membership-проверок userbot."""
+    import run
+
+    first_entity = SimpleNamespace(id=101, username="first")
+    second_entity = SimpleNamespace(id=202, username="second")
+
+    class DialogClient(FakeTelegramClient):
+        def __init__(self):
+            super().__init__("anna", 1, "hash")
+            self.iter_dialogs_calls = 0
+
+        async def iter_dialogs(self):
+            self.iter_dialogs_calls += 1
+            yield SimpleNamespace(id=101, entity=first_entity)
+            yield SimpleNamespace(id=202, entity=second_entity)
+
+    telegram_client = DialogClient()
+    wrapper = SimpleNamespace(client=telegram_client, join_group=AsyncMock(), join_invite_link=AsyncMock())
+    monkeypatch.setattr(run.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(run, "_pick_startup_membership_delay_seconds", lambda: 30.0)
+
+    hook = run._build_multi_group_membership_startup_hook(
+        groups=[
+            SimpleNamespace(id="first", enabled=True, group_chat_id=101, group_target="@first"),
+            SimpleNamespace(id="second", enabled=True, group_chat_id=202, group_target="@second"),
+        ],
+    )
+
+    resolved = await hook(SimpleNamespace(id="anna"), wrapper)
+
+    assert resolved == {"first": first_entity, "second": second_entity}
+    assert await run._resolve_group_target(telegram_client, 101, "@first") is first_entity
+    assert await run._resolve_group_target(telegram_client, 202, "@second") is second_entity
+    assert telegram_client.iter_dialogs_calls == 1
+    wrapper.join_group.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_membership_index_is_updated_after_public_join():
+    """Проверяет повторное использование entity, добавленной в индекс после join."""
+    import run
+
+    joined_entity = SimpleNamespace(id=303, username="joined_group")
+
+    class DialogClient(FakeTelegramClient):
+        def __init__(self):
+            super().__init__("anna", 1, "hash")
+            self.iter_dialogs_calls = 0
+
+        async def iter_dialogs(self):
+            self.iter_dialogs_calls += 1
+            if False:
+                yield None
+
+    telegram_client = DialogClient()
+    join_group = AsyncMock(return_value=joined_entity)
+    wrapper = SimpleNamespace(client=telegram_client, join_group=join_group, join_invite_link=AsyncMock())
+    dialog_index = await run._build_group_dialog_index(telegram_client)
+
+    first = await run._ensure_group_membership(
+        wrapper,
+        303,
+        "@joined_group",
+        "anna",
+        dialog_index=dialog_index,
+    )
+    second = await run._ensure_group_membership(
+        wrapper,
+        303,
+        "@joined_group",
+        "anna",
+        dialog_index=dialog_index,
+    )
+
+    assert first is joined_entity
+    assert second is joined_entity
+    assert telegram_client.iter_dialogs_calls == 1
+    join_group.assert_awaited_once_with("@joined_group")
+
+
+@pytest.mark.asyncio
+async def test_resolve_group_target_caches_entities_independently_per_group():
+    """Проверяет, что кэш одной группы не вытесняет entity другой группы."""
+    import run
+
+    first_entity = SimpleNamespace(id=101, username="first")
+    second_entity = SimpleNamespace(id=202, username="second")
+
+    class DialogClient(FakeTelegramClient):
+        def __init__(self):
+            super().__init__("anna", 1, "hash")
+            self.iter_dialogs_calls = 0
+
+        async def iter_dialogs(self):
+            self.iter_dialogs_calls += 1
+            yield SimpleNamespace(id=101, entity=first_entity)
+            yield SimpleNamespace(id=202, entity=second_entity)
+
+    telegram_client = DialogClient()
+
+    assert await run._resolve_group_target(telegram_client, 101, "@first") is first_entity
+    assert await run._resolve_group_target(telegram_client, 202, "@second") is second_entity
+    assert await run._resolve_group_target(telegram_client, 101, "@first") is first_entity
+    assert await run._resolve_group_target(telegram_client, 202, "@second") is second_entity
+    assert telegram_client.iter_dialogs_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_resolve_group_target_does_not_reuse_cache_for_changed_target():
+    """Проверяет отдельный cache key после изменения target при reload."""
+    import run
+
+    first_entity = SimpleNamespace(id=101, username="first")
+    second_entity = SimpleNamespace(id=202, username="second")
+
+    class DialogClient(FakeTelegramClient):
+        async def iter_dialogs(self):
+            yield SimpleNamespace(id=101, entity=first_entity)
+            yield SimpleNamespace(id=202, entity=second_entity)
+
+    telegram_client = DialogClient("anna", 1, "hash")
+
+    assert await run._resolve_group_target(telegram_client, None, "@first") is first_entity
+    assert await run._resolve_group_target(telegram_client, None, "@second") is second_entity
+
+
+def test_startup_membership_delay_is_selected_inside_30_to_60_seconds(monkeypatch):
+    """Проверяет секундовый диапазон случайной задержки startup membership."""
+    import run
+
+    calls: list[tuple[int, int]] = []
+
+    def fake_randint(start: int, end: int) -> int:
+        calls.append((start, end))
+        return 47
+
+    monkeypatch.setattr(run, "randint", fake_randint, raising=False)
+
+    assert run.STARTUP_MEMBERSHIP_DELAY_SECONDS == (30, 60)
+    assert run._pick_startup_membership_delay_seconds() == 47.0
+    assert calls == [(30, 60)]
+
+
+@pytest.mark.asyncio
 async def test_group_membership_startup_hook_waits_random_delay_before_join(monkeypatch):
-    """Проверяет, что startup hook ждёт случайную задержку перед membership check."""
+    """Проверяет, что startup hook ждёт секундовую задержку перед membership check."""
     import run
 
     sleep = AsyncMock()
@@ -567,22 +712,55 @@ async def test_group_membership_startup_hook_waits_random_delay_before_join(monk
 
     monkeypatch.setattr(run.asyncio, "sleep", sleep)
     monkeypatch.setattr(run, "_ensure_group_membership", ensure_membership)
-    monkeypatch.setattr(run, "pick_random_delay", lambda minute_range, randint_provider=None: __import__("datetime").timedelta(seconds=85))
+    monkeypatch.setattr(run, "_pick_startup_membership_delay_seconds", lambda: 45.0, raising=False)
 
     hook = run._build_group_membership_startup_hook(
         group_chat_id=None,
         group_target="@group",
-        join_delay_minutes=(1, 3),
     )
 
     profile = SimpleNamespace(id="anna")
-    client = SimpleNamespace()
+    client = SimpleNamespace(client=SimpleNamespace())
 
     resolved = await hook(profile, client)
 
     assert resolved == "@joined"
-    sleep.assert_awaited_once_with(85.0)
+    sleep.assert_awaited_once_with(45.0)
     ensure_membership.assert_awaited_once_with(client, None, "@group", "anna")
+
+
+@pytest.mark.asyncio
+async def test_multi_group_membership_startup_hook_waits_same_seconds_before_checks(monkeypatch):
+    """Проверяет задержку startup hook перед membership всех enabled-групп."""
+    import run
+
+    sleep = AsyncMock()
+    ensure_membership = AsyncMock(side_effect=["@first", "@second"])
+    monkeypatch.setattr(run.asyncio, "sleep", sleep)
+    monkeypatch.setattr(run, "_ensure_group_membership", ensure_membership)
+    monkeypatch.setattr(run, "_pick_startup_membership_delay_seconds", lambda: 58.0, raising=False)
+
+    hook = run._build_multi_group_membership_startup_hook(
+        groups=[
+            SimpleNamespace(id="first", enabled=True, group_chat_id=101, group_target="@first"),
+            SimpleNamespace(id="disabled", enabled=False, group_chat_id=102, group_target="@disabled"),
+            SimpleNamespace(id="second", enabled=True, group_chat_id=103, group_target="@second"),
+        ],
+    )
+
+    profile = SimpleNamespace(id="anna")
+    client = SimpleNamespace(client=SimpleNamespace())
+
+    resolved = await hook(profile, client)
+
+    assert resolved == {"first": "@first", "second": "@second"}
+    sleep.assert_awaited_once_with(58.0)
+    assert [call.args for call in ensure_membership.await_args_list] == [
+        (client, 101, "@first", "anna"),
+        (client, 103, "@second", "anna"),
+    ]
+    first_index = ensure_membership.await_args_list[0].kwargs["dialog_index"]
+    assert ensure_membership.await_args_list[1].kwargs["dialog_index"] is first_index
 
 
 class _AsyncNullContext:
