@@ -641,9 +641,11 @@ async def test_dialog_index_resolves_positive_raw_id_to_basic_group_namespace():
     """Проверяет marked `-id` для basic group при совпадении raw ID с user."""
     import run
 
-    raw_id = 123456789
+    raw_id = 2
     basic_group_peer_id = -raw_id
+    channel_peer_id = -(10**12 + raw_id)
     group_entity = SimpleNamespace(id=raw_id, title="Basic group")
+    channel_entity = SimpleNamespace(id=raw_id, title="Channel")
     user_entity = SimpleNamespace(id=raw_id, username="unrelated_user")
 
     class DialogClient(FakeTelegramClient):
@@ -653,6 +655,12 @@ async def test_dialog_index_resolves_positive_raw_id_to_basic_group_namespace():
                 entity=group_entity,
                 is_group=True,
                 is_channel=False,
+            )
+            yield SimpleNamespace(
+                id=channel_peer_id,
+                entity=channel_entity,
+                is_group=False,
+                is_channel=True,
             )
             yield SimpleNamespace(
                 id=raw_id,

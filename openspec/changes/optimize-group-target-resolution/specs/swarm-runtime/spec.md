@@ -16,8 +16,8 @@ The system SHALL wait a random inclusive 30–60 second delay before each bot's 
 - **THEN** group lookup resolves the namespace-aware channel dialog and never returns the user entity
 
 #### Scenario: Positive basic group id resolves to chat namespace
-- **WHEN** a configured positive raw id belongs to a basic Telegram group and a user exposes the same raw id
-- **THEN** group lookup resolves the basic-chat marked peer and never falls back to the user namespace
+- **WHEN** a configured positive raw id exists in basic-chat, channel, and user namespaces
+- **THEN** group lookup checks the basic-chat marked peer before the channel fallback and never returns the user entity
 
 #### Scenario: Already joined target is reused
 - **WHEN** the bot already has a matching dialog by chat id or public target for an enabled group

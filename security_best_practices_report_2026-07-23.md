@@ -24,6 +24,12 @@
 
 **Исправление:** для положительного raw ID индексный lookup проверяет обе Telegram marked формы: `-id` для basic chat и `-100...` для channel (`run.py:70`). Поведение покрыто collision-тестом (`tests/test_runtime.py:638`).
 
+### SEC-DIFF-03: Неопределённый порядок basic-chat и channel fallback — исправлено
+
+**Impact:** использование `set` не гарантировало порядок marked peer IDs и при общей raw-части могло выбрать channel вместо basic group.
+
+**Исправление:** candidate peer IDs преобразованы в упорядоченную последовательность с приоритетом exact ID, basic-chat `-id`, затем channel `-100...` (`run.py:68`, `run.py:186`). Regression-тест одновременно моделирует basic group, channel и user с одной raw-частью ID (`tests/test_runtime.py:638`).
+
 ## Medium
 
 Не найдено.

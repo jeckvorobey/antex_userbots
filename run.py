@@ -65,18 +65,15 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def _iter_candidate_chat_ids(chat_id: int) -> set[int]:
-    """Возвращает набор идентификаторов для сопоставления чата и entity Telethon."""
-    candidates = {chat_id, abs(chat_id)}
+def _iter_candidate_chat_ids(chat_id: int) -> tuple[int, ...]:
+    """Возвращает упорядоченные peer ID для сопоставления Telegram-группы."""
     absolute_chat_id = abs(chat_id)
 
     if chat_id > 0:
-        candidates.add(-chat_id)
-        candidates.add(-(10**12 + chat_id))
-        return candidates
+        return chat_id, -chat_id, -(10**12 + chat_id)
     if absolute_chat_id >= 10**12:
-        candidates.add(absolute_chat_id - 10**12)
-    return candidates
+        return chat_id, absolute_chat_id - 10**12, absolute_chat_id
+    return chat_id, absolute_chat_id
 
 
 def _is_invite_link(target: str | None) -> bool:
@@ -185,7 +182,7 @@ def _find_group_in_dialog_index(
         exact_target = dialog_index.by_chat_id.get(group_chat_id)
         if exact_target is not None:
             return exact_target
-        for candidate_id in _iter_candidate_chat_ids(group_chat_id) - {group_chat_id}:
+        for candidate_id in _iter_candidate_chat_ids(group_chat_id)[1:]:
             resolved_target = dialog_index.by_chat_id.get(candidate_id)
             if resolved_target is not None:
                 return resolved_target

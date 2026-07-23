@@ -22,3 +22,8 @@
 
 - [x] 5.1 Add a regression test for a positive raw basic-group id colliding with a user id.
 - [x] 5.2 Resolve the `-id` basic-chat marked form and repeat all validation gates.
+
+## 6. Namespace ordering remediation
+
+- [x] 6.1 Extend regression coverage to simultaneous basic-chat, channel, and user raw ID collision.
+- [x] 6.2 Make candidate peer lookup deterministic with basic-chat priority and repeat all validation gates.

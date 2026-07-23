@@ -23,7 +23,7 @@ Multi-group startup вызывает `_ensure_group_membership` для кажд�
 3. После join полученная entity добавляется в индекс. Повторный полный обход не нужен, если Telethon вернул entity; fallback-обход остаётся допустимым, когда результат join не содержит entity.
 4. `_resolve_group_target` использует словарь на клиенте с ключом из `group_chat_id` и нормализованного `group_target`. Старые скалярные поля больше не используются.
 5. Запуск аккаунтов остаётся последовательным. Telegram документирует динамические flood limits, поэтому параллельное подключение и membership-проверки нельзя считать нейтральными для anti-abuse риска.
-6. Индекс использует namespace-aware `dialog.id` и не индексирует личные user-dialog как группы. Для положительного raw ID поиск проверяет обе marked формы: `-id` для basic chat и `-100...` для channel. Raw `entity.id` добавляется только для entity, полученной непосредственно из подтверждённой group membership/join операции.
+6. Индекс использует namespace-aware `dialog.id` и не индексирует личные user-dialog как группы. Для положительного raw ID поиск использует стабильный порядок: exact ID, `-id` для basic chat, затем `-100...` для channel. Raw `entity.id` добавляется только для entity, полученной непосредственно из подтверждённой group membership/join операции.
 
 ## Risks / Trade-offs
 
@@ -32,3 +32,4 @@ Multi-group startup вызывает `_ensure_group_membership` для кажд�
 - [Словарь растёт при многократных reload с разными target] → число настроенных групп мало; при необходимости старые ключи можно очищать отдельным lifecycle-изменением.
 - [Raw Telegram ID совпадает у user и channel] → исключать личные диалоги и сначала сопоставлять полный marked peer ID.
 - [Положительный raw ID относится к basic chat, а не channel] → проверять basic-chat marked форму `-id` до fallback на target.
+- [Один raw ID существует одновременно в basic-chat и channel namespaces] → использовать упорядоченные candidates с приоритетом basic chat для положительной legacy-конфигурации.
