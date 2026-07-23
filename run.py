@@ -212,9 +212,11 @@ def _extract_join_result_target(join_result: object | None) -> object | None:
         return None
 
     chats = getattr(join_result, "chats", None)
-    if isinstance(chats, list) and chats:
-        return chats[0]
-    return join_result
+    if isinstance(chats, list):
+        return chats[0] if chats else None
+    if isinstance(join_result, (str, int)) or isinstance(getattr(join_result, "id", None), int):
+        return join_result
+    return None
 
 
 def _extract_resolved_chat_id(resolved_target: object | None, fallback_chat_id: int | None) -> int | None:

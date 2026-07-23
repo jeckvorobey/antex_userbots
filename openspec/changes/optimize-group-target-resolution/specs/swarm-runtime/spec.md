@@ -27,6 +27,10 @@ The system SHALL wait a random inclusive 30–60 second delay before each bot's 
 - **WHEN** the bot is not already in a public target group
 - **THEN** the runtime joins the group using the normalized public target and records the resolved entity in the reusable index
 
+#### Scenario: Join update without entity triggers dialog refresh
+- **WHEN** Telegram reports a successful group join through an update container without a chat entity
+- **THEN** the runtime refreshes joined dialogs and caches the actual group entity instead of the update container
+
 #### Scenario: Private invite link can be joined without chat id
 - **WHEN** `group_target` is a private invite link and no `group_chat_id` is required for membership verification
 - **THEN** the runtime imports the invite link and records the resolved entity in the reusable index

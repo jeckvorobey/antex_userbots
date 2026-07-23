@@ -20,7 +20,7 @@ Multi-group startup вызывает `_ensure_group_membership` для кажд�
 
 1. Startup hook создаёт изменяемый индекс диалогов один раз после задержки и перед циклом групп. `_ensure_group_membership` принимает его как необязательный аргумент, чтобы legacy single-group flow и отдельные вызовы сохранили прежнее поведение.
 2. Индекс содержит отображения нормализованных Telegram chat ID и public username на entity. Это сохраняет оба текущих способа сопоставления без повторного сетевого обхода.
-3. После join полученная entity добавляется в индекс. Повторный полный обход не нужен, если Telethon вернул entity; fallback-обход остаётся допустимым, когда результат join не содержит entity.
+3. После join полученная entity добавляется в индекс. Повторный полный обход не нужен, если Telethon вернул entity; update-контейнер без `chats` не считается entity и запускает fallback-обход dialogs.
 4. `_resolve_group_target` использует словарь на клиенте с ключом из `group_chat_id` и нормализованного `group_target`. Старые скалярные поля больше не используются.
 5. Запуск аккаунтов остаётся последовательным. Telegram документирует динамические flood limits, поэтому параллельное подключение и membership-проверки нельзя считать нейтральными для anti-abuse риска.
 6. Индекс использует namespace-aware `dialog.id` и не индексирует личные user-dialog как группы. Для положительного raw ID поиск использует стабильный порядок: exact ID, `-id` для basic chat, затем `-100...` для channel. Raw `entity.id` добавляется только для entity, полученной непосредственно из подтверждённой group membership/join операции.
@@ -33,3 +33,4 @@ Multi-group startup вызывает `_ensure_group_membership` для кажд�
 - [Raw Telegram ID совпадает у user и channel] → исключать личные диалоги и сначала сопоставлять полный marked peer ID.
 - [Положительный raw ID относится к basic chat, а не channel] → проверять basic-chat marked форму `-id` до fallback на target.
 - [Один raw ID существует одновременно в basic-chat и channel namespaces] → использовать упорядоченные candidates с приоритетом basic chat для положительной legacy-конфигурации.
+- [Успешный join возвращает update-контейнер без `chats`] → не кэшировать контейнер как peer и повторно найти группу в dialogs.

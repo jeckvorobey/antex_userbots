@@ -27,3 +27,8 @@
 
 - [x] 6.1 Extend regression coverage to simultaneous basic-chat, channel, and user raw ID collision.
 - [x] 6.2 Make candidate peer lookup deterministic with basic-chat priority and repeat all validation gates.
+
+## 7. Join response remediation
+
+- [x] 7.1 Add a regression test for a successful Telethon update response without a chat entity.
+- [x] 7.2 Reject non-entity update containers, refresh dialogs after join, and repeat all validation gates.

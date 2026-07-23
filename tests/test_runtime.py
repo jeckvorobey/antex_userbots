@@ -725,6 +725,53 @@ async def test_membership_index_is_updated_after_public_join():
 
 
 @pytest.mark.asyncio
+async def test_membership_refreshes_dialogs_when_join_update_has_no_chat_entity():
+    """Проверяет fallback dialog scan для update-контейнера без chats."""
+    import run
+
+    joined_entity = SimpleNamespace(id=404, username="joined_group")
+
+    class UpdatesWithoutChats:
+        pass
+
+    class DialogClient(FakeTelegramClient):
+        def __init__(self):
+            super().__init__("anna", 1, "hash")
+            self.joined = False
+            self.iter_dialogs_calls = 0
+
+        async def iter_dialogs(self):
+            self.iter_dialogs_calls += 1
+            if self.joined:
+                yield SimpleNamespace(id=404, entity=joined_entity)
+
+    telegram_client = DialogClient()
+
+    async def join_public_group(_target: str):
+        telegram_client.joined = True
+        return UpdatesWithoutChats()
+
+    wrapper = SimpleNamespace(
+        client=telegram_client,
+        join_group=AsyncMock(side_effect=join_public_group),
+        join_invite_link=AsyncMock(),
+    )
+    dialog_index = await run._build_group_dialog_index(telegram_client)
+
+    resolved = await run._ensure_group_membership(
+        wrapper,
+        404,
+        "@joined_group",
+        "anna",
+        dialog_index=dialog_index,
+    )
+
+    assert resolved is joined_entity
+    assert telegram_client.iter_dialogs_calls == 2
+    assert run._find_group_in_dialog_index(dialog_index, 404, "@joined_group") is joined_entity
+
+
+@pytest.mark.asyncio
 async def test_resolve_group_target_caches_entities_independently_per_group():
     """Проверяет, что кэш одной группы не вытесняет entity другой группы."""
     import run

@@ -32,7 +32,11 @@
 
 ## Medium
 
-Не найдено.
+### SEC-DIFF-04: Update-контейнер без chat мог кэшироваться как peer — исправлено
+
+**Impact:** валидный join-ответ типа `UpdatesTooLong` мог попасть в target cache вместо Telegram entity и сломать последующую отправку.
+
+**Исправление:** extractor принимает только chat из `chats` или объект с явным entity ID; update-контейнер без entity возвращает `None` и запускает повторный dialog scan (`run.py:211`, `run.py:342`). Поведение закрыто regression-тестом (`tests/test_runtime.py:728`).
 
 ## Low
 
@@ -48,7 +52,7 @@
 
 ## Проверки
 
-- `uv run pytest` — 203 passed.
-- `uv run pytest tests/test_runtime.py tests/test_config_toml.py -q` — 67 passed.
+- `uv run pytest` — 204 passed.
+- `uv run pytest tests/test_runtime.py tests/test_config_toml.py -q` — 68 passed.
 - `openspec validate --strict --all` — 9 passed, 0 failed.
 - `git diff --check` — успешно.
