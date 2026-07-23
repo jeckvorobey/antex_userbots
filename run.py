@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 STARTUP_MEMBERSHIP_DELAY_SECONDS = (30, 60)
+GROUP_JOIN_INTERVAL_SECONDS = 20.0
 
 
 def _pick_startup_membership_delay_seconds() -> float:
@@ -397,10 +398,19 @@ def _build_multi_group_membership_startup_hook(
         await asyncio.sleep(delay_seconds)
         dialog_index = await _build_group_dialog_index(client_wrapper.client)
         resolved: dict[str, object | None] = {}
+        processed_group = False
         for group in groups:
             if not getattr(group, "enabled", True):
                 continue
             group_id = getattr(group, "id")
+            if processed_group:
+                logger.info(
+                    "swarm: bot_id=%s ожидает интервал между вступлениями в группы: %.1f sec перед group_id=%s",
+                    profile.id,
+                    GROUP_JOIN_INTERVAL_SECONDS,
+                    group_id,
+                )
+                await asyncio.sleep(GROUP_JOIN_INTERVAL_SECONDS)
             resolved[group_id] = await _ensure_group_membership(
                 client_wrapper,
                 getattr(group, "group_chat_id", None),
@@ -408,6 +418,7 @@ def _build_multi_group_membership_startup_hook(
                 profile.id,
                 dialog_index=dialog_index,
             )
+            processed_group = True
         return resolved
 
     return startup_hook

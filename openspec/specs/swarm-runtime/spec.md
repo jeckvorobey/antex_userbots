@@ -3,9 +3,7 @@
 ## Purpose
 
 Define how enabled Telegram userbot accounts are started, supervised, registered for routing, and connected to the target group.
-
 ## Requirements
-
 ### Requirement: Runtime context initialization
 The system SHALL initialize shared runtime dependencies before starting swarm clients.
 
@@ -51,11 +49,23 @@ The system SHALL register an addressed-reply handler for each active bot client.
 - **THEN** handler registration skips that bot id
 
 ### Requirement: Target group membership
-The system SHALL wait a random inclusive 30–60 second delay before each bot's startup membership check, build one reusable dialog index for that bot, then resolve or join every enabled configured group for that bot during startup and after group reload.
+The system SHALL wait a random inclusive 30–60 second delay before each bot's startup membership check, then resolve or join every enabled configured group for that bot during startup and after group reload, processing groups sequentially and waiting 20 seconds between consecutive enabled-group membership operations.
 
 #### Scenario: Startup membership delay stays within the configured range
 - **WHEN** an enabled bot reaches either startup membership hook
 - **THEN** the runtime waits a random delay from 30 through 60 seconds before the first membership operation
+
+#### Scenario: Multi-group membership waits between enabled groups
+- **WHEN** one bot checks membership for multiple enabled groups during startup
+- **THEN** the runtime processes the groups sequentially and waits exactly 20 seconds before each enabled group after the first one
+
+#### Scenario: Disabled groups do not create an interval
+- **WHEN** disabled groups appear between enabled groups in the configured list
+- **THEN** the runtime skips them without a membership operation and does not add an extra 20-second wait for them
+
+#### Scenario: No trailing interval is added
+- **WHEN** the last enabled group has been processed
+- **THEN** the runtime does not wait an additional 20 seconds
 
 #### Scenario: Multi-group membership reuses one dialog scan
 - **WHEN** one bot checks membership for multiple enabled groups during startup

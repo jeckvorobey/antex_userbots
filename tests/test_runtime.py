@@ -1,7 +1,7 @@
 """Тесты runtime-слоя swarm и bootstrap run.py."""
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 
@@ -862,8 +862,8 @@ async def test_group_membership_startup_hook_waits_random_delay_before_join(monk
 
 
 @pytest.mark.asyncio
-async def test_multi_group_membership_startup_hook_waits_same_seconds_before_checks(monkeypatch):
-    """Проверяет задержку startup hook перед membership всех enabled-групп."""
+async def test_multi_group_membership_startup_hook_waits_initial_and_between_group_delays(monkeypatch):
+    """Проверяет initial delay и интервал между enabled-группами."""
     import run
 
     sleep = AsyncMock()
@@ -886,7 +886,7 @@ async def test_multi_group_membership_startup_hook_waits_same_seconds_before_che
     resolved = await hook(profile, client)
 
     assert resolved == {"first": "@first", "second": "@second"}
-    sleep.assert_awaited_once_with(58.0)
+    assert sleep.await_args_list == [call(58.0), call(20.0)]
     assert [call.args for call in ensure_membership.await_args_list] == [
         (client, 101, "@first", "anna"),
         (client, 103, "@second", "anna"),
