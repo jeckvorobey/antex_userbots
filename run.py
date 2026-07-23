@@ -132,12 +132,18 @@ def _add_group_to_dialog_index(
     group_target: str | None = None,
 ) -> object:
     """Добавляет dialog/entity в индекс и возвращает используемую entity."""
-    entity = getattr(resolved_target, "entity", None) or resolved_target
-    for candidate_id in (
-        group_chat_id,
-        getattr(resolved_target, "id", None),
-        getattr(entity, "id", None),
-    ):
+    wrapped_entity = getattr(resolved_target, "entity", None)
+    entity = wrapped_entity or resolved_target
+    if wrapped_entity is not None:
+        is_group = getattr(resolved_target, "is_group", None)
+        is_channel = getattr(resolved_target, "is_channel", None)
+        if is_group is False and is_channel is False:
+            return entity
+
+    candidate_ids = [group_chat_id, getattr(resolved_target, "id", None)]
+    if wrapped_entity is None:
+        candidate_ids.append(getattr(entity, "id", None))
+    for candidate_id in candidate_ids:
         if isinstance(candidate_id, int):
             dialog_index.by_chat_id[candidate_id] = entity
 
@@ -175,7 +181,10 @@ def _find_group_in_dialog_index(
 ) -> object | None:
     """Ищет entity группы в предварительно построенном индексе."""
     if group_chat_id is not None:
-        for candidate_id in _iter_candidate_chat_ids(group_chat_id):
+        exact_target = dialog_index.by_chat_id.get(group_chat_id)
+        if exact_target is not None:
+            return exact_target
+        for candidate_id in _iter_candidate_chat_ids(group_chat_id) - {group_chat_id}:
             resolved_target = dialog_index.by_chat_id.get(candidate_id)
             if resolved_target is not None:
                 return resolved_target

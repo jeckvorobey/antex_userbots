@@ -2,7 +2,7 @@
 
 ## Резюме
 
-Проверены изменения Python runtime, тестов и OpenSpec-артефактов, подготовленные к текущему release. Критических, высоких, средних или низких уязвимостей в этом diff не найдено. Изменения не добавляют новых зависимостей, командного выполнения, сетевых endpoints или сохранения секретов.
+Проверены изменения Python runtime, тестов и OpenSpec-артефактов, подготовленные к текущему release. Security-review не выявил утечек секретов или новых опасных interfaces; последующий Codex review обнаружил один high-impact риск смешения Telegram peer namespaces. Finding исправлен до merge и закрыт regression-тестом.
 
 Проект является standalone Python/Telethon-приложением без web-framework, поэтому применимого framework-specific reference в skill `security-best-practices` нет. Проверка выполнена по общим Python security practices и правилам проекта.
 
@@ -12,7 +12,11 @@
 
 ## High
 
-Не найдено.
+### SEC-DIFF-01: Коллизия raw ID пользователя и канала — исправлено
+
+**Impact:** индекс мог вернуть личный user-dialog вместо настроенного канала и направить scheduled сообщение в DM.
+
+**Исправление:** личные диалоги исключены из group-index, raw `entity.id` больше не смешивается с namespace-aware `dialog.id`, а точный marked peer ID имеет приоритет при поиске (`run.py:127`, `run.py:177`). Коллизия покрыта тестом (`tests/test_runtime.py:600`).
 
 ## Medium
 

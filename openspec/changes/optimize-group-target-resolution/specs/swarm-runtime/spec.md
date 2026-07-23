@@ -11,6 +11,10 @@ The system SHALL wait a random inclusive 30–60 second delay before each bot's 
 - **WHEN** one bot checks membership for multiple enabled groups during startup
 - **THEN** the runtime scans that bot's available dialogs once and reuses the resulting index for every group check
 
+#### Scenario: Telegram peer namespaces remain isolated
+- **WHEN** a user dialog and a channel dialog expose the same raw entity id
+- **THEN** group lookup resolves the namespace-aware channel dialog and never returns the user entity
+
 #### Scenario: Already joined target is reused
 - **WHEN** the bot already has a matching dialog by chat id or public target for an enabled group
 - **THEN** no join request is sent for that group

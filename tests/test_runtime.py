@@ -597,6 +597,46 @@ async def test_multi_group_membership_scans_dialogs_once_for_all_groups(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_dialog_index_preserves_channel_namespace_when_user_raw_id_collides():
+    """Проверяет, что raw ID пользователя не вытесняет channel peer ID."""
+    import run
+
+    raw_id = 3846312748
+    channel_peer_id = -1003846312748
+    channel_entity = SimpleNamespace(id=raw_id, username="target_group")
+    user_entity = SimpleNamespace(id=raw_id, username="unrelated_user")
+
+    class DialogClient(FakeTelegramClient):
+        async def iter_dialogs(self):
+            yield SimpleNamespace(
+                id=channel_peer_id,
+                entity=channel_entity,
+                is_group=True,
+                is_channel=True,
+            )
+            yield SimpleNamespace(
+                id=raw_id,
+                entity=user_entity,
+                is_group=False,
+                is_channel=False,
+            )
+
+    telegram_client = DialogClient("anna", 1, "hash")
+    dialog_index = await run._build_group_dialog_index(telegram_client)
+
+    assert user_entity not in dialog_index.by_chat_id.values()
+
+    resolved = await run._resolve_joined_group_dialog(
+        telegram_client,
+        raw_id,
+        "@target_group",
+        dialog_index=dialog_index,
+    )
+
+    assert resolved is channel_entity
+
+
+@pytest.mark.asyncio
 async def test_membership_index_is_updated_after_public_join():
     """Проверяет повторное использование entity, добавленной в индекс после join."""
     import run

@@ -12,3 +12,8 @@
 
 - [x] 3.1 Run targeted runtime tests and the full test suite.
 - [x] 3.2 Run strict OpenSpec validation and verify the final diff.
+
+## 4. Review remediation
+
+- [x] 4.1 Add a regression test for colliding Telegram user and channel raw IDs.
+- [x] 4.2 Preserve peer namespaces in the dialog index and repeat all validation gates.
