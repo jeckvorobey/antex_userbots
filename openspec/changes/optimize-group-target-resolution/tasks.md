@@ -17,3 +17,8 @@
 
 - [x] 4.1 Add a regression test for colliding Telegram user and channel raw IDs.
 - [x] 4.2 Preserve peer namespaces in the dialog index and repeat all validation gates.
+
+## 5. Basic group namespace remediation
+
+- [x] 5.1 Add a regression test for a positive raw basic-group id colliding with a user id.
+- [x] 5.2 Resolve the `-id` basic-chat marked form and repeat all validation gates.

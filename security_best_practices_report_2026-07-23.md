@@ -16,7 +16,13 @@
 
 **Impact:** индекс мог вернуть личный user-dialog вместо настроенного канала и направить scheduled сообщение в DM.
 
-**Исправление:** личные диалоги исключены из group-index, raw `entity.id` больше не смешивается с namespace-aware `dialog.id`, а точный marked peer ID имеет приоритет при поиске (`run.py:127`, `run.py:177`). Коллизия покрыта тестом (`tests/test_runtime.py:600`).
+**Исправление:** личные диалоги исключены из group-index, raw `entity.id` больше не смешивается с namespace-aware `dialog.id`, а точный marked peer ID имеет приоритет при поиске (`run.py:128`, `run.py:178`). Коллизия покрыта тестом (`tests/test_runtime.py:600`).
+
+### SEC-DIFF-02: Positive raw ID basic group мог попасть в user namespace — исправлено
+
+**Impact:** ID-only конфигурация legacy/basic group могла не найти marked peer `-id` и передать положительный integer как user peer.
+
+**Исправление:** для положительного raw ID индексный lookup проверяет обе Telegram marked формы: `-id` для basic chat и `-100...` для channel (`run.py:70`). Поведение покрыто collision-тестом (`tests/test_runtime.py:638`).
 
 ## Medium
 
@@ -36,7 +42,7 @@
 
 ## Проверки
 
-- `uv run pytest` — 201 passed.
-- `uv run pytest tests/test_runtime.py tests/test_config_toml.py -q` — 65 passed.
+- `uv run pytest` — 203 passed.
+- `uv run pytest tests/test_runtime.py tests/test_config_toml.py -q` — 67 passed.
 - `openspec validate --strict --all` — 9 passed, 0 failed.
 - `git diff --check` — успешно.

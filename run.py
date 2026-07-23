@@ -71,6 +71,7 @@ def _iter_candidate_chat_ids(chat_id: int) -> set[int]:
     absolute_chat_id = abs(chat_id)
 
     if chat_id > 0:
+        candidates.add(-chat_id)
         candidates.add(-(10**12 + chat_id))
         return candidates
     if absolute_chat_id >= 10**12:

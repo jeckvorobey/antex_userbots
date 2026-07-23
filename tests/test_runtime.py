@@ -637,6 +637,43 @@ async def test_dialog_index_preserves_channel_namespace_when_user_raw_id_collide
 
 
 @pytest.mark.asyncio
+async def test_dialog_index_resolves_positive_raw_id_to_basic_group_namespace():
+    """Проверяет marked `-id` для basic group при совпадении raw ID с user."""
+    import run
+
+    raw_id = 123456789
+    basic_group_peer_id = -raw_id
+    group_entity = SimpleNamespace(id=raw_id, title="Basic group")
+    user_entity = SimpleNamespace(id=raw_id, username="unrelated_user")
+
+    class DialogClient(FakeTelegramClient):
+        async def iter_dialogs(self):
+            yield SimpleNamespace(
+                id=basic_group_peer_id,
+                entity=group_entity,
+                is_group=True,
+                is_channel=False,
+            )
+            yield SimpleNamespace(
+                id=raw_id,
+                entity=user_entity,
+                is_group=False,
+                is_channel=False,
+            )
+
+    telegram_client = DialogClient("anna", 1, "hash")
+    dialog_index = await run._build_group_dialog_index(telegram_client)
+
+    resolved = await run._resolve_joined_group_dialog(
+        telegram_client,
+        raw_id,
+        dialog_index=dialog_index,
+    )
+
+    assert resolved is group_entity
+
+
+@pytest.mark.asyncio
 async def test_membership_index_is_updated_after_public_join():
     """Проверяет повторное использование entity, добавленной в индекс после join."""
     import run
