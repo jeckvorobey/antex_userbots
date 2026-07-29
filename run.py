@@ -19,6 +19,7 @@ from ai.prompt_composer import PromptComposer
 from core.config import SettingsReloadWatcher, load_settings_or_exit
 from core.logging import setup_logging
 from core.runtime_models import SwarmBotProfile
+from storage.sqlite_database import SQLiteDatabase
 from userbot.client import UserBotClient
 from userbot.exchange_store import ExchangeStore
 from userbot.orchestrator import SwarmOrchestrator
@@ -43,6 +44,7 @@ def _pick_startup_membership_delay_seconds() -> float:
 class RuntimeContext:
     """Переиспользуемые runtime-зависимости приложения."""
 
+    database: SQLiteDatabase
     history: MessageHistory
     prompt_loader: PromptLoader
     gemini_client: GeminiClient
@@ -52,12 +54,7 @@ class RuntimeContext:
 
     async def close(self) -> None:
         """Закрывает runtime-ресурсы с внешними соединениями."""
-        for resource in (self.history, self.exchange_store):
-            close = getattr(resource, "close", None)
-            if callable(close):
-                result = close()
-                if inspect.isawaitable(result):
-                    await result
+        await self.database.close()
 
 
 def _utc_now() -> datetime:
@@ -225,6 +222,21 @@ def _extract_resolved_chat_id(resolved_target: object | None, fallback_chat_id: 
         return fallback_chat_id
     target_id = getattr(resolved_target, "id", None)
     return target_id if isinstance(target_id, int) else None
+
+
+def _extract_event_chat_id(resolved_target: object | None, fallback_chat_id: int | None) -> int | None:
+    """Возвращает marked peer id в том же формате, что Telegram event.chat_id."""
+    if fallback_chat_id is not None:
+        return fallback_chat_id
+    if resolved_target is None:
+        return None
+    try:
+        from telethon import utils
+
+        peer_id = utils.get_peer_id(resolved_target)
+    except (ImportError, TypeError, ValueError):
+        return None
+    return peer_id if isinstance(peer_id, int) else None
 
 
 def _group_target_cache_key(group_chat_id: int | None, group_target: str | None) -> tuple[int | None, str | None]:
@@ -516,33 +528,48 @@ def _prune_orchestrator_cache(
             cache.pop(group_id, None)
 
 
+def _rotate_groups_for_tick(groups: list[object], start_index: int) -> tuple[list[object], int]:
+    """Возвращает группы с циклическим стартом и позицию следующего тика."""
+    if not groups:
+        return [], 0
+    normalized_index = start_index % len(groups)
+    ordered_groups = groups[normalized_index:] + groups[:normalized_index]
+    return ordered_groups, (normalized_index + 1) % len(groups)
+
+
 async def _build_runtime_context(settings: object) -> RuntimeContext:
     """Создаёт общие runtime-зависимости swarm."""
-    history = MessageHistory(settings.db_path)
-    await history.init_db()
+    database = SQLiteDatabase(settings.db_path)
+    await database.open()
+    try:
+        history = MessageHistory(database)
+        await history.init_db()
 
-    prompt_loader = PromptLoader(settings.prompts_dir)
-    gemini_client = GeminiClient(
-        settings.gemini_api_key,
-        model_name=settings.gemini_model,
-        proxy_url=settings.proxy_url,
-        fallback_model_name=settings.gemini_fallback_model,
-        max_retries=settings.gemini_max_retries,
-        retry_backoff_seconds=settings.gemini_retry_backoff_seconds,
-        retry_jitter_seconds=settings.gemini_retry_jitter_seconds,
-        request_timeout_seconds=settings.gemini_request_timeout_seconds,
-        temperature=settings.gemini_temperature,
-        max_output_chars=getattr(settings, "swarm_max_output_chars", 400),
-        max_mentions_per_message=getattr(settings, "swarm_max_mentions_per_message", 2),
-    )
-    topic_selector = TopicSelector(settings.topics_path)
-    await topic_selector.load()
-    prompt_composer = PromptComposer(prompt_loader=prompt_loader, bot_profiles_dir=settings.bot_profiles_dir)
-    exchange_store = ExchangeStore(settings.db_path)
-    await exchange_store.init_db()
-    retention_days = getattr(settings, "swarm_history_retention_days", 30)
-    await history.prune_older_than(retention_days=retention_days)
-    await exchange_store.prune_older_than(retention_days=retention_days)
+        prompt_loader = PromptLoader(settings.prompts_dir)
+        gemini_client = GeminiClient(
+            settings.gemini_api_key,
+            model_name=settings.gemini_model,
+            proxy_url=settings.proxy_url,
+            fallback_model_name=settings.gemini_fallback_model,
+            max_retries=settings.gemini_max_retries,
+            retry_backoff_seconds=settings.gemini_retry_backoff_seconds,
+            retry_jitter_seconds=settings.gemini_retry_jitter_seconds,
+            request_timeout_seconds=settings.gemini_request_timeout_seconds,
+            temperature=settings.gemini_temperature,
+            max_output_chars=getattr(settings, "swarm_max_output_chars", 400),
+            max_mentions_per_message=getattr(settings, "swarm_max_mentions_per_message", 2),
+        )
+        topic_selector = TopicSelector(settings.topics_path)
+        await topic_selector.load()
+        prompt_composer = PromptComposer(prompt_loader=prompt_loader, bot_profiles_dir=settings.bot_profiles_dir)
+        exchange_store = ExchangeStore(database)
+        await exchange_store.init_db()
+        retention_days = getattr(settings, "swarm_history_retention_days", 30)
+        await history.prune_older_than(retention_days=retention_days)
+        await exchange_store.prune_older_than(retention_days=retention_days)
+    except BaseException:
+        await database.close()
+        raise
 
     logger.info(
         "RuntimeContext инициализирован: db_path=%s prompts_dir=%s topics=%s",
@@ -551,6 +578,7 @@ async def _build_runtime_context(settings: object) -> RuntimeContext:
         len(topic_selector.topics),
     )
     return RuntimeContext(
+        database=database,
         history=history,
         prompt_loader=prompt_loader,
         gemini_client=gemini_client,
@@ -645,17 +673,28 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
     enabled_group_chat_ids = {
         group.group_chat_id for group in current_groups if isinstance(getattr(group, "group_chat_id", None), int)
     }
-    await _register_swarm_handlers(manager, runtime, lambda: current_settings, enabled_group_chat_ids or None)
-
     first_client = manager.get_client(manager.active_bot_ids[0]).client
     for group in current_groups:
+        resolved_group_target = await _resolve_group_target(
+            first_client,
+            getattr(group, "group_chat_id", None),
+            getattr(group, "group_target", None),
+        )
+        resolved_event_chat_id = _extract_event_chat_id(
+            resolved_group_target,
+            getattr(group, "group_chat_id", None),
+        )
+        if resolved_event_chat_id is not None:
+            enabled_group_chat_ids.add(resolved_event_chat_id)
         await _log_resolved_group(first_client, group.group_chat_id, group.group_target)
+    await _register_swarm_handlers(manager, runtime, lambda: current_settings, enabled_group_chat_ids)
 
     reload_watcher = SettingsReloadWatcher(current_settings)
     orchestrator_cache: dict[str, tuple[tuple[object, ...], object]] = {}
+    next_group_start_index = 0
 
     async def orchestrator_tick() -> bool:
-        nonlocal current_settings, current_groups
+        nonlocal current_settings, current_groups, next_group_start_index
         reloaded_settings = reload_watcher.poll()
         if reloaded_settings is not None:
             current_settings = reloaded_settings
@@ -668,7 +707,11 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
 
         any_started = False
         _prune_orchestrator_cache(orchestrator_cache, {group.id for group in current_groups})
-        for group in current_groups:
+        groups_for_tick, next_group_start_index = _rotate_groups_for_tick(
+            current_groups,
+            next_group_start_index,
+        )
+        for group in groups_for_tick:
             resolved_group_target = await _resolve_group_target(
                 first_client,
                 getattr(group, "group_chat_id", None),
@@ -676,6 +719,12 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
             )
             group_target = resolved_group_target or getattr(group, "group_target", None) or getattr(group, "group_chat_id", None)
             group_chat_id = _extract_resolved_chat_id(resolved_group_target, getattr(group, "group_chat_id", None))
+            resolved_event_chat_id = _extract_event_chat_id(
+                resolved_group_target,
+                getattr(group, "group_chat_id", None),
+            )
+            if resolved_event_chat_id is not None:
+                enabled_group_chat_ids.add(resolved_event_chat_id)
             if group_target is None:
                 logger.warning("orchestrator: skip group without target group_id=%s", group.id)
                 continue

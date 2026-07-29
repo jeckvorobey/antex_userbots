@@ -27,14 +27,18 @@ async def test_reply_router_logs_ignore_reason(caplog):
         prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system")),
         gemini_client=SimpleNamespace(generate_reply=AsyncMock()),
         swarm_user_ids={202, 303},
+        enabled_group_chat_ids={-100555},
     )
-    event = SimpleNamespace(sender_id=999, raw_text="Привет", is_reply=False, id=77)
+    event = SimpleNamespace(sender_id=999, chat_id=-100555, raw_text="Привет", is_reply=False, id=77)
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         handled = await router.handle_event(event)
 
     assert handled is False
-    assert any("ignore non-reply" in record.getMessage() for record in caplog.records)
+    assert any(
+        record.levelno == logging.DEBUG and "ignore non-reply" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio

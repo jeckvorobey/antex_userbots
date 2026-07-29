@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from ai.text_file_cache import AsyncTextFileCache
+
 
 logger = logging.getLogger(__name__)
 TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
@@ -30,7 +32,7 @@ class GeminiTemporaryError(GeminiGenerationError):
 class PromptLoader:
     """Загружает промты из .md файлов в runtime. Промты никогда не хардкодятся в коде."""
 
-    def __init__(self, prompts_dir: str) -> None:
+    def __init__(self, prompts_dir: str, file_cache: AsyncTextFileCache | None = None) -> None:
         """
         Инициализирует загрузчик промтов.
 
@@ -38,6 +40,7 @@ class PromptLoader:
             prompts_dir: Путь к директории, содержащей .md файлы промтов.
         """
         self.prompts_dir = prompts_dir
+        self.file_cache = file_cache or AsyncTextFileCache()
 
     async def load(self, name: str) -> str:
         """
@@ -52,14 +55,25 @@ class PromptLoader:
         Raises:
             FileNotFoundError: Если файл {name}.md не найден в директории промтов.
         """
-        path = Path(self.prompts_dir) / f"{name}.md"
+        normalized_name = self._validate_name(name)
+        path = Path(self.prompts_dir) / f"{normalized_name}.md"
         logger.info("Загрузка промта '%s' из %s", name, path)
-        if not path.exists():
+        try:
+            content = await self.file_cache.read(path)
+        except FileNotFoundError:
             logger.error("Файл промта не найден: %s", path)
             raise FileNotFoundError(path)
-        content = path.read_text(encoding="utf-8")
         logger.info("Промт '%s' успешно загружен", name)
         return content
+
+    @staticmethod
+    def _validate_name(name: str) -> str:
+        """Разрешает только одно непустое имя файла внутри prompts_dir."""
+        normalized = name.strip()
+        path = Path(normalized)
+        if normalized == "" or path.is_absolute() or len(path.parts) != 1 or normalized in {".", ".."}:
+            raise ValueError("prompt name должен быть именем файла внутри prompts_dir")
+        return normalized
 
 
 class GeminiClient:

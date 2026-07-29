@@ -231,6 +231,7 @@ def test_settings_exposes_swarm_security_defaults():
     assert settings.swarm_allow_external_llm_for_scheduled is True
     assert settings.swarm_addressed_reply_rate_limit_count == 3
     assert settings.swarm_addressed_reply_rate_limit_window_seconds == 60
+    assert settings.swarm_addressed_reply_max_pending_per_bot == 3
     assert settings.swarm_max_output_chars == 400
     assert settings.swarm_max_mentions_per_message == 2
     assert settings.swarm_history_retention_days == 30

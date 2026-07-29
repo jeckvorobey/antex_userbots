@@ -6,9 +6,10 @@ import logging
 import re
 import uuid
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import aiosqlite
+
+from storage.sqlite_database import SQLiteDatabase
 
 
 logger = logging.getLogger(__name__)
@@ -24,16 +25,15 @@ def normalize_signature(value: str) -> str:
 class ExchangeStore:
     """Хранит exchange, их статусы и persisted state для anti-repeat."""
 
-    def __init__(self, db_path: str) -> None:
-        self.db_path = db_path
-        self._connection: aiosqlite.Connection | None = None
+    def __init__(self, database: SQLiteDatabase) -> None:
+        self.database = database
 
     async def init_db(self) -> None:
         """Создаёт таблицу scheduled_exchanges, если она ещё не существует."""
-        connection = await self._get_connection()
-        await connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS scheduled_exchanges (
+        async def initialize(connection: aiosqlite.Connection) -> None:
+            await connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scheduled_exchanges (
                 exchange_id TEXT PRIMARY KEY,
                 group_id TEXT,
                 group_chat_id INTEGER,
@@ -56,29 +56,30 @@ class ExchangeStore:
                 started_at TIMESTAMP,
                 completed_at TIMESTAMP,
                 last_activity_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
             )
-            """
-        )
-        await connection.commit()
-        await self._ensure_column(connection, "group_id", "TEXT")
-        await self._ensure_column(connection, "group_chat_id", "INTEGER")
-        await self._ensure_column(connection, "pair_key", "TEXT")
-        await self._ensure_column(connection, "window_key", "TEXT")
-        await self._ensure_column(connection, "topic_key", "TEXT")
-        await self._ensure_column(connection, "question_text", "TEXT")
-        await self._ensure_column(connection, "question_signature", "TEXT")
-        await self._ensure_column(connection, "initiator_scheduled_at", "TIMESTAMP")
-        await self._ensure_column(connection, "responder_scheduled_at", "TIMESTAMP")
-        await self._ensure_column(connection, "initiator_message_id", "INTEGER")
-        await self._ensure_column(connection, "exchange_kind", "TEXT NOT NULL DEFAULT 'regular'")
-        await self._ensure_column(connection, "important_scenario", "TEXT")
-        await self._ensure_column(connection, "skip_reason", "TEXT")
-        await self._ensure_column(connection, "created_at", "TIMESTAMP")
-        await self._ensure_column(connection, "started_at", "TIMESTAMP")
-        await self._ensure_column(connection, "completed_at", "TIMESTAMP")
-        await self._ensure_column(connection, "last_activity_at", "TIMESTAMP")
-        await self._backfill_last_activity_at(connection)
-        await self._ensure_indexes(connection)
+            await self._ensure_column(connection, "group_id", "TEXT")
+            await self._ensure_column(connection, "group_chat_id", "INTEGER")
+            await self._ensure_column(connection, "pair_key", "TEXT")
+            await self._ensure_column(connection, "window_key", "TEXT")
+            await self._ensure_column(connection, "topic_key", "TEXT")
+            await self._ensure_column(connection, "question_text", "TEXT")
+            await self._ensure_column(connection, "question_signature", "TEXT")
+            await self._ensure_column(connection, "initiator_scheduled_at", "TIMESTAMP")
+            await self._ensure_column(connection, "responder_scheduled_at", "TIMESTAMP")
+            await self._ensure_column(connection, "initiator_message_id", "INTEGER")
+            await self._ensure_column(connection, "exchange_kind", "TEXT NOT NULL DEFAULT 'regular'")
+            await self._ensure_column(connection, "important_scenario", "TEXT")
+            await self._ensure_column(connection, "skip_reason", "TEXT")
+            await self._ensure_column(connection, "created_at", "TIMESTAMP")
+            await self._ensure_column(connection, "started_at", "TIMESTAMP")
+            await self._ensure_column(connection, "completed_at", "TIMESTAMP")
+            await self._ensure_column(connection, "last_activity_at", "TIMESTAMP")
+            await self._backfill_last_activity_at(connection)
+            await self._ensure_indexes(connection)
+
+        await self.database.write("init_exchange_store", initialize)
         logger.info("Таблица scheduled_exchanges готова")
 
     async def create_exchange(
@@ -99,8 +100,8 @@ class ExchangeStore:
         exchange_id = str(uuid.uuid4())
         normalized_topic_key = topic_key or normalize_signature(topic)
         pair_key = self.build_pair_key(initiator_bot_id, responder_bot_id)
-        connection = await self._get_connection()
-        await connection.execute(
+        await self.database.execute(
+            "create_exchange",
             """
             INSERT INTO scheduled_exchanges (
                 exchange_id,
@@ -135,7 +136,6 @@ class ExchangeStore:
                 important_scenario,
             ),
         )
-        await connection.commit()
         logger.info(
             "Создан planned exchange: exchange_id=%s group_id=%s group_chat_id=%s initiator=%s responder=%s topic_key=%s window_key=%s kind=%s important_scenario=%s initiator_due=%s",
             exchange_id,
@@ -153,8 +153,8 @@ class ExchangeStore:
 
     async def get_exchange(self, exchange_id: str) -> dict[str, object] | None:
         """Возвращает exchange по идентификатору."""
-        connection = await self._get_connection()
-        async with connection.execute(
+        row = await self.database.fetch_one(
+            "get_exchange",
             """
             SELECT *
             FROM scheduled_exchanges
@@ -162,8 +162,7 @@ class ExchangeStore:
             LIMIT 1
             """,
             (exchange_id,),
-        ) as cursor:
-            row = await cursor.fetchone()
+        )
         return dict(row) if row is not None else None
 
     async def mark_exchange_started(
@@ -176,8 +175,8 @@ class ExchangeStore:
         responder_scheduled_at: datetime | None = None,
     ) -> None:
         """Помечает exchange как начатый."""
-        connection = await self._get_connection()
-        await connection.execute(
+        await self.database.execute(
+            "mark_exchange_started",
             """
             UPDATE scheduled_exchanges
             SET status = 'started',
@@ -197,13 +196,12 @@ class ExchangeStore:
                 exchange_id,
             ),
         )
-        await connection.commit()
         logger.info("Exchange помечен как started: exchange_id=%s", exchange_id)
 
     async def mark_exchange_completed(self, exchange_id: str) -> None:
         """Помечает exchange как завершённый."""
-        connection = await self._get_connection()
-        await connection.execute(
+        await self.database.execute(
+            "mark_exchange_completed",
             """
             UPDATE scheduled_exchanges
             SET status = 'completed',
@@ -213,16 +211,15 @@ class ExchangeStore:
             """,
             (exchange_id,),
         )
-        await connection.commit()
         logger.info("Exchange помечен как completed: exchange_id=%s", exchange_id)
 
     async def get_recent_bot_ids(self, limit: int, *, group_id: str | None = None, group_chat_id: int | None = None) -> list[str]:
         """Возвращает последние уникальные bot_id, которые писали scheduled-сообщения."""
         if limit <= 0:
             return []
-        connection = await self._get_connection()
         filter_sql, filter_params = self._build_group_filter(group_id=group_id, group_chat_id=group_chat_id)
-        async with connection.execute(
+        rows = await self.database.fetch_all(
+            "get_recent_bot_ids",
             f"""
             WITH bot_events AS (
                 SELECT
@@ -269,8 +266,7 @@ class ExchangeStore:
             LIMIT ?
             """,
             (*filter_params, *filter_params, limit),
-        ) as cursor:
-            rows = await cursor.fetchall()
+        )
 
         recent_bot_ids = [row[0] for row in rows if isinstance(row[0], str)]
 
@@ -285,9 +281,9 @@ class ExchangeStore:
         group_chat_id: int | None = None,
     ) -> dict[str, object] | None:
         """Возвращает exchange, уже зарегистрированный в текущем окне."""
-        connection = await self._get_connection()
         filter_sql, filter_params = self._build_group_filter(group_id=group_id, group_chat_id=group_chat_id)
-        async with connection.execute(
+        row = await self.database.fetch_one(
+            "get_exchange_by_window_key",
             f"""
             SELECT *
             FROM scheduled_exchanges
@@ -297,8 +293,7 @@ class ExchangeStore:
             LIMIT 1
             """,
             (window_key, *filter_params),
-        ) as cursor:
-            row = await cursor.fetchone()
+        )
         return dict(row) if row is not None else None
 
     async def get_due_started_exchange(
@@ -309,9 +304,9 @@ class ExchangeStore:
         group_chat_id: int | None = None,
     ) -> dict[str, object] | None:
         """Возвращает ближайший started exchange, которому пора отправить ответ."""
-        connection = await self._get_connection()
         filter_sql, filter_params = self._build_group_filter(group_id=group_id, group_chat_id=group_chat_id)
-        async with connection.execute(
+        row = await self.database.fetch_one(
+            "get_due_started_exchange",
             f"""
             SELECT *
             FROM scheduled_exchanges
@@ -323,8 +318,7 @@ class ExchangeStore:
             LIMIT 1
             """,
             (self._serialize_timestamp(now), *filter_params),
-        ) as cursor:
-            row = await cursor.fetchone()
+        )
         return dict(row) if row is not None else None
 
     async def get_recent_topic_keys_by_limit(
@@ -337,9 +331,9 @@ class ExchangeStore:
         """Возвращает topic_key из последних started/completed exchange."""
         if limit <= 0:
             return set()
-        connection = await self._get_connection()
         filter_sql, filter_params = self._build_group_filter(group_id=group_id, group_chat_id=group_chat_id)
-        async with connection.execute(
+        rows = await self.database.fetch_all(
+            "get_recent_topic_keys",
             f"""
             SELECT topic_key
             FROM scheduled_exchanges
@@ -349,8 +343,7 @@ class ExchangeStore:
             LIMIT ?
             """,
             (*filter_params, limit),
-        ) as cursor:
-            rows = await cursor.fetchall()
+        )
         topic_keys = {row[0] for row in rows if isinstance(row[0], str)}
         logger.info("Загружены последние topic_key по limit=%s: count=%s", limit, len(topic_keys))
         return topic_keys
@@ -364,9 +357,9 @@ class ExchangeStore:
     ) -> set[str]:
         """Возвращает сигнатуры недавно использованных вопросов."""
         threshold = self._threshold_timestamp(since)
-        connection = await self._get_connection()
         filter_sql, filter_params = self._build_group_filter(group_id=group_id, group_chat_id=group_chat_id)
-        async with connection.execute(
+        rows = await self.database.fetch_all(
+            "get_recent_question_signatures",
             f"""
             SELECT DISTINCT question_signature
             FROM scheduled_exchanges
@@ -376,8 +369,7 @@ class ExchangeStore:
               {filter_sql}
             """,
             (threshold, *filter_params),
-        ) as cursor:
-            rows = await cursor.fetchall()
+        )
         signatures = {row[0] for row in rows if isinstance(row[0], str)}
         logger.info("Загружены recent question_signature: count=%s since=%s", len(signatures), threshold)
         return signatures
@@ -392,9 +384,9 @@ class ExchangeStore:
     ) -> list[str]:
         """Возвращает последние вопросы для prompt context."""
         threshold = self._threshold_timestamp(since)
-        connection = await self._get_connection()
         filter_sql, filter_params = self._build_group_filter(group_id=group_id, group_chat_id=group_chat_id)
-        async with connection.execute(
+        rows = await self.database.fetch_all(
+            "get_recent_questions",
             f"""
             SELECT COALESCE(question_text, topic)
             FROM scheduled_exchanges
@@ -405,8 +397,7 @@ class ExchangeStore:
             LIMIT ?
             """,
             (threshold, *filter_params, limit),
-        ) as cursor:
-            rows = await cursor.fetchall()
+        )
         questions = [row[0] for row in rows if isinstance(row[0], str)]
         logger.info("Загружены recent questions для контекста: count=%s", len(questions))
         return questions
@@ -418,9 +409,9 @@ class ExchangeStore:
         group_chat_id: int | None = None,
     ) -> dict[str, object] | None:
         """Возвращает последний important-service exchange для группы."""
-        connection = await self._get_connection()
         filter_sql, filter_params = self._build_group_filter(group_id=group_id, group_chat_id=group_chat_id)
-        async with connection.execute(
+        row = await self.database.fetch_one(
+            "get_latest_important_service_exchange",
             f"""
             SELECT *
             FROM scheduled_exchanges
@@ -431,16 +422,8 @@ class ExchangeStore:
             LIMIT 1
             """,
             filter_params,
-        ) as cursor:
-            row = await cursor.fetchone()
+        )
         return dict(row) if row is not None else None
-
-    async def close(self) -> None:
-        """Закрывает SQLite-соединение."""
-        if self._connection is None:
-            return
-        await self._connection.close()
-        self._connection = None
 
     async def prune_older_than(self, *, retention_days: int) -> int:
         """Удаляет старые scheduled exchange по retention window."""
@@ -449,16 +432,14 @@ class ExchangeStore:
             return 0
 
         cutoff = (datetime.now(UTC) - timedelta(days=retention_days)).strftime("%Y-%m-%d %H:%M:%S")
-        connection = await self._get_connection()
-        cursor = await connection.execute(
+        deleted = await self.database.execute(
+            "prune_exchange_store",
             """
             DELETE FROM scheduled_exchanges
             WHERE COALESCE(last_activity_at, created_at) < ?
             """,
             (cutoff,),
         )
-        await connection.commit()
-        deleted = int(cursor.rowcount or 0)
         logger.info(
             "Очистка scheduled_exchanges завершена: retention_days=%s deleted=%s",
             retention_days,
@@ -466,26 +447,10 @@ class ExchangeStore:
         )
         return deleted
 
-    async def _get_connection(self) -> aiosqlite.Connection:
-        if self._connection is None:
-            self._ensure_parent_dir()
-            self._connection = await aiosqlite.connect(self.db_path)
-            self._connection.row_factory = aiosqlite.Row
-        return self._connection
-
-    def _ensure_parent_dir(self) -> None:
-        """Создаёт директорию для файловой SQLite базы."""
-        if self.db_path == ":memory:":
-            return
-        parent = Path(self.db_path).parent
-        if str(parent) and str(parent) != ".":
-            parent.mkdir(parents=True, exist_ok=True)
-
     async def _ensure_column(self, connection: aiosqlite.Connection, column_name: str, column_type: str) -> None:
         """Добавляет колонку, если её ещё нет; пропускает только duplicate-column."""
         try:
             await connection.execute(f"ALTER TABLE scheduled_exchanges ADD COLUMN {column_name} {column_type}")
-            await connection.commit()
         except aiosqlite.OperationalError as exc:
             if "duplicate column" not in str(exc).lower():
                 raise
@@ -500,7 +465,6 @@ class ExchangeStore:
               AND COALESCE(completed_at, started_at, created_at) IS NOT NULL
             """
         )
-        await connection.commit()
 
     async def _ensure_indexes(self, connection: aiosqlite.Connection) -> None:
         """Создаёт индексы для горячих запросов scheduled exchange."""
@@ -556,7 +520,6 @@ class ExchangeStore:
         ]
         for statement in index_statements:
             await connection.execute(statement)
-        await connection.commit()
 
     @staticmethod
     def _build_group_filter(*, group_id: str | None, group_chat_id: int | None) -> tuple[str, tuple[object, ...]]:

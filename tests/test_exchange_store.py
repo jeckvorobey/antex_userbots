@@ -7,17 +7,20 @@ import pytest
 import pytest_asyncio
 
 from userbot.exchange_store import ExchangeStore, normalize_signature
+from storage.sqlite_database import SQLiteDatabase
 
 
 @pytest_asyncio.fixture
 async def exchange_store():
     """Создаёт in-memory exchange store."""
-    store = ExchangeStore(":memory:")
+    database = SQLiteDatabase(":memory:")
+    await database.open()
+    store = ExchangeStore(database)
     await store.init_db()
     try:
         yield store
     finally:
-        await store.close()
+        await database.close()
 
 
 def test_normalize_signature_compacts_text():
@@ -193,16 +196,18 @@ async def test_exchange_store_migrates_legacy_table_idempotently(tmp_path):
     connection.commit()
     connection.close()
 
-    store = ExchangeStore(str(db_path))
+    database = SQLiteDatabase(str(db_path))
+    await database.open()
+    store = ExchangeStore(database)
     await store.init_db()
     await store.init_db()
     try:
-        db = await store._get_connection()
+        db = database.connection
         async with db.execute("PRAGMA table_info(scheduled_exchanges)") as cursor:
             rows = await cursor.fetchall()
         columns = [row[1] for row in rows]
     finally:
-        await store.close()
+        await database.close()
 
     assert "group_id" in columns
     assert "group_chat_id" in columns
@@ -214,7 +219,7 @@ async def test_exchange_store_migrates_legacy_table_idempotently(tmp_path):
 async def test_exchange_store_creates_indexes_idempotently(exchange_store):
     """Проверяет создание индексов для горячих scheduled exchange запросов."""
     await exchange_store.init_db()
-    db = await exchange_store._get_connection()
+    db = exchange_store.database.connection
     async with db.execute("PRAGMA index_list(scheduled_exchanges)") as cursor:
         rows = await cursor.fetchall()
 
@@ -289,12 +294,14 @@ async def test_exchange_store_backfills_last_activity_for_legacy_rows(tmp_path):
     connection.commit()
     connection.close()
 
-    store = ExchangeStore(str(db_path))
+    database = SQLiteDatabase(str(db_path))
+    await database.open()
+    store = ExchangeStore(database)
     await store.init_db()
     try:
         row = await store.get_exchange("exchange-1")
     finally:
-        await store.close()
+        await database.close()
 
     assert row is not None
     assert row["last_activity_at"] == "2026-07-05 10:15:00"
@@ -425,7 +432,7 @@ async def test_exchange_store_recent_queries_use_last_activity_order(exchange_st
         question_text="Второй вопрос",
         question_signature="Второй вопрос",
     )
-    db = await exchange_store._get_connection()
+    db = exchange_store.database.connection
     await db.execute(
         "UPDATE scheduled_exchanges SET last_activity_at = ? WHERE exchange_id = ?",
         ("2026-07-05 10:00:00", first_exchange),
@@ -447,7 +454,7 @@ async def test_exchange_store_recent_queries_use_last_activity_order(exchange_st
 
 async def test_exchange_store_prune_older_than_deletes_only_old_rows(exchange_store):
     """Проверяет retention-очистку старых scheduled exchange."""
-    db = await exchange_store._get_connection()
+    db = exchange_store.database.connection
     old_created_at = (datetime.now(UTC) - timedelta(days=40)).strftime("%Y-%m-%d %H:%M:%S")
     new_created_at = (datetime.now(UTC) - timedelta(days=5)).strftime("%Y-%m-%d %H:%M:%S")
     await db.executemany(

@@ -244,6 +244,7 @@ class SwarmSecurityConfig(_StrictModel):
     allow_external_llm_for_scheduled: bool = True
     addressed_reply_rate_limit_count: int = Field(default=3, ge=1)
     addressed_reply_rate_limit_window_seconds: int = Field(default=60, ge=1)
+    addressed_reply_max_pending_per_bot: int = Field(default=3, ge=1)
     max_output_chars: int = Field(default=400, ge=1)
     max_mentions_per_message: int = Field(default=2, ge=0)
     history_retention_days: int = Field(default=30, ge=0)
@@ -429,6 +430,9 @@ class Settings:
         self.swarm_addressed_reply_rate_limit_count = config.swarm.security.addressed_reply_rate_limit_count
         self.swarm_addressed_reply_rate_limit_window_seconds = (
             config.swarm.security.addressed_reply_rate_limit_window_seconds
+        )
+        self.swarm_addressed_reply_max_pending_per_bot = (
+            config.swarm.security.addressed_reply_max_pending_per_bot
         )
         self.swarm_max_output_chars = config.swarm.security.max_output_chars
         self.swarm_max_mentions_per_message = config.swarm.security.max_mentions_per_message

@@ -40,6 +40,16 @@ async def test_prompt_loader_raises_on_missing_file():
             await loader.load("несуществующий_промт")
 
 
+@pytest.mark.parametrize("name", ["../secret", "/tmp/secret", "nested/system", ""])
+async def test_prompt_loader_rejects_name_outside_prompts_dir(name):
+    """Проверяет запрет обхода каталога промтов через имя файла."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        loader = PromptLoader(prompts_dir=tmpdir)
+
+        with pytest.raises(ValueError, match="prompt name"):
+            await loader.load(name)
+
+
 async def test_prompt_loader_preserves_full_content():
     """Проверяет, что загрузчик возвращает полное содержимое файла."""
     content = "# Заголовок\n\nПервый абзац.\nВторой абзац."

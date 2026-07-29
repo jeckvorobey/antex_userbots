@@ -1,5 +1,6 @@
 """Тесты адресного reply-router для swarm-режима."""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -48,11 +49,15 @@ async def test_router_ignores_non_reply_message():
         prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system")),
         gemini_client=SimpleNamespace(generate_reply=AsyncMock()),
         swarm_user_ids={202, 303},
+        enabled_group_chat_ids={-100555},
     )
 
-    handled = await router.handle_event(_build_event(sender_id=999, is_reply=False))
+    event = _build_event(sender_id=999, is_reply=False)
+
+    handled = await router.handle_event(event)
 
     assert handled is False
+    event.get_sender.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -75,6 +80,25 @@ async def test_router_ignores_event_outside_enabled_groups():
 
 
 @pytest.mark.asyncio
+async def test_router_rejects_every_event_when_enabled_group_allowlist_is_empty():
+    """Проверяет fail-closed поведение до успешного resolve разрешённых групп."""
+    history = SimpleNamespace(get_session_history=AsyncMock(), save_message=AsyncMock())
+    router = AddressedReplyRouter(
+        bot_profile=SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+        history=history,
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system")),
+        gemini_client=SimpleNamespace(generate_reply=AsyncMock()),
+        swarm_user_ids={202, 303},
+        enabled_group_chat_ids=set(),
+    )
+
+    handled = await router.handle_event(_build_event(sender_id=999, chat_id=-100999))
+
+    assert handled is False
+    history.get_session_history.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_router_ignores_reply_to_another_bot():
     """Проверяет, что бот не отвечает на reply к сообщению другого swarm-бота."""
     router = AddressedReplyRouter(
@@ -83,6 +107,7 @@ async def test_router_ignores_reply_to_another_bot():
         prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system")),
         gemini_client=SimpleNamespace(generate_reply=AsyncMock()),
         swarm_user_ids={202, 303},
+        enabled_group_chat_ids={-100555},
     )
 
     handled = await router.handle_event(_build_event(sender_id=999, reply_sender_id=202))
@@ -99,6 +124,7 @@ async def test_router_ignores_messages_from_swarm_bot():
         prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system")),
         gemini_client=SimpleNamespace(generate_reply=AsyncMock()),
         swarm_user_ids={202, 303},
+        enabled_group_chat_ids={-100555},
     )
 
     handled = await router.handle_event(_build_event(sender_id=202, reply_sender_id=101))
@@ -115,6 +141,7 @@ async def test_router_ignores_reply_from_telegram_bot_sender():
         prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system")),
         gemini_client=SimpleNamespace(generate_reply=AsyncMock()),
         swarm_user_ids={202, 303},
+        enabled_group_chat_ids={-100555},
     )
 
     handled = await router.handle_event(_build_event(sender_id=999, reply_sender_id=101, sender_is_bot=True))
@@ -139,6 +166,7 @@ async def test_router_answers_only_to_addressed_bot_and_saves_history():
         prompt_composer=prompt_composer,
         gemini_client=gemini_client,
         swarm_user_ids={202, 303},
+        enabled_group_chat_ids={-100555},
         manager=manager,
     )
 
@@ -170,6 +198,8 @@ async def test_router_waits_four_minutes_before_sending_addressed_reply(monkeypa
         prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system+persona")),
         gemini_client=SimpleNamespace(generate_reply=AsyncMock(return_value="Ответ Анны")),
         swarm_user_ids={202, 303},
+        enabled_group_chat_ids={-100555},
+        monotonic_provider=lambda: 1000.0,
     )
     event = _build_event(sender_id=999)
 
@@ -194,6 +224,7 @@ async def test_router_uses_safe_fallback_when_external_llm_disabled():
         prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system+persona")),
         gemini_client=gemini_client,
         swarm_user_ids={202, 303},
+        enabled_group_chat_ids={-100555},
         manager=SimpleNamespace(human_slot=lambda _bot_id: _AsyncNullContext()),
         security_settings_getter=lambda: SimpleNamespace(swarm_allow_external_llm_for_replies=False),
     )
@@ -218,7 +249,9 @@ async def test_router_waits_four_minutes_before_sending_safe_fallback(monkeypatc
         prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system+persona")),
         gemini_client=SimpleNamespace(generate_reply=AsyncMock()),
         swarm_user_ids={202, 303},
+        enabled_group_chat_ids={-100555},
         security_settings_getter=lambda: SimpleNamespace(swarm_allow_external_llm_for_replies=False),
+        monotonic_provider=lambda: 1000.0,
     )
     event = _build_event(sender_id=999)
 
@@ -246,6 +279,7 @@ async def test_router_replaces_unsafe_model_output_with_fallback():
         prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system+persona")),
         gemini_client=gemini_client,
         swarm_user_ids={202, 303},
+        enabled_group_chat_ids={-100555},
         manager=SimpleNamespace(human_slot=lambda _bot_id: _AsyncNullContext()),
     )
 
@@ -274,6 +308,7 @@ async def test_router_rate_limits_same_sender_for_same_bot(monkeypatch):
         prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system+persona")),
         gemini_client=gemini_client,
         swarm_user_ids={202, 303},
+        enabled_group_chat_ids={-100555},
         manager=SimpleNamespace(human_slot=lambda _bot_id: _AsyncNullContext()),
         security_settings_getter=lambda: SimpleNamespace(
             swarm_allow_external_llm_for_replies=True,
@@ -291,6 +326,115 @@ async def test_router_rate_limits_same_sender_for_same_bot(monkeypatch):
     assert second_handled is False
     gemini_client.generate_reply.assert_awaited_once()
     second_event.reply.assert_not_awaited()
+
+
+def test_reply_rate_limiter_removes_expired_keys(monkeypatch):
+    """Проверяет удаление неактивных sender buckets при периодической очистке."""
+    fake_time = {"value": 1000.0}
+    monkeypatch.setattr("userbot.reply_router.time.monotonic", lambda: fake_time["value"])
+    limiter = _ReplyRateLimiter()
+
+    assert limiter.allow(chat_id=1, sender_id=10, bot_id="anna", limit=1, window_seconds=60)
+    assert (1, 10, "anna") in limiter._events
+
+    fake_time["value"] = 1061.0
+    assert limiter.allow(chat_id=1, sender_id=20, bot_id="anna", limit=1, window_seconds=60)
+
+    assert (1, 10, "anna") not in limiter._events
+    assert (1, 20, "anna") in limiter._events
+
+
+@pytest.mark.asyncio
+async def test_router_rejects_reply_when_pending_capacity_is_exhausted(monkeypatch):
+    """Проверяет bounded pending очередь до history/Gemini второго reply."""
+    sleep_started = asyncio.Event()
+    release_sleep = asyncio.Event()
+
+    async def controlled_sleep(_delay):
+        sleep_started.set()
+        await release_sleep.wait()
+
+    monkeypatch.setattr(reply_router, "asyncio", SimpleNamespace(sleep=controlled_sleep), raising=False)
+    history = SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock())
+    gemini_client = SimpleNamespace(generate_reply=AsyncMock(return_value="Ответ"))
+    router = AddressedReplyRouter(
+        bot_profile=SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+        history=history,
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system")),
+        gemini_client=gemini_client,
+        swarm_user_ids=set(),
+        enabled_group_chat_ids={-100555},
+        security_settings_getter=lambda: SimpleNamespace(
+            swarm_addressed_reply_rate_limit_count=3,
+            swarm_addressed_reply_rate_limit_window_seconds=60,
+            swarm_addressed_reply_max_pending_per_bot=1,
+        ),
+        monotonic_provider=lambda: 1000.0,
+    )
+
+    first_task = asyncio.create_task(router.handle_event(_build_event(sender_id=1)))
+    await sleep_started.wait()
+    second_event = _build_event(sender_id=2)
+
+    assert await router.handle_event(second_event) is False
+    second_event.reply.assert_not_awaited()
+    assert gemini_client.generate_reply.await_count == 1
+
+    release_sleep.set()
+    assert await first_task is True
+
+
+@pytest.mark.asyncio
+async def test_router_releases_pending_capacity_after_failure():
+    """Проверяет освобождение pending slot при ошибке обработки."""
+    gemini_client = SimpleNamespace(
+        generate_reply=AsyncMock(side_effect=[RuntimeError("failed"), "Ответ"]),
+    )
+    router = AddressedReplyRouter(
+        bot_profile=SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+        history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system")),
+        gemini_client=gemini_client,
+        swarm_user_ids=set(),
+        enabled_group_chat_ids={-100555},
+        security_settings_getter=lambda: SimpleNamespace(
+            swarm_addressed_reply_rate_limit_count=3,
+            swarm_addressed_reply_rate_limit_window_seconds=60,
+            swarm_addressed_reply_max_pending_per_bot=1,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="failed"):
+        await router.handle_event(_build_event(sender_id=1))
+
+    assert await router.handle_event(_build_event(sender_id=2)) is True
+
+
+@pytest.mark.asyncio
+async def test_human_slot_wait_reduces_remaining_reply_deadline(monkeypatch):
+    """Проверяет, что ожидание slot не запускает новый 240-секундный интервал."""
+    sleep = AsyncMock()
+    monkeypatch.setattr(reply_router, "asyncio", SimpleNamespace(sleep=sleep), raising=False)
+    fake_time = {"value": 1000.0}
+
+    class DelayedHumanSlot(_AsyncNullContext):
+        async def __aenter__(self):
+            fake_time["value"] = 1100.0
+
+    router = AddressedReplyRouter(
+        bot_profile=SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+        history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system")),
+        gemini_client=SimpleNamespace(generate_reply=AsyncMock(return_value="Ответ")),
+        swarm_user_ids=set(),
+        enabled_group_chat_ids={-100555},
+        manager=SimpleNamespace(human_slot=lambda _bot_id: DelayedHumanSlot()),
+        monotonic_provider=lambda: fake_time["value"],
+    )
+
+    assert await router.handle_event(_build_event(sender_id=1)) is True
+
+    sleep.assert_awaited_once_with(140.0)
 
 
 class _AsyncNullContext:

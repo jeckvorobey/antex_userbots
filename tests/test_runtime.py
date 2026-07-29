@@ -30,6 +30,23 @@ class FakeTelegramClient:
         self.is_connected = lambda: True
 
 
+def test_extract_event_chat_id_uses_telethon_marked_channel_id():
+    """Проверяет совпадение allowlist id с форматом Telegram event.chat_id."""
+    from telethon.tl.types import Channel, ChatPhotoEmpty
+
+    import run
+
+    channel = Channel(
+        id=123456,
+        title="Group",
+        photo=ChatPhotoEmpty(),
+        date=None,
+        megagroup=True,
+    )
+
+    assert run._extract_event_chat_id(channel, None) == -(10**12 + 123456)
+
+
 @pytest.mark.asyncio
 async def test_userbot_client_start_and_stop(monkeypatch):
     """Проверяет, что обёртка делегирует запуск и остановку Telethon-клиенту."""
@@ -214,13 +231,20 @@ async def test_run_swarm_mode_starts_manager_registers_scheduler_and_supervises(
     monkeypatch.setattr(run, "SwarmManager", lambda **kwargs: manager)
     monkeypatch.setattr(run, "_register_swarm_handlers", AsyncMock())
     monkeypatch.setattr(run, "_log_resolved_group", AsyncMock())
-    monkeypatch.setattr(run, "_resolve_group_target", AsyncMock(return_value="@group"))
+    resolved_group = SimpleNamespace(id=123456, username="group")
+    monkeypatch.setattr(run, "_resolve_group_target", AsyncMock(return_value=resolved_group))
+    monkeypatch.setattr(run, "_extract_event_chat_id", lambda _target, _fallback: -100123456)
     monkeypatch.setattr(run, "SwarmOrchestrator", lambda **kwargs: SimpleNamespace(run_once=AsyncMock()))
 
     await run._run_swarm_mode(settings, runtime, scheduler)
 
     manager.start.assert_awaited_once()
-    run._register_swarm_handlers.assert_awaited_once()
+    run._register_swarm_handlers.assert_awaited_once_with(
+        manager,
+        runtime,
+        run._register_swarm_handlers.await_args.args[2],
+        {-100123456},
+    )
     scheduler.add_job.assert_called_once()
     manager.stop.assert_awaited_once()
 
@@ -331,6 +355,43 @@ def test_group_orchestrator_cache_rebuilds_on_signature_change_and_prunes():
     run._prune_orchestrator_cache(cache, {"tbilisi"})
 
     assert set(cache) == {"tbilisi"}
+
+
+def test_rotate_groups_for_tick_advances_start_without_parallelism():
+    """Проверяет циклическую смену первой группы при сохранении последовательности."""
+    import run
+
+    groups = [
+        SimpleNamespace(id="batumi"),
+        SimpleNamespace(id="tbilisi"),
+        SimpleNamespace(id="kutaisi"),
+    ]
+
+    first, next_index = run._rotate_groups_for_tick(groups, 0)
+    second, next_index = run._rotate_groups_for_tick(groups, next_index)
+    third, next_index = run._rotate_groups_for_tick(groups, next_index)
+
+    assert [[group.id for group in tick] for tick in (first, second, third)] == [
+        ["batumi", "tbilisi", "kutaisi"],
+        ["tbilisi", "kutaisi", "batumi"],
+        ["kutaisi", "batumi", "tbilisi"],
+    ]
+    assert next_index == 0
+
+
+def test_rotate_groups_for_tick_normalizes_index_after_reload():
+    """Проверяет нормализацию позиции после уменьшения списка групп."""
+    import run
+
+    groups = [SimpleNamespace(id="batumi"), SimpleNamespace(id="tbilisi")]
+
+    ordered, next_index = run._rotate_groups_for_tick(groups, 5)
+    empty, empty_next_index = run._rotate_groups_for_tick([], next_index)
+
+    assert [group.id for group in ordered] == ["tbilisi", "batumi"]
+    assert next_index == 0
+    assert empty == []
+    assert empty_next_index == 0
 
 
 @pytest.mark.asyncio

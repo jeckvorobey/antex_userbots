@@ -7,11 +7,19 @@ Define how enabled Telegram userbot accounts are started, supervised, registered
 ## Requirements
 
 ### Requirement: Runtime context initialization
-The system SHALL initialize shared runtime dependencies before starting swarm clients.
+The system SHALL initialize one shared SQLite database connection and other shared runtime dependencies before starting swarm clients, and SHALL close the SQLite connection exactly once during shutdown.
 
 #### Scenario: Runtime dependencies are created
 - **WHEN** the application starts
-- **THEN** message history and exchange store SQLite tables are initialized, prompt loading is configured, Gemini client is configured, topics are loaded, and prompt composer is created
+- **THEN** one SQLite database connection is opened and passed to message history and exchange storage, both tables are initialized, prompt loading is configured, Gemini client is configured, topics are loaded, and prompt composer is created
+
+#### Scenario: Runtime persistence is closed once
+- **WHEN** the runtime context shuts down
+- **THEN** the shared SQLite database closes its connection once and the message history and exchange store do not close it independently
+
+#### Scenario: Partial initialization cleans up persistence
+- **WHEN** runtime context construction fails after opening SQLite
+- **THEN** the shared SQLite connection is closed before the initialization error is propagated
 
 ### Requirement: Enabled bot startup
 The system SHALL start only enabled swarm bot profiles and collect their Telegram user ids.
@@ -125,6 +133,21 @@ The system SHALL reuse per-group scheduled orchestrators across scheduler ticks 
 #### Scenario: Disabled group cache is pruned
 - **WHEN** a reload removes or disables a group
 - **THEN** the scheduler cache removes that group's orchestrator and stops ticking it
+
+### Requirement: Fair sequential group ticks
+The system SHALL rotate the first processed group across scheduler ticks while keeping group execution sequential.
+
+#### Scenario: Consecutive ticks rotate the starting group
+- **WHEN** multiple enabled groups remain configured across consecutive scheduler ticks
+- **THEN** each tick starts with the next group in cyclic configuration order
+
+#### Scenario: Group execution remains sequential
+- **WHEN** one scheduler tick processes multiple groups
+- **THEN** the next group does not start `run_once` until the previous group finishes
+
+#### Scenario: Reloaded groups reset safely
+- **WHEN** settings reload changes the enabled group list
+- **THEN** the next start index is normalized to the new list length without skipping or indexing outside the list
 
 ### Requirement: Client supervision
 The system SHALL keep active bot clients supervised and reconnect after unexpected disconnects or client errors.

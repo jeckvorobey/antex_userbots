@@ -138,12 +138,12 @@ The system SHALL validate active UTC windows and minute ranges before runtime us
 - **THEN** settings validation fails
 
 ### Requirement: Runtime security settings
-The system SHALL support a dedicated `swarm.security` configuration section for abuse throttling, LLM gating, output safety, and history retention.
+The system SHALL support a dedicated `swarm.security` configuration section for abuse throttling, pending reply capacity, LLM gating, output safety, and history retention.
 
 #### Scenario: Security defaults are applied
 - **WHEN** the TOML omits the `swarm.security` section
-- **THEN** settings expose built-in defaults for reply throttling, LLM enablement, output safety, and retention cleanup
+- **THEN** settings expose safe code defaults including a positive per-bot pending reply limit
 
 #### Scenario: Security overrides are applied
-- **WHEN** the TOML provides `swarm.security` override fields
+- **WHEN** the TOML provides `swarm.security` override fields including `addressed_reply_max_pending_per_bot`
 - **THEN** settings expose those overrides as effective runtime security values

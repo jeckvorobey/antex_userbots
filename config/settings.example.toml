@@ -48,6 +48,10 @@ tick_seconds = 30
 silence_timeout_minutes = 60
 skip_if_recent_human_activity = true
 
+[swarm.security]
+# Максимум принятых, но ещё не завершённых human reply на одного бота.
+addressed_reply_max_pending_per_bot = 3
+
 [[swarm.bots]]
 id = "dmitry"
 session_env = "SESSION_STRING_DMITRY"

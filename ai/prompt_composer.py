@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 
 from ai.gemini import PromptLoader
+from ai.text_file_cache import AsyncTextFileCache
 
 
 logger = logging.getLogger(__name__)
@@ -14,9 +15,15 @@ logger = logging.getLogger(__name__)
 class PromptComposer:
     """Собирает итоговые промты из базового шаблона, persona и контекста обмена."""
 
-    def __init__(self, prompt_loader: PromptLoader, bot_profiles_dir: str) -> None:
+    def __init__(
+        self,
+        prompt_loader: PromptLoader,
+        bot_profiles_dir: str,
+        file_cache: AsyncTextFileCache | None = None,
+    ) -> None:
         self.prompt_loader = prompt_loader
         self.bot_profiles_dir = Path(bot_profiles_dir)
+        self.file_cache = file_cache or getattr(prompt_loader, "file_cache", None) or AsyncTextFileCache()
 
     async def compose(
         self,
@@ -29,7 +36,11 @@ class PromptComposer:
     ) -> str:
         """Возвращает итоговый промт для конкретного бота и действия."""
         base_prompt = await self.prompt_loader.load(prompt_name)
-        resolved_persona = persona_text if persona_text is not None else self._load_persona(bot_id=bot_id, persona_file=persona_file)
+        resolved_persona = (
+            persona_text
+            if persona_text is not None
+            else await self._load_persona(bot_id=bot_id, persona_file=persona_file)
+        )
 
         parts = [base_prompt.strip()]
         if resolved_persona and resolved_persona.strip():
@@ -47,7 +58,7 @@ class PromptComposer:
         )
         return composed_prompt
 
-    def _load_persona(self, *, bot_id: str | None, persona_file: str | None) -> str:
+    async def _load_persona(self, *, bot_id: str | None, persona_file: str | None) -> str:
         """Загружает persona-файл конкретного бота строго по persona_file."""
         if persona_file is None:
             if bot_id is None:
@@ -56,10 +67,11 @@ class PromptComposer:
         else:
             persona_path = self.bot_profiles_dir / self._validate_persona_file(persona_file)
         logger.info("Загрузка persona-файла: bot_id=%s path=%s", bot_id, persona_path)
-        if not persona_path.exists():
+        try:
+            return await self.file_cache.read(persona_path)
+        except FileNotFoundError:
             logger.warning("Persona-файл не найден: %s", persona_path)
             return ""
-        return persona_path.read_text(encoding="utf-8")
 
     @staticmethod
     def _validate_persona_file(persona_file: str) -> str:

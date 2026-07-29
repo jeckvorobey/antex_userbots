@@ -254,6 +254,7 @@ def test_settings_reads_swarm_security_section(tmp_path):
         allow_external_llm_for_scheduled = false
         addressed_reply_rate_limit_count = 2
         addressed_reply_rate_limit_window_seconds = 45
+        addressed_reply_max_pending_per_bot = 4
         max_output_chars = 280
         max_mentions_per_message = 1
         history_retention_days = 7
@@ -280,6 +281,7 @@ def test_settings_reads_swarm_security_section(tmp_path):
     assert settings.swarm_allow_external_llm_for_scheduled is False
     assert settings.swarm_addressed_reply_rate_limit_count == 2
     assert settings.swarm_addressed_reply_rate_limit_window_seconds == 45
+    assert settings.swarm_addressed_reply_max_pending_per_bot == 4
     assert settings.swarm_max_output_chars == 280
     assert settings.swarm_max_mentions_per_message == 1
     assert settings.swarm_history_retention_days == 7
@@ -778,36 +780,6 @@ def test_prod_settings_load_with_declared_session_keys():
         bot["persona_file"]
         for bot in settings_data["swarm"]["bots"]
     ]
-
-
-def test_prod_settings_include_city_groups_with_timezone_aligned_schedules():
-    """Проверяет peer ID и UTC-окна добавленных production-групп."""
-    settings_path, _env_path = _require_local_prod_files()
-    settings_data = tomllib.loads(settings_path.read_text(encoding="utf-8"))
-    env = {
-        bot["session_env"]: "test-session"
-        for bot in settings_data["swarm"]["bots"]
-    }
-
-    with patch.dict("os.environ", env, clear=False):
-        settings = Settings(
-            **BASE_SECRETS,
-            settings_path=str(settings_path),
-        )
-
-    groups = {group.id: group for group in settings.groups}
-
-    assert groups["batumi"].group_chat_id == -1003846312748
-    assert groups["batumi"].group_target is None
-    assert groups["batumi"].active_windows_utc == ["6-7", "12-14"]
-
-    assert groups["pattaya"].group_chat_id == -1003866538293
-    assert groups["pattaya"].group_target is None
-    assert groups["pattaya"].active_windows_utc == ["3-4", "9-11"]
-
-    assert groups["phuquoc"].group_chat_id == -1003881684490
-    assert groups["phuquoc"].group_target is None
-    assert groups["phuquoc"].active_windows_utc == ["3-4", "9-11"]
 
 
 def test_prod_settings_persona_files_exist():

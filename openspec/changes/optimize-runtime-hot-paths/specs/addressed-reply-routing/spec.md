@@ -1,9 +1,5 @@
-# Addressed Reply Routing
+## MODIFIED Requirements
 
-## Purpose
-
-Define how human replies in the target group are routed to exactly the bot being replied to.
-## Requirements
 ### Requirement: Ignore non-addressed messages
 The system SHALL ignore incoming events that are outside enabled configured groups or are not addressed replies to the current bot, and SHALL reject non-reply events before resolving the Telegram sender entity.
 
@@ -35,17 +31,6 @@ The system SHALL ignore incoming events that are outside enabled configured grou
 - **WHEN** an event is marked as reply but the replied-to message cannot be loaded
 - **THEN** the addressed reply router returns `false`
 
-### Requirement: Ignore bot-originated input
-The system SHALL ignore messages from known swarm user ids and Telegram bot senders.
-
-#### Scenario: Swarm sender is ignored
-- **WHEN** the incoming sender id is in `swarm_user_ids`
-- **THEN** the addressed reply router returns `false`
-
-#### Scenario: Telegram bot sender is ignored
-- **WHEN** the incoming sender resolves to a Telegram bot account
-- **THEN** the addressed reply router returns `false`
-
 ### Requirement: Answer addressed human reply
 The system SHALL answer a human reply only when the reply targets the current bot inside an enabled configured group, and SHALL make the answer eligible for publication exactly four minutes after the event is accepted.
 
@@ -60,20 +45,6 @@ The system SHALL answer a human reply only when the reply targets the current bo
 #### Scenario: Local fallback uses the same deadline
 - **WHEN** external reply LLM usage is disabled or generated output is unsafe
 - **THEN** the router publishes the safe local fallback no earlier than the accepted event deadline
-
-### Requirement: Persist addressed reply history
-The system SHALL persist both sides of an addressed human reply interaction under the event chat id.
-
-#### Scenario: User and assistant messages are saved
-- **WHEN** an addressed reply is processed successfully
-- **THEN** the human message and generated assistant response are saved with `message_origin = "human_reply"`, the current `bot_id`, chat id, and reply target metadata
-
-### Requirement: Human slot coordination
-The system SHALL process addressed human replies inside the swarm manager human slot when a manager is available.
-
-#### Scenario: Manager slot wraps processing
-- **WHEN** the router is constructed with a manager
-- **THEN** addressed reply processing occurs inside `manager.human_slot(bot_id)`
 
 ### Requirement: Addressed reply abuse throttling
 The system SHALL rate-limit addressed human replies before any external LLM call, bound pending replies per bot, and remove expired in-memory rate-limit state.
@@ -97,17 +68,3 @@ The system SHALL rate-limit addressed human replies before any external LLM call
 #### Scenario: Expired sender state is removed
 - **WHEN** all timestamps for a rate-limit key are older than the active window during periodic cleanup
 - **THEN** both the timestamps and their chat/sender/bot key are removed from memory
-
-### Requirement: Addressed reply LLM gate
-The system SHALL support disabling external LLM usage for addressed human replies through runtime configuration.
-
-#### Scenario: Reply LLM is disabled
-- **WHEN** reply LLM usage is disabled in runtime security settings
-- **THEN** the router sends a safe local fallback response and skips the Gemini request
-
-### Requirement: Addressed reply output safety
-The system SHALL validate generated reply text before publishing it to Telegram.
-
-#### Scenario: Unsafe reply output is replaced
-- **WHEN** Gemini returns reply text that violates the configured output safety rules
-- **THEN** the router sends a safe fallback response instead of the unsafe model output
