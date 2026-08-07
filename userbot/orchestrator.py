@@ -9,12 +9,21 @@ from datetime import date
 from datetime import UTC, datetime, timedelta
 from typing import Any, Callable
 
+from telethon.errors import ChannelPrivateError, ChatWriteForbiddenError, UserBannedInChannelError, UserNotParticipantError
+
 from core.runtime_models import ExchangeDecision, SwarmBotProfile
 from userbot.exchange_store import ExchangeStore, normalize_signature
 from userbot.scheduler import is_within_windows_utc, pick_random_datetime, pick_random_delay
 
 
 logger = logging.getLogger(__name__)
+
+PERMANENT_TELEGRAM_SEND_ERRORS = (
+    ChannelPrivateError,
+    ChatWriteForbiddenError,
+    UserBannedInChannelError,
+    UserNotParticipantError,
+)
 
 RECENT_BOT_COOLDOWN_LIMIT = 4
 RECENT_TOPIC_LIMIT = 10
@@ -89,6 +98,7 @@ class SwarmOrchestrator:
         allow_external_llm_for_scheduled: bool = True,
     ) -> None:
         self.bot_profiles = [profile for profile in bot_profiles if profile.enabled]
+        self.disabled_bot_ids: set[str] = set()
         self.manager = manager
         self.topic_selector = topic_selector
         self.prompt_composer = prompt_composer
@@ -268,7 +278,7 @@ class SwarmOrchestrator:
         """Возвращает кандидатов, ослабляя cooldown только если иначе пары не собрать."""
         for cooldown_size in range(min(RECENT_BOT_COOLDOWN_LIMIT, len(recent_bot_ids)), -1, -1):
             excluded_bot_ids = set(recent_bot_ids[:cooldown_size])
-            candidates = [profile for profile in self.bot_profiles if profile.id not in excluded_bot_ids]
+            candidates = [profile for profile in self._active_bot_profiles() if profile.id not in excluded_bot_ids]
             if len(candidates) >= 2:
                 if cooldown_size < min(RECENT_BOT_COOLDOWN_LIMIT, len(recent_bot_ids)):
                     logger.info(
@@ -368,35 +378,35 @@ class SwarmOrchestrator:
                 ),
             )
 
-            initiator_prompt = await self.prompt_composer.compose(
-                "start_topic",
-                bot_id=decision.initiator.id,
-                persona_file=decision.initiator.persona_file,
-                exchange_context=exchange_context,
-            )
-            if self._allow_external_llm_for_scheduled():
-                initiator_text = await self._generate_non_repeating_question(
-                    initiator_prompt=initiator_prompt,
-                    topic=decision.topic,
-                    recent_bot_questions=recent_initiator_questions,
+            initiator_text = exchange.get("question_text")
+            if not isinstance(initiator_text, str) or not initiator_text:
+                initiator_prompt = await self.prompt_composer.compose(
+                    "start_topic", bot_id=decision.initiator.id, persona_file=decision.initiator.persona_file,
+                    exchange_context=exchange_context,
                 )
-                output_safe_checker = getattr(self.gemini_client, "is_output_safe", lambda _text: True)
-                if not output_safe_checker(initiator_text):
-                    logger.warning(
-                        "orchestrator: replaced unsafe initiator text exchange_id=%s bot_id=%s",
-                        exchange["exchange_id"],
-                        decision.initiator.id,
+                if self._allow_external_llm_for_scheduled():
+                    initiator_text = await self._generate_non_repeating_question(
+                        initiator_prompt=initiator_prompt, topic=decision.topic, recent_bot_questions=recent_initiator_questions,
                     )
+                    if not getattr(self.gemini_client, "is_output_safe", lambda _text: True)(initiator_text):
+                        initiator_text = self._build_safe_start_topic(decision.topic)
+                else:
                     initiator_text = self._build_safe_start_topic(decision.topic)
-            else:
-                logger.info(
-                    "orchestrator: using local initiator fallback because scheduled LLM is disabled exchange_id=%s",
-                    exchange["exchange_id"],
-                )
-                initiator_text = self._build_safe_start_topic(decision.topic)
+                mark_generated = getattr(self.exchange_store, "mark_initiator_generated", None)
+                if callable(mark_generated):
+                    await mark_generated(
+                        str(exchange["exchange_id"]), question_text=initiator_text, question_signature=initiator_text
+                    )
             initiator_client = self.manager.get_client(decision.initiator.id)
             initiator_group_target = await self._resolve_group_target_for_client(initiator_client.client)
-            initiator_message = await initiator_client.client.send_message(initiator_group_target, initiator_text)
+            try:
+                initiator_message = await initiator_client.client.send_message(initiator_group_target, initiator_text)
+            except PERMANENT_TELEGRAM_SEND_ERRORS as exc:
+                retry_exchange = await self._handle_permanent_send_error(
+                    exchange_id=str(exchange["exchange_id"]), bot_id=decision.initiator.id,
+                    counterpart_bot_id=decision.responder.id, stage="initiator", exc=exc,
+                )
+                return await self._run_due_planned_exchange(exchange=retry_exchange, now=now) if retry_exchange else True
             responder_due_at = now + pick_random_delay(
                 self.responder_delay_minutes,
                 randint_provider=self.randint_provider,
@@ -434,7 +444,10 @@ class SwarmOrchestrator:
 
     async def _get_recent_initiator_questions(self, *, chat_id: int | None, bot_id: str) -> list[str]:
         """Возвращает последние scheduled вопросы конкретного initiator-бота в группе."""
-        history_rows = await self.history.get_session_history(
+        getter = getattr(self.history, "get_session_history", None)
+        if not callable(getter):
+            return []
+        history_rows = await getter(
             chat_id=chat_id,
             bot_id=bot_id,
             limit=RECENT_INITIATOR_HISTORY_SCAN_LIMIT,
@@ -468,45 +481,36 @@ class SwarmOrchestrator:
                 return False
 
             responder = self._get_bot_profile(responder_id)
-            responder_prompt = await self.prompt_composer.compose(
-                "reply",
-                bot_id=responder.id,
-                persona_file=responder.persona_file,
-                exchange_context=self._build_responder_exchange_context(exchange),
-            )
+            responder_text = exchange.get("responder_text")
             history_chat_id = self._history_chat_id(exchange)
-            responder_history = await self.history.get_session_history(
-                chat_id=history_chat_id,
-                bot_id=responder.id,
-            )
-            if self._allow_external_llm_for_scheduled():
-                responder_text = await self.gemini_client.generate_reply(
-                    system_prompt=responder_prompt,
-                    history=responder_history,
-                    user_message=str(exchange["question_text"]),
+            if not isinstance(responder_text, str) or not responder_text:
+                responder_prompt = await self.prompt_composer.compose(
+                    "reply", bot_id=responder.id, persona_file=responder.persona_file,
+                    exchange_context=self._build_responder_exchange_context(exchange),
                 )
-                output_safe_checker = getattr(self.gemini_client, "is_output_safe", lambda _text: True)
-                if not output_safe_checker(responder_text):
-                    logger.warning(
-                        "orchestrator: replaced unsafe responder text exchange_id=%s bot_id=%s",
-                        exchange["exchange_id"],
-                        responder.id,
+                responder_history = await self.history.get_session_history(chat_id=history_chat_id, bot_id=responder.id)
+                if self._allow_external_llm_for_scheduled():
+                    responder_text = await self.gemini_client.generate_reply(
+                        system_prompt=responder_prompt, history=responder_history, user_message=str(exchange["question_text"]),
                     )
+                    if not getattr(self.gemini_client, "is_output_safe", lambda _text: True)(responder_text):
+                        responder_text = SAFE_SCHEDULED_REPLY_FALLBACK_TEXT
+                else:
                     responder_text = SAFE_SCHEDULED_REPLY_FALLBACK_TEXT
-            else:
-                logger.info(
-                    "orchestrator: using local responder fallback because scheduled LLM is disabled exchange_id=%s",
-                    exchange["exchange_id"],
-                )
-                responder_text = SAFE_SCHEDULED_REPLY_FALLBACK_TEXT
+                mark_generated = getattr(self.exchange_store, "mark_responder_generated", None)
+                if callable(mark_generated):
+                    await mark_generated(str(exchange["exchange_id"]), responder_text)
             responder_client = self.manager.get_client(responder.id)
             reply_to_message_id = exchange.get("initiator_message_id")
             responder_group_target = await self._resolve_group_target_for_client(responder_client.client)
-            await responder_client.client.send_message(
-                responder_group_target,
-                responder_text,
-                reply_to=reply_to_message_id,
-            )
+            try:
+                await responder_client.client.send_message(responder_group_target, responder_text, reply_to=reply_to_message_id)
+            except PERMANENT_TELEGRAM_SEND_ERRORS as exc:
+                retry_exchange = await self._handle_permanent_send_error(
+                    exchange_id=str(exchange["exchange_id"]), bot_id=responder.id,
+                    counterpart_bot_id=initiator_id, stage="responder", exc=exc,
+                )
+                return await self._run_due_responder_exchange(exchange=retry_exchange) if retry_exchange else True
             await self.history.save_message(
                 user_id=responder.telegram_user_id or 0,
                 role="assistant",
@@ -528,6 +532,48 @@ class SwarmOrchestrator:
         await self.exchange_store.mark_exchange_completed(str(exchange["exchange_id"]))
         logger.info("orchestrator: exchange completed exchange_id=%s", exchange["exchange_id"])
         return True
+
+    async def _handle_permanent_send_error(
+        self, *, exchange_id: str, bot_id: str, counterpart_bot_id: str, stage: str, exc: Exception
+    ) -> dict[str, object] | None:
+        """Отключает заблокированный аккаунт и переносит turn на доступную персону."""
+        reason = f"telegram_{stage}_send_forbidden:{type(exc).__name__}"
+        logger.warning(
+            "orchestrator: permanent Telegram send error exchange_id=%s bot_id=%s group_id=%s stage=%s action=quarantine",
+            exchange_id, bot_id, self.group_id, stage,
+        )
+        self.disabled_bot_ids.add(bot_id)
+        quarantine_bot = getattr(self.exchange_store, "quarantine_bot", None)
+        if callable(quarantine_bot):
+            group_key = str(self.group_chat_id if self.group_chat_id is not None else self.group_target)
+            await quarantine_bot(group_key=group_key, bot_id=bot_id, reason=reason)
+        manager_disable = getattr(self.manager, "disable_bot", None)
+        if callable(manager_disable):
+            await manager_disable(bot_id, reason=reason)
+        replacement = self._pick_replacement_bot(failed_bot_id=bot_id, counterpart_bot_id=counterpart_bot_id)
+        reassign = getattr(self.exchange_store, "reassign_after_permanent_send_error", None)
+        get_exchange = getattr(self.exchange_store, "get_exchange", None)
+        if replacement is not None and callable(reassign) and callable(get_exchange):
+            await reassign(exchange_id, stage=stage, replacement_bot_id=replacement.id, counterpart_bot_id=counterpart_bot_id)
+            return await get_exchange(exchange_id)
+        await self.exchange_store.mark_exchange_skipped(exchange_id, reason)
+        return None
+
+    def _active_bot_profiles(self) -> list[SwarmBotProfile]:
+        """Возвращает доступные для scheduled exchange аккаунты."""
+        active_ids = getattr(self.manager, "active_bot_ids", None)
+        return [
+            profile for profile in self.bot_profiles
+            if profile.id not in self.disabled_bot_ids and (active_ids is None or profile.id in active_ids)
+        ]
+
+    def _pick_replacement_bot(self, *, failed_bot_id: str, counterpart_bot_id: str) -> SwarmBotProfile | None:
+        """Выбирает третью активную персону для неотправленного turn."""
+        candidates = [
+            profile for profile in self._active_bot_profiles()
+            if profile.id not in {failed_bot_id, counterpart_bot_id}
+        ]
+        return random.choice(candidates) if candidates else None
 
     async def _resolve_group_target_for_client(self, telegram_client: object) -> object:
         """Резолвит entity группы отдельно для каждого Telethon-клиента."""

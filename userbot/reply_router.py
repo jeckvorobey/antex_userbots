@@ -9,6 +9,8 @@ from collections.abc import Callable
 import logging
 from typing import Any
 
+from telethon.errors import ChannelPrivateError, ChatWriteForbiddenError, UserBannedInChannelError, UserNotParticipantError
+
 from ai.gemini import GeminiClient
 from ai.history import MessageHistory
 from ai.prompt_composer import PromptComposer
@@ -19,6 +21,12 @@ from userbot.swarm_manager import SwarmManager
 logger = logging.getLogger(__name__)
 SAFE_REPLY_FALLBACK_TEXT = "Не могу безопасно ответить на это прямо сейчас."
 ADDRESSED_REPLY_DELAY_SECONDS = 4 * 60
+PERMANENT_TELEGRAM_SEND_ERRORS = (
+    ChannelPrivateError,
+    ChatWriteForbiddenError,
+    UserBannedInChannelError,
+    UserNotParticipantError,
+)
 
 
 class _ReplyRateLimiter:
@@ -85,6 +93,9 @@ class AddressedReplyRouter:
 
     async def handle_event(self, event: Any) -> bool:
         """Обрабатывает входящее сообщение, если оно адресовано текущему боту."""
+        is_active = getattr(self.manager, "is_active", None)
+        if callable(is_active) and not is_active(self.bot_profile.id):
+            return False
         chat_id = getattr(event, "chat_id", None)
         if chat_id not in self.enabled_group_chat_ids:
             logger.debug("router: bot_id=%s ignore event outside enabled groups chat_id=%s", self.bot_profile.id, chat_id)
@@ -211,7 +222,18 @@ class AddressedReplyRouter:
         remaining_delay = max(0.0, reply_due_at - self.monotonic_provider())
         if remaining_delay > 0:
             await asyncio.sleep(remaining_delay)
-        await event.reply(response_text)
+        try:
+            await event.reply(response_text)
+        except PERMANENT_TELEGRAM_SEND_ERRORS as exc:
+            manager_disable = getattr(self.manager, "disable_bot", None)
+            if callable(manager_disable):
+                await manager_disable(
+                    self.bot_profile.id,
+                    reason=f"telegram_human_reply_send_forbidden:{type(exc).__name__}",
+                )
+                logger.warning("router: disabled bot after permanent Telegram send error bot_id=%s", self.bot_profile.id)
+                return False
+            raise
         await self.history.save_message(
             user_id=sender_id,
             role="assistant",
