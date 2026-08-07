@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from core.runtime_models import SwarmBotProfile
+from userbot.client import AccountMessagingUnavailableError
 from userbot.swarm_manager import SwarmManager
 
 
@@ -62,8 +63,49 @@ async def test_swarm_manager_disables_bot_after_permanent_send_error():
 
     assert manager.is_active("anna") is False
     assert manager.runtime_states["anna"].status == "disabled"
-    assert manager.swarm_user_ids == set()
+    assert manager.swarm_user_ids == {101}
     fake_client.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_swarm_manager_disables_frozen_bot_when_global_messaging_check_fails():
+    """Глобально недоступный аккаунт останавливается и требует ручной проверки."""
+    fake_client = SimpleNamespace(
+        start=AsyncMock(),
+        stop=AsyncMock(),
+        get_current_user=AsyncMock(return_value=SimpleNamespace(id=101)),
+        run_until_disconnected=AsyncMock(),
+    )
+
+    async def startup_hook(_profile, _client):
+        raise AccountMessagingUnavailableError("telegram_startup_global_messaging_unavailable:UserDeactivatedBanError")
+
+    quarantine_bot = AsyncMock()
+    manager = SwarmManager(
+        bot_profiles=[SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md")],
+        client_factory=lambda _profile: fake_client,
+        startup_hook=startup_hook,
+        startup_quarantine_bot=quarantine_bot,
+    )
+
+    await manager.start()
+
+    assert manager.active_bot_ids == []
+    assert manager.runtime_states["anna"].status == "disabled"
+    assert manager.runtime_states["anna"].last_error_text == "telegram_startup_global_messaging_unavailable:UserDeactivatedBanError"
+    fake_client.stop.assert_awaited_once()
+    quarantine_bot.assert_awaited_once_with(
+        "anna", "telegram_startup_global_messaging_unavailable:UserDeactivatedBanError"
+    )
+
+
+@pytest.mark.asyncio
+async def test_swarm_manager_rejects_scheduled_slot_for_unavailable_bot():
+    """Недоступный bot_id не должен приводить к KeyError при попытке взять scheduled slot."""
+    manager = SwarmManager(bot_profiles=[], client_factory=lambda _profile: None)
+
+    async with manager.scheduled_slot("missing") as acquired:
+        assert acquired is False
 
 
 @pytest.mark.asyncio

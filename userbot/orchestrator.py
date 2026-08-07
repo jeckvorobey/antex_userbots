@@ -165,6 +165,10 @@ class SwarmOrchestrator:
             )
             return False
 
+        if len(self._active_bot_profiles()) < 2:
+            logger.warning("orchestrator: skip new exchange because active bot pool is smaller than two")
+            return False
+
         decision = self._normalize_exchange_decision(await self._build_exchange_decision_for_window(now))
         logger.info(
             "orchestrator: selected pair initiator=%s responder=%s topic_key=%s kind=%s scenario=%s",
@@ -334,6 +338,18 @@ class SwarmOrchestrator:
 
         initiator_id = str(exchange["initiator_bot_id"])
         responder_id = str(exchange["responder_bot_id"])
+        for stage, bot_id, counterpart_bot_id in (
+            ("initiator", initiator_id, responder_id),
+            ("responder", responder_id, initiator_id),
+        ):
+            if not self._is_bot_available(bot_id):
+                retry_exchange = await self._replace_unavailable_exchange_participant(
+                    exchange=exchange,
+                    stage=stage,
+                    bot_id=bot_id,
+                    counterpart_bot_id=counterpart_bot_id,
+                )
+                return await self._run_due_planned_exchange(exchange=retry_exchange, now=now) if retry_exchange else True
         decision = await self._build_exchange_decision_from_record(
             exchange_id=str(exchange["exchange_id"]),
             initiator_id=initiator_id,
@@ -475,6 +491,14 @@ class SwarmOrchestrator:
 
         responder_id = str(exchange["responder_bot_id"])
         initiator_id = str(exchange["initiator_bot_id"])
+        if not self._is_bot_available(responder_id):
+            retry_exchange = await self._replace_unavailable_exchange_participant(
+                exchange=exchange,
+                stage="responder",
+                bot_id=responder_id,
+                counterpart_bot_id=initiator_id,
+            )
+            return await self._run_due_responder_exchange(exchange=retry_exchange) if retry_exchange else True
         async with self.manager.scheduled_slot(responder_id) as responder_acquired:
             if not responder_acquired:
                 logger.info("orchestrator: responder busy, due reply will retry exchange_id=%s", exchange["exchange_id"])
@@ -559,13 +583,65 @@ class SwarmOrchestrator:
         await self.exchange_store.mark_exchange_skipped(exchange_id, reason)
         return None
 
+    async def _replace_unavailable_exchange_participant(
+        self,
+        *,
+        exchange: dict[str, object],
+        stage: str,
+        bot_id: str,
+        counterpart_bot_id: str,
+    ) -> dict[str, object] | None:
+        """Заменяет устаревшего участника exchange без вызова LLM и падения scheduler."""
+        exchange_id = str(exchange["exchange_id"])
+        reason = f"scheduled_{stage}_bot_unavailable"
+        logger.warning(
+            "orchestrator: unavailable persisted participant exchange_id=%s bot_id=%s group_id=%s stage=%s action=reassign",
+            exchange_id,
+            bot_id,
+            self.group_id,
+            stage,
+        )
+        replacement = self._pick_replacement_bot(failed_bot_id=bot_id, counterpart_bot_id=counterpart_bot_id)
+        reassign = getattr(self.exchange_store, "reassign_after_permanent_send_error", None)
+        get_exchange = getattr(self.exchange_store, "get_exchange", None)
+        if replacement is not None and callable(reassign) and callable(get_exchange):
+            await reassign(
+                exchange_id,
+                stage=stage,
+                replacement_bot_id=replacement.id,
+                counterpart_bot_id=counterpart_bot_id,
+            )
+            return await get_exchange(exchange_id)
+        await self.exchange_store.mark_exchange_skipped(exchange_id, reason)
+        logger.warning(
+            "orchestrator: skipped exchange without replacement exchange_id=%s bot_id=%s stage=%s",
+            exchange_id,
+            bot_id,
+            stage,
+        )
+        return None
+
     def _active_bot_profiles(self) -> list[SwarmBotProfile]:
         """Возвращает доступные для scheduled exchange аккаунты."""
         active_ids = getattr(self.manager, "active_bot_ids", None)
         return [
             profile for profile in self.bot_profiles
-            if profile.id not in self.disabled_bot_ids and (active_ids is None or profile.id in active_ids)
+            if profile.enabled and profile.id not in self.disabled_bot_ids and (active_ids is None or profile.id in active_ids)
         ]
+
+    def _is_bot_available(self, bot_id: str) -> bool:
+        """Проверяет, можно ли использовать persisted bot_id в scheduled exchange."""
+        try:
+            profile = self._get_bot_profile(bot_id)
+        except KeyError:
+            return False
+        if not profile.enabled or bot_id in self.disabled_bot_ids:
+            return False
+        is_active = getattr(self.manager, "is_active", None)
+        if callable(is_active):
+            return bool(is_active(bot_id))
+        active_ids = getattr(self.manager, "active_bot_ids", None)
+        return active_ids is None or bot_id in active_ids
 
     def _pick_replacement_bot(self, *, failed_bot_id: str, counterpart_bot_id: str) -> SwarmBotProfile | None:
         """Выбирает третью активную персону для неотправленного turn."""

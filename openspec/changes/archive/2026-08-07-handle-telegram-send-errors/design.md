@@ -34,6 +34,10 @@ Flood-wait, transport/network failures и неизвестные исключе�
 
 Если в пуле остаётся подходящая третья персона, неотправленный turn переназначается ей сразу. Для responder удаляется его draft, потому что он принадлежит persona отключённого аккаунта. Для initiator удаляется question draft по той же причине. Если замены нет, exchange переводится в `skipped`.
 
+Persisted exchange может ссылаться на аккаунт, который был отключён между сохранением записи и следующим scheduler tick. До попытки занять slot и до вызова LLM orchestrator проверяет доступность назначенного участника. Недоступный участник заменяется тем же механизмом, что и permanent send error; если подходящей замены нет, exchange становится `skipped`. `SwarmManager` также возвращает `acquired = false` для неизвестного или неактивного bot_id вместо `KeyError`.
+
+Permanent error в addressed-reply пути использует то же durable quarantine-хранилище до runtime disable. Каждая запись quarantine сопровождается structured error log с `bot_id`, причиной и `auto_reuse=false`. Telegram user id отключённого аккаунта остаётся в `swarm_user_ids`: оставшиеся handlers продолжают игнорировать поздние или внешние сообщения этого userbot как bot-to-bot traffic. Когда в активном пуле остаётся меньше двух аккаунтов, orchestrator не создаёт новый exchange и завершает tick без исключения.
+
 ## Rollback
 
 Изменение откатывается удалением обработки permanent errors и использования persisted drafts. Новая nullable колонка `responder_text` совместима со старым runtime и может остаться в SQLite без влияния на него.

@@ -94,13 +94,19 @@ class ExchangeStore:
         logger.info("Таблица scheduled_exchanges готова")
 
     async def quarantine_bot(self, *, group_key: str, bot_id: str, reason: str) -> None:
-        """Сохраняет запрет на использование аккаунта в целевой группе."""
+        """Сохраняет запрет на автоматическое использование аккаунта."""
         await self.database.execute(
             "quarantine_bot",
             """INSERT INTO quarantined_swarm_bots (group_key, bot_id, reason)
                VALUES (?, ?, ?)
                ON CONFLICT(group_key, bot_id) DO UPDATE SET reason = excluded.reason, quarantined_at = CURRENT_TIMESTAMP""",
             (group_key, bot_id, reason),
+        )
+        logger.error(
+            "swarm quarantine persisted: bot_id=%s group_key=%s reason=%s auto_reuse=false",
+            bot_id,
+            group_key,
+            reason,
         )
 
     async def get_quarantined_bot_ids(self) -> set[str]:

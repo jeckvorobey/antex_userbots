@@ -29,7 +29,7 @@ run.py
        -> ai.prompt_composer.PromptComposer
        -> userbot.exchange_store.ExchangeStore
   -> userbot.swarm_manager.SwarmManager
-       -> userbot.client.UserBotClient per enabled bot
+       -> userbot.client.UserBotClient per enabled bot (global messaging health-check before active-pool registration)
        -> userbot.reply_router.AddressedReplyRouter per active bot
   -> SettingsReloadWatcher
   -> userbot.orchestrator.SwarmOrchestrator per enabled group scheduled by APScheduler tick
@@ -78,6 +78,8 @@ Non-secret settings are loaded from TOML through strict pydantic models. Support
 ## Data Storage
 
 SQLite is the only persistent storage. `storage.sqlite_database.SQLiteDatabase` owns one `aiosqlite.Connection` and one asynchronous transaction lock for the entire runtime, configures WAL and busy timeout, retries only temporary lock errors, and is closed once by `RuntimeContext`. Reads and writes use the same lock so another coroutine cannot observe an unfinished write transaction on the shared connection. `MessageHistory` manages the `messages` table using Telegram `chat_id` as group scope. `ExchangeStore` manages the `scheduled_exchanges` table and persisted group-scoped anti-repeat state for scheduled exchanges, including `group_id`, `group_chat_id`, and `last_activity_at` as the indexed sort key for recent/latest exchange lookups. Both stores receive the same database dependency and never open or close their own connection.
+
+`ExchangeStore` also stores quarantine records for accounts that Telegram has confirmed as globally unavailable for messaging. Startup reads these records before creating clients, so a quarantined account cannot be automatically reused until it is manually reviewed and its quarantine record is removed.
 
 Important-service exchanges are stored in the same `scheduled_exchanges` lifecycle as ordinary exchanges with `exchange_kind = important_service` and an `important_scenario` key. Their cadence is evaluated per group by UTC calendar days: after a group receives an important-service exchange on day N, the next one for that group is eligible no earlier than day N+3. The scenario cycle is `exchange_rub` -> `booking_airbnb` -> `exchange_usdt` -> `booking_booking`, and important-service prompt contexts use `important_service_question` / `important_service_answer` markers so only important answers are required to mention `@tt_exchenge_bot`.
 
