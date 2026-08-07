@@ -16,8 +16,8 @@ Swarm runtime MUST не завершать scheduler tick исключением
 #### Scenario: Runtime перезапущен после permanent ошибки
 
 - **WHEN** аккаунт ранее получил permanent Telegram send error в целевой группе
-- **THEN** runtime MUST не запускать этот аккаунт для той же группы после рестарта
-- **AND** аккаунт MUST оставаться доступным для других групп только после отдельной проверки их состояния
+- **THEN** runtime MUST не запускать этот аккаунт после рестарта
+- **AND** аккаунт MUST оставаться исключённым из всех automated swarm flows до ручной проверки и снятия quarantine
 
 #### Scenario: Нет персоны для замены
 
