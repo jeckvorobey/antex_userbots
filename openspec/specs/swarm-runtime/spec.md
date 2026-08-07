@@ -183,6 +183,10 @@ The system SHALL keep active bot clients supervised and reconnect after unexpect
 - **WHEN** the global messaging health-check fails during reconnect
 - **THEN** the runtime persistently quarantines and disables the account, removes it from the active pool, and does not schedule another reconnect
 
+#### Scenario: Reconnect checks account before reuse
+- **WHEN** a disconnected active bot is reconnecting
+- **THEN** it is removed from the active pool before the new client is exposed to the startup health-check and membership hook
+
 ### Requirement: Human work has priority
 The system SHALL prioritize human reply processing over scheduled tasks for the same bot.
 
@@ -230,6 +234,10 @@ Swarm runtime SHALL не завершать scheduler tick исключение�
 - **AND** MUST записать structured log с bot_id, причиной и `auto_reuse=false`
 - **AND** MUST NOT сохранить неотправленный assistant reply в history
 
+#### Scenario: Quarantine запись addressed reply не сохранилась
+- **WHEN** запись durable quarantine после permanent addressed-reply error завершается ошибкой
+- **THEN** runtime MUST всё равно отключить bot до распространения ошибки persistence
+
 #### Scenario: Активный пул уменьшился
 - **WHEN** после quarantine в active pool остаётся меньше двух ботов
 - **THEN** runtime MUST не создавать новый scheduled exchange
@@ -246,3 +254,7 @@ The system SHALL not log private Telegram invite hashes.
 #### Scenario: Invite link resolve is skipped with redacted log
 - **WHEN** group resolution receives a private invite link
 - **THEN** direct `get_entity` is skipped and logs contain a redacted marker instead of the invite hash
+
+#### Scenario: Private invite is used as quarantine key
+- **WHEN** private invite link является fallback-ключом quarantine
+- **THEN** audit-log quarantine содержит redacted marker вместо invite hash

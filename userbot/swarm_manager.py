@@ -227,6 +227,9 @@ class SwarmManager:
         await asyncio.sleep(delay)
         if self._stop_event.is_set():
             return
+        if profile.id in self.active_bot_ids:
+            self.active_bot_ids.remove(profile.id)
+            logger.info("swarm: bot_id=%s временно исключён из active pool до завершения reconnect health-check", profile.id)
         await self.clients[profile.id].stop()
         try:
             await self._start_single_bot(profile)

@@ -248,6 +248,35 @@ async def test_swarm_manager_reconnects_after_client_error():
 
 
 @pytest.mark.asyncio
+async def test_swarm_manager_excludes_bot_from_active_pool_during_reconnect_startup_hook():
+    """Новый reconnect-клиент не доступен scheduler до health-check и membership."""
+    fake_client = SimpleNamespace(
+        start=AsyncMock(),
+        stop=AsyncMock(),
+        get_current_user=AsyncMock(return_value=SimpleNamespace(id=101)),
+        run_until_disconnected=AsyncMock(),
+    )
+    hook_active_states: list[bool] = []
+    profile = SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md")
+
+    async def startup_hook(started_profile, _client):
+        hook_active_states.append(started_profile.id in manager.active_bot_ids)
+
+    manager = SwarmManager(
+        bot_profiles=[profile],
+        client_factory=lambda _profile: fake_client,
+        startup_hook=startup_hook,
+        reconnect_backoff_seconds=(0.0,),
+    )
+    await manager.start()
+
+    await manager._reconnect_bot(profile, manager.runtime_states["anna"], RuntimeError("disconnect"))
+
+    assert hook_active_states == [False, False]
+    assert manager.active_bot_ids == ["anna"]
+
+
+@pytest.mark.asyncio
 async def test_swarm_manager_skips_bot_when_startup_fails():
     """Проверяет, что бот с ошибкой startup не попадает в активный пул."""
     anna_client = SimpleNamespace(

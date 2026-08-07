@@ -234,12 +234,21 @@ class AddressedReplyRouter:
             await event.reply(response_text)
         except PERMANENT_TELEGRAM_SEND_ERRORS as exc:
             reason = f"telegram_human_reply_send_forbidden:{type(exc).__name__}"
+            quarantine_error: Exception | None = None
             if self.quarantine_bot is not None:
-                await self.quarantine_bot(
-                    group_key=str(chat_id),
-                    bot_id=self.bot_profile.id,
-                    reason=reason,
-                )
+                try:
+                    await self.quarantine_bot(
+                        group_key=str(chat_id),
+                        bot_id=self.bot_profile.id,
+                        reason=reason,
+                    )
+                except Exception as persist_exc:
+                    quarantine_error = persist_exc
+                    logger.exception(
+                        "router: не удалось сохранить quarantine после permanent Telegram send error "
+                        "bot_id=%s",
+                        self.bot_profile.id,
+                    )
             manager_disable = getattr(self.manager, "disable_bot", None)
             if callable(manager_disable):
                 await manager_disable(self.bot_profile.id, reason=reason)
@@ -249,7 +258,11 @@ class AddressedReplyRouter:
                     chat_id,
                     reason,
                 )
+                if quarantine_error is not None:
+                    raise quarantine_error
                 return False
+            if quarantine_error is not None:
+                raise quarantine_error
             raise
         await self.history.save_message(
             user_id=sender_id,

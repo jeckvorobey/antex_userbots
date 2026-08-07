@@ -222,6 +222,36 @@ async def test_router_persists_quarantine_after_permanent_send_error():
 
 
 @pytest.mark.asyncio
+async def test_router_disables_bot_when_quarantine_persistence_fails():
+    """Ошибка SQLite не оставляет permanently forbidden аккаунт в active pool."""
+    quarantine_bot = AsyncMock(side_effect=RuntimeError("sqlite unavailable"))
+    manager = SimpleNamespace(
+        is_active=lambda _bot_id: True,
+        human_slot=lambda _bot_id: _AsyncNullContext(),
+        disable_bot=AsyncMock(),
+    )
+    router = AddressedReplyRouter(
+        bot_profile=SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+        history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system")),
+        gemini_client=SimpleNamespace(generate_reply=AsyncMock(return_value="Ответ")),
+        swarm_user_ids=set(),
+        enabled_group_chat_ids={-100555},
+        manager=manager,
+        quarantine_bot=quarantine_bot,
+    )
+    event = _build_event(sender_id=999)
+    event.reply.side_effect = UserBannedInChannelError(None)
+
+    with pytest.raises(RuntimeError, match="sqlite unavailable"):
+        await router.handle_event(event)
+
+    manager.disable_bot.assert_awaited_once_with(
+        "anna", reason="telegram_human_reply_send_forbidden:UserBannedInChannelError"
+    )
+
+
+@pytest.mark.asyncio
 async def test_router_waits_four_minutes_before_sending_addressed_reply(monkeypatch):
     """Проверяет обязательную задержку перед публикацией адресного ответа."""
     sleep = AsyncMock()

@@ -15,6 +15,14 @@ from storage.sqlite_database import SQLiteDatabase
 logger = logging.getLogger(__name__)
 
 
+def _redact_quarantine_group_key(group_key: str) -> str:
+    """Скрывает private Telegram invite из audit-лога quarantine."""
+    normalized = group_key.strip().lower()
+    if "t.me/+" in normalized or "t.me/joinchat/" in normalized:
+        return "<private invite link>"
+    return group_key
+
+
 def normalize_signature(value: str) -> str:
     """Нормализует текст для дедупликации тем и вопросов."""
     normalized = re.sub(r"\s+", " ", value.strip().lower())
@@ -105,7 +113,7 @@ class ExchangeStore:
         logger.error(
             "swarm quarantine persisted: bot_id=%s group_key=%s reason=%s auto_reuse=false",
             bot_id,
-            group_key,
+            _redact_quarantine_group_key(group_key),
             reason,
         )
 
