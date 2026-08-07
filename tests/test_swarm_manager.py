@@ -62,8 +62,17 @@ async def test_swarm_manager_disables_bot_after_permanent_send_error():
 
     assert manager.is_active("anna") is False
     assert manager.runtime_states["anna"].status == "disabled"
-    assert manager.swarm_user_ids == set()
+    assert manager.swarm_user_ids == {101}
     fake_client.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_swarm_manager_rejects_scheduled_slot_for_unavailable_bot():
+    """Недоступный bot_id не должен приводить к KeyError при попытке взять scheduled slot."""
+    manager = SwarmManager(bot_profiles=[], client_factory=lambda _profile: None)
+
+    async with manager.scheduled_slot("missing") as acquired:
+        assert acquired is False
 
 
 @pytest.mark.asyncio

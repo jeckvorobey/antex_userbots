@@ -75,6 +75,7 @@ class AddressedReplyRouter:
         swarm_user_ids: set[int],
         enabled_group_chat_ids: set[int] | None = None,
         manager: SwarmManager | Any | None = None,
+        quarantine_bot: Callable[..., Any] | None = None,
         security_settings_getter: Callable[[], Any] | None = None,
         rate_limiter: _ReplyRateLimiter | None = None,
         monotonic_provider: Callable[[], float] | None = None,
@@ -86,6 +87,7 @@ class AddressedReplyRouter:
         self.swarm_user_ids = swarm_user_ids
         self.enabled_group_chat_ids = enabled_group_chat_ids if enabled_group_chat_ids is not None else set()
         self.manager = manager
+        self.quarantine_bot = quarantine_bot
         self.security_settings_getter = security_settings_getter or (lambda: None)
         self.rate_limiter = rate_limiter or _ReplyRateLimiter()
         self.monotonic_provider = monotonic_provider or time.monotonic
@@ -95,6 +97,12 @@ class AddressedReplyRouter:
         """Обрабатывает входящее сообщение, если оно адресовано текущему боту."""
         is_active = getattr(self.manager, "is_active", None)
         if callable(is_active) and not is_active(self.bot_profile.id):
+            logger.warning(
+                "router: reject event for inactive bot_id=%s event_id=%s chat_id=%s",
+                self.bot_profile.id,
+                getattr(event, "id", None),
+                getattr(event, "chat_id", None),
+            )
             return False
         chat_id = getattr(event, "chat_id", None)
         if chat_id not in self.enabled_group_chat_ids:
@@ -225,13 +233,22 @@ class AddressedReplyRouter:
         try:
             await event.reply(response_text)
         except PERMANENT_TELEGRAM_SEND_ERRORS as exc:
+            reason = f"telegram_human_reply_send_forbidden:{type(exc).__name__}"
+            if self.quarantine_bot is not None:
+                await self.quarantine_bot(
+                    group_key=str(chat_id),
+                    bot_id=self.bot_profile.id,
+                    reason=reason,
+                )
             manager_disable = getattr(self.manager, "disable_bot", None)
             if callable(manager_disable):
-                await manager_disable(
+                await manager_disable(self.bot_profile.id, reason=reason)
+                logger.error(
+                    "router: permanently disabled bot after Telegram send error bot_id=%s chat_id=%s reason=%s auto_reuse=false",
                     self.bot_profile.id,
-                    reason=f"telegram_human_reply_send_forbidden:{type(exc).__name__}",
+                    chat_id,
+                    reason,
                 )
-                logger.warning("router: disabled bot after permanent Telegram send error bot_id=%s", self.bot_profile.id)
                 return False
             raise
         await self.history.save_message(

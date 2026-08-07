@@ -635,6 +635,7 @@ async def _register_swarm_handlers(
             swarm_user_ids=manager.swarm_user_ids,
             enabled_group_chat_ids=enabled_group_chat_ids,
             manager=manager,
+            quarantine_bot=getattr(getattr(runtime, "exchange_store", None), "quarantine_bot", None),
             security_settings_getter=settings_getter,
         )
 

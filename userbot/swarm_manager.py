@@ -151,9 +151,6 @@ class SwarmManager:
         profile = self.get_profile(bot_id)
         profile.enabled = False
         self.runtime_states[bot_id].mark_disabled(reason)
-        telegram_user_id = profile.telegram_user_id
-        if isinstance(telegram_user_id, int):
-            self.swarm_user_ids.discard(telegram_user_id)
         client = self.clients.get(bot_id)
         if client is not None:
             await client.stop()
@@ -171,7 +168,12 @@ class SwarmManager:
     @asynccontextmanager
     async def scheduled_slot(self, bot_id: str) -> AsyncIterator[bool]:
         """Пытается занять scheduled slot без гонки с human reply."""
-        async with self._gates[bot_id].scheduled_slot() as acquired:
+        gate = self._gates.get(bot_id)
+        if not self.is_active(bot_id) or gate is None:
+            logger.warning("swarm: bot_id=%s не получил scheduled slot, потому что недоступен", bot_id)
+            yield False
+            return
+        async with gate.scheduled_slot() as acquired:
             if acquired:
                 logger.info("swarm: bot_id=%s занял scheduled slot", bot_id)
             else:
