@@ -30,7 +30,7 @@ Flood-wait, transport/network failures и неизвестные исключе�
 
 ### Runtime quarantine and replacement
 
-После permanent send error аккаунт выключается из текущего runtime-пула: scheduled turns и addressed-reply router его больше не используют, а supervisor не пытается переподключить остановленный клиент. Quarantine сохраняется в SQLite с ключом целевой группы и применяется до запуска клиентов после рестарта. Ограничение не записывается как глобальный Telegram ban: ошибка может быть специфична для целевой группы.
+После permanent send error аккаунт выключается из runtime-пула: scheduled turns и addressed-reply router его больше не используют, а supervisor не пытается переподключить остановленный клиент. Quarantine сохраняется в SQLite и применяется до запуска клиентов после рестарта. По текущему продуктовому требованию аккаунт исключается из всего swarm-runtime до ручной проверки и снятия quarantine.
 
 Если в пуле остаётся подходящая третья персона, неотправленный turn переназначается ей сразу. Для responder удаляется его draft, потому что он принадлежит persona отключённого аккаунта. Для initiator удаляется question draft по той же причине. Если замены нет, exchange переводится в `skipped`.
 
