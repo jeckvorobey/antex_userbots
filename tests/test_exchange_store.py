@@ -28,6 +28,16 @@ def test_normalize_signature_compacts_text():
     assert normalize_signature("  Один   и тот же   вопрос?! ") == "один и тот же вопрос"
 
 
+async def test_quarantine_log_redacts_private_invite_link(exchange_store, caplog):
+    """Лог quarantine не раскрывает hash приватного Telegram invite."""
+    private_invite = "https://t.me/+super_secret_hash"
+
+    await exchange_store.quarantine_bot(group_key=private_invite, bot_id="anna", reason="forbidden")
+
+    assert private_invite not in caplog.text
+    assert "<private invite link>" in caplog.text
+
+
 async def test_exchange_store_persists_recent_bot_ids_topics_and_signatures(exchange_store):
     """Проверяет persisted bot/topic/question state для orchestrator."""
     exchange_id = await exchange_store.create_exchange(

@@ -6,8 +6,29 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from telethon.errors import (
+    AuthKeyUnregisteredError,
+    FrozenMethodInvalidError,
+    SessionRevokedError,
+    UserDeactivatedBanError,
+    UserDeactivatedError,
+)
+
 
 logger = logging.getLogger(__name__)
+
+
+class AccountMessagingUnavailableError(RuntimeError):
+    """Telegram подтвердил, что сессия принадлежит глобально недоступному аккаунту."""
+
+
+GLOBAL_ACCOUNT_UNAVAILABLE_ERRORS = (
+    AuthKeyUnregisteredError,
+    FrozenMethodInvalidError,
+    SessionRevokedError,
+    UserDeactivatedBanError,
+    UserDeactivatedError,
+)
 
 
 class UserBotClient:
@@ -46,7 +67,11 @@ class UserBotClient:
                 proxy=_build_proxy_settings(self.proxy_url),
             )
         logger.info("Подключение Telegram-клиента запущено")
-        await self._client.start()
+        try:
+            await self._client.start()
+        except GLOBAL_ACCOUNT_UNAVAILABLE_ERRORS as exc:
+            await self.stop()
+            raise AccountMessagingUnavailableError("Telegram отклонил сессию аккаунта") from exc
         logger.info("Telegram-клиент успешно запущен")
 
     async def stop(self) -> None:
@@ -104,6 +129,22 @@ class UserBotClient:
         client = self._require_client()
         logger.info("Запрос данных текущего Telegram-пользователя")
         return await client.get_me()
+
+    async def verify_global_messaging_eligibility(self) -> None:
+        """Проверяет глобальную доступность messaging API без публикации сообщения."""
+        client = self._require_client()
+        requests = _import_telethon_messaging_requests()
+        logger.info("Проверка глобальной доступности messaging API Telegram-аккаунта")
+        try:
+            await client(
+                requests.SetTypingRequest(
+                    peer=requests.InputPeerSelf(),
+                    action=requests.SendMessageTypingAction(),
+                )
+            )
+        except GLOBAL_ACCOUNT_UNAVAILABLE_ERRORS as exc:
+            raise AccountMessagingUnavailableError("Telegram подтвердил глобальную недоступность аккаунта") from exc
+        logger.info("Глобальная проверка messaging API Telegram-аккаунта пройдена")
 
     async def join_group(self, target: str) -> Any:
         """Вступает в публичную группу или канал по username/ссылке."""
@@ -216,6 +257,25 @@ def _import_telethon_invite_requests() -> Any:
         raise RuntimeError("Пакет telethon не установлен") from exc
 
     return type("TelethonInviteRequests", (), {"ImportChatInviteRequest": ImportChatInviteRequest})
+
+
+def _import_telethon_messaging_requests() -> Any:
+    """Импортирует Telethon-типы для непубликуемой проверки messaging API."""
+    try:
+        from telethon.tl.functions.messages import SetTypingRequest
+        from telethon.tl.types import InputPeerSelf, SendMessageTypingAction
+    except ImportError as exc:
+        raise RuntimeError("Пакет telethon не установлен") from exc
+
+    return type(
+        "TelethonMessagingRequests",
+        (),
+        {
+            "SetTypingRequest": SetTypingRequest,
+            "InputPeerSelf": InputPeerSelf,
+            "SendMessageTypingAction": SendMessageTypingAction,
+        },
+    )
 
 
 def _extract_invite_hash(invite_link: str) -> str | None:

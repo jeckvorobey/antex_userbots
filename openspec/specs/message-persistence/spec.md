@@ -140,6 +140,27 @@ The system SHALL persist planned, started, and completed scheduled exchange stat
 - **WHEN** the responder stage completes or an exchange with one max turn is finished
 - **THEN** the exchange status becomes `completed` and completed timestamp is stored
 
+### Requirement: LLM draft переживает повторную попытку Telegram send
+Runtime SHALL сохранять сгенерированный текст в SQLite до вызова Telegram `send_message`.
+
+#### Scenario: Вопрос инициатора уже сгенерирован
+- **WHEN** planned exchange содержит `question_text`
+- **THEN** runtime MUST использовать этот текст для send retry
+- **AND** MUST NOT снова вызывать `start_topic`
+
+#### Scenario: Ответ responder уже сгенерирован
+- **WHEN** started exchange содержит `responder_text`
+- **THEN** runtime MUST использовать этот текст для send retry
+- **AND** MUST NOT снова вызывать Gemini `generate_reply`
+
+#### Scenario: Отправка успешна
+- **WHEN** Telegram подтверждает send
+- **THEN** runtime MUST сохранить message history и обновить статус exchange
+
+#### Scenario: Отправка неуспешна
+- **WHEN** Telegram send завершается ошибкой
+- **THEN** runtime MUST NOT сохранять соответствующее сообщение в history как отправленное
+
 ### Requirement: Exchange anti-repeat queries
 The system SHALL expose group-scoped persisted queries used by orchestrator anti-repeat behavior while bounding transferred rows by caller limits where possible.
 

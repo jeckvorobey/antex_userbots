@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from core.runtime_models import BotRuntimeState, SwarmBotProfile
-from userbot.client import UserBotClient
+from userbot.client import AccountMessagingUnavailableError, UserBotClient
 
 
 logger = logging.getLogger(__name__)
@@ -64,11 +64,13 @@ class SwarmManager:
         bot_profiles: list[SwarmBotProfile],
         client_factory: Callable[[SwarmBotProfile], UserBotClient | Any],
         startup_hook: Callable[[SwarmBotProfile, UserBotClient | Any], Any] | None = None,
+        startup_quarantine_bot: Callable[[str, str], Any] | None = None,
         reconnect_backoff_seconds: tuple[float, ...] = (1.0, 3.0, 10.0, 30.0),
     ) -> None:
         self.bot_profiles = bot_profiles
         self.client_factory = client_factory
         self.startup_hook = startup_hook
+        self.startup_quarantine_bot = startup_quarantine_bot
         self.reconnect_backoff_seconds = reconnect_backoff_seconds
         self.clients: dict[str, UserBotClient | Any] = {}
         self.runtime_states: dict[str, BotRuntimeState] = {
@@ -88,6 +90,8 @@ class SwarmManager:
                 continue
             try:
                 await self._start_single_bot(profile)
+            except AccountMessagingUnavailableError as exc:
+                await self._quarantine_globally_unavailable_bot(profile, exc)
             except Exception as exc:
                 state = self.runtime_states[profile.id]
                 state.mark_failed(str(exc))
@@ -151,9 +155,6 @@ class SwarmManager:
         profile = self.get_profile(bot_id)
         profile.enabled = False
         self.runtime_states[bot_id].mark_disabled(reason)
-        telegram_user_id = profile.telegram_user_id
-        if isinstance(telegram_user_id, int):
-            self.swarm_user_ids.discard(telegram_user_id)
         client = self.clients.get(bot_id)
         if client is not None:
             await client.stop()
@@ -171,7 +172,12 @@ class SwarmManager:
     @asynccontextmanager
     async def scheduled_slot(self, bot_id: str) -> AsyncIterator[bool]:
         """Пытается занять scheduled slot без гонки с human reply."""
-        async with self._gates[bot_id].scheduled_slot() as acquired:
+        gate = self._gates.get(bot_id)
+        if not self.is_active(bot_id) or gate is None:
+            logger.warning("swarm: bot_id=%s не получил scheduled slot, потому что недоступен", bot_id)
+            yield False
+            return
+        async with gate.scheduled_slot() as acquired:
             if acquired:
                 logger.info("swarm: bot_id=%s занял scheduled slot", bot_id)
             else:
@@ -184,6 +190,8 @@ class SwarmManager:
         """Запускает одного бота и регистрирует его runtime-state."""
         client = self.client_factory(profile)
         await client.start()
+        # Клиент регистрируется до startup-hook, чтобы quarantine мог корректно остановить его.
+        self.clients[profile.id] = client
         if self.startup_hook is not None:
             result = self.startup_hook(profile, client)
             if asyncio.iscoroutine(result):
@@ -219,8 +227,37 @@ class SwarmManager:
         await asyncio.sleep(delay)
         if self._stop_event.is_set():
             return
+        if profile.id in self.active_bot_ids:
+            self.active_bot_ids.remove(profile.id)
+            logger.info("swarm: bot_id=%s временно исключён из active pool до завершения reconnect health-check", profile.id)
         await self.clients[profile.id].stop()
-        await self._start_single_bot(profile)
+        try:
+            await self._start_single_bot(profile)
+        except AccountMessagingUnavailableError as unavailable_exc:
+            await self._quarantine_globally_unavailable_bot(profile, unavailable_exc)
+
+    async def _quarantine_globally_unavailable_bot(
+        self,
+        profile: SwarmBotProfile,
+        exc: AccountMessagingUnavailableError,
+    ) -> None:
+        """Отключает и сохраняет global quarantine без допуска к дальнейшей работе."""
+        reason = str(exc)
+        await self.disable_bot(profile.id, reason=reason)
+        if self.startup_quarantine_bot is not None:
+            try:
+                result = self.startup_quarantine_bot(profile.id, reason)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception:
+                logger.exception("swarm: не удалось сохранить global quarantine для bot_id=%s", profile.id)
+                raise
+        logger.error(
+            "swarm: bot_id=%s заморожен или глобально недоступен для messaging; "
+            "требует внимания, auto_reuse=false reason=%s",
+            profile.id,
+            reason,
+        )
 
     def _pick_reconnect_delay(self, attempt: int) -> float:
         """Возвращает backoff delay для reconnect."""

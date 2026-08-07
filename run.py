@@ -20,7 +20,7 @@ from core.config import SettingsReloadWatcher, load_settings_or_exit
 from core.logging import setup_logging
 from core.runtime_models import SwarmBotProfile
 from storage.sqlite_database import SQLiteDatabase
-from userbot.client import UserBotClient
+from userbot.client import AccountMessagingUnavailableError, UserBotClient
 from userbot.exchange_store import ExchangeStore
 from userbot.orchestrator import SwarmOrchestrator
 from userbot.reply_router import AddressedReplyRouter
@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 STARTUP_MEMBERSHIP_DELAY_SECONDS = (30, 60)
+GLOBAL_ACCOUNT_QUARANTINE_KEY = "__global_account__"
 
 
 def _pick_startup_membership_delay_seconds() -> float:
@@ -397,9 +398,20 @@ def _build_multi_group_membership_startup_hook(
     *,
     groups: list[object],
 ):
-    """Строит startup hook, который проверяет membership для всех enabled groups."""
+    """Строит startup hook с global messaging check и membership всех enabled groups."""
 
     async def startup_hook(profile: SwarmBotProfile, client_wrapper: UserBotClient) -> dict[str, object | None]:
+        try:
+            await client_wrapper.verify_global_messaging_eligibility()
+        except AccountMessagingUnavailableError as exc:
+            reason = f"telegram_startup_global_messaging_unavailable:{type(exc.__cause__).__name__}"
+            logger.error(
+                "swarm: bot_id=%s аккаунт заморожен или глобально недоступен для messaging; "
+                "требует внимания, передаётся в persistent quarantine auto_reuse=false reason=%s",
+                profile.id,
+                reason,
+            )
+            raise AccountMessagingUnavailableError(reason) from exc
         delay_seconds = _pick_startup_membership_delay_seconds()
         logger.info(
             "swarm: bot_id=%s ожидает случайную задержку перед multi-group membership check: %.1f sec",
@@ -413,13 +425,14 @@ def _build_multi_group_membership_startup_hook(
             if not getattr(group, "enabled", True):
                 continue
             group_id = getattr(group, "id")
-            resolved[group_id] = await _ensure_group_membership(
+            resolved_target = await _ensure_group_membership(
                 client_wrapper,
                 getattr(group, "group_chat_id", None),
                 getattr(group, "group_target", None),
                 profile.id,
                 dialog_index=dialog_index,
             )
+            resolved[group_id] = resolved_target
         return resolved
 
     return startup_hook
@@ -635,6 +648,7 @@ async def _register_swarm_handlers(
             swarm_user_ids=manager.swarm_user_ids,
             enabled_group_chat_ids=enabled_group_chat_ids,
             manager=manager,
+            quarantine_bot=getattr(getattr(runtime, "exchange_store", None), "quarantine_bot", None),
             security_settings_getter=settings_getter,
         )
 
@@ -655,7 +669,7 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
             profile.enabled = False
     if quarantined_bot_ids:
         logger.warning("Исключены quarantined swarm-аккаунты: bot_ids=%s", sorted(quarantined_bot_ids))
-    if len(bot_profiles) < 2:
+    if sum(profile.enabled for profile in bot_profiles) < 2:
         raise ValueError("Swarm mode requires at least two enabled bots")
     current_settings = settings
     current_groups = _enabled_groups_from_settings(current_settings)
@@ -672,6 +686,11 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
         ),
         startup_hook=_build_multi_group_membership_startup_hook(
             groups=current_groups,
+        ),
+        startup_quarantine_bot=lambda bot_id, reason: runtime.exchange_store.quarantine_bot(
+            group_key=GLOBAL_ACCOUNT_QUARANTINE_KEY,
+            bot_id=bot_id,
+            reason=reason,
         ),
     )
     await manager.start()

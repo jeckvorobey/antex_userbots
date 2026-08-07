@@ -36,11 +36,34 @@ The system SHALL start only enabled swarm bot profiles and collect their Telegra
 - **WHEN** an enabled bot fails during startup
 - **THEN** the bot runtime state is marked as error and it is not added to the active pool
 
+### Requirement: Global account messaging eligibility at startup
+Before a swarm account is registered as active, the system SHALL perform a non-publishing global messaging API health-check. A confirmed deactivated, revoked, or globally banned account SHALL be disabled, stopped, persistently quarantined, and logged as requiring attention.
+
+#### Scenario: Global messaging check succeeds
+- **WHEN** an enabled bot starts and Telegram accepts the non-publishing messaging action
+- **THEN** membership checks and normal active-pool registration continue
+
+#### Scenario: Account is globally unavailable
+- **WHEN** Telegram returns a confirmed deactivated, revoked, or globally banned account error during connection or the startup messaging check
+- **THEN** the client is stopped, the bot is not added to the active pool, global quarantine is saved, and an error log identifies the bot as requiring attention
+
+#### Scenario: Frozen messaging method is rejected
+- **WHEN** Telegram returns `FROZEN_METHOD_INVALID` during the non-publishing messaging action
+- **THEN** the runtime treats the account as globally unavailable and applies global quarantine
+
+#### Scenario: Global quarantine persistence fails
+- **WHEN** the runtime cannot persist global quarantine for a confirmed globally unavailable account
+- **THEN** the account remains disabled in memory and startup fails instead of continuing without durable quarantine
+
+#### Scenario: Recipient-specific restriction is not global quarantine
+- **WHEN** a recipient or group does not permit writing
+- **THEN** startup does not classify that recipient-specific condition as a global account freeze
+
 ### Requirement: Minimum active bot count
 The system SHALL require at least two enabled bots before startup and at least two active bots after startup.
 
 #### Scenario: Fewer than two enabled bots
-- **WHEN** swarm mode is started with fewer than two enabled bot profiles
+- **WHEN** swarm mode is started with fewer than two enabled bot profiles, including after applying persisted quarantine
 - **THEN** startup fails
 
 #### Scenario: Fewer than two active bots after startup
@@ -156,6 +179,14 @@ The system SHALL keep active bot clients supervised and reconnect after unexpect
 - **WHEN** `run_until_disconnected` raises an error
 - **THEN** the manager records reconnect state, waits according to backoff, stops the old client, and starts the bot again
 
+#### Scenario: Reconnect discovers globally unavailable account
+- **WHEN** the global messaging health-check fails during reconnect
+- **THEN** the runtime persistently quarantines and disables the account, removes it from the active pool, and does not schedule another reconnect
+
+#### Scenario: Reconnect checks account before reuse
+- **WHEN** a disconnected active bot is reconnecting
+- **THEN** it is removed from the active pool before the new client is exposed to the startup health-check and membership hook
+
 ### Requirement: Human work has priority
 The system SHALL prioritize human reply processing over scheduled tasks for the same bot.
 
@@ -163,9 +194,67 @@ The system SHALL prioritize human reply processing over scheduled tasks for the 
 - **WHEN** a human reply owns or is waiting for a bot slot
 - **THEN** a scheduled task for that bot receives `acquired = false`
 
+### Requirement: Scheduled exchange устойчив к Telegram send restrictions
+Swarm runtime SHALL не завершать scheduler tick исключением при permanent Telegram send error: `UserBannedInChannelError`, `ChatWriteForbiddenError`, `ChannelPrivateError` или `UserNotParticipantError`.
+
+#### Scenario: У ответчика нет права писать в целевой чат
+- **WHEN** responder `send_message` возвращает permanent Telegram send error
+- **THEN** runtime отключает этот аккаунт от scheduled и addressed-reply обработки
+- **AND** освобождает занятый scheduled slot
+- **AND** не сохраняет responder message в history как отправленное
+- **AND** переносит turn на другую доступную персону, отличную от initiator
+- **OR**, если замены нет, помечает exchange `skipped`
+
+#### Scenario: Runtime перезапущен после permanent ошибки
+- **WHEN** аккаунт ранее получил permanent Telegram send error в целевой группе
+- **THEN** runtime MUST не запускать этот аккаунт после рестарта
+- **AND** аккаунт MUST оставаться исключённым из всех automated swarm flows до ручной проверки и снятия quarantine
+
+#### Scenario: Нет персоны для замены
+- **WHEN** permanent send error получен и после отключения аккаунта остаётся меньше двух подходящих участников
+- **THEN** exchange MUST получить статус `skipped`
+- **AND** skipped exchange MUST не выбираться `get_due_started_exchange`
+- **AND** scheduler tick MUST завершиться без исключения
+
+#### Scenario: Persisted exchange с недоступным участником
+- **WHEN** due planned или started exchange ссылается на bot_id, которого нет в активном runtime-пуле или среди доступных persona-профилей
+- **THEN** runtime MUST NOT занимать его scheduled slot и MUST NOT вызывать LLM от его имени
+- **AND** MUST переназначить неотправленный turn на другую подходящую персону
+- **OR**, если замены нет, пометить exchange `skipped` с явной причиной
+- **AND** scheduler tick MUST завершиться без `KeyError`
+
+#### Scenario: Ошибка временная или неизвестная
+- **WHEN** Telegram send завершается FloodWait, transport timeout, connection error или неизвестной RPC ошибкой
+- **THEN** runtime MUST не отключать аккаунт и не переводить exchange в `skipped`
+- **AND** исключение MUST оставаться видимым для retry/observability
+
+#### Scenario: Permanent ошибка при addressed reply
+- **WHEN** `event.reply` завершается permanent Telegram send error
+- **THEN** runtime MUST сохранить durable quarantine для bot_id до его отключения
+- **AND** MUST записать structured log с bot_id, причиной и `auto_reuse=false`
+- **AND** MUST NOT сохранить неотправленный assistant reply в history
+
+#### Scenario: Quarantine запись addressed reply не сохранилась
+- **WHEN** запись durable quarantine после permanent addressed-reply error завершается ошибкой
+- **THEN** runtime MUST всё равно отключить bot до распространения ошибки persistence
+
+#### Scenario: Активный пул уменьшился
+- **WHEN** после quarantine в active pool остаётся меньше двух ботов
+- **THEN** runtime MUST не создавать новый scheduled exchange
+- **AND** scheduler tick MUST завершиться без исключения
+
+#### Scenario: Позднее сообщение отключённого аккаунта
+- **WHEN** отключённый swarm-аккаунт отправляет сообщение после runtime disable
+- **THEN** его Telegram user id MUST оставаться в swarm sender set
+- **AND** активные reply routers MUST игнорировать его как bot-to-bot traffic
+
 ### Requirement: Private targets are redacted in logs
 The system SHALL not log private Telegram invite hashes.
 
 #### Scenario: Invite link resolve is skipped with redacted log
 - **WHEN** group resolution receives a private invite link
 - **THEN** direct `get_entity` is skipped and logs contain a redacted marker instead of the invite hash
+
+#### Scenario: Private invite is used as quarantine key
+- **WHEN** private invite link является fallback-ключом quarantine
+- **THEN** audit-log quarantine содержит redacted marker вместо invite hash

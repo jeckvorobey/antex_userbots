@@ -6,7 +6,8 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from core.config import Settings
-from userbot.client import UserBotClient, _build_proxy_settings
+from telethon.errors import FrozenMethodInvalidError, UserDeactivatedBanError
+from userbot.client import AccountMessagingUnavailableError, UserBotClient, _build_proxy_settings
 
 
 class FakeTelegramClient:
@@ -24,10 +25,15 @@ class FakeTelegramClient:
         self.send_message = AsyncMock()
         self.get_messages = AsyncMock(return_value=[])
         self.get_entity = AsyncMock(return_value="@group")
+        self.get_permissions = AsyncMock()
         self.get_me = AsyncMock(return_value=SimpleNamespace(id=111))
+        self.invoke = AsyncMock()
         self.joined_targets = []
         self.imported_invites = []
         self.is_connected = lambda: True
+
+    async def __call__(self, request):
+        return await self.invoke(request)
 
 
 def test_extract_event_chat_id_uses_telethon_marked_channel_id():
@@ -80,6 +86,87 @@ async def test_userbot_client_delegates_run_until_disconnected(monkeypatch):
     await client.run_until_disconnected()
 
     fake_client.run_until_disconnected.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_userbot_client_checks_global_messaging_without_sending_message(monkeypatch):
+    """Health-check использует typing action в Saved Messages и не публикует текст."""
+    fake_client = FakeTelegramClient("session-string", 1, "hash")
+    monkeypatch.setattr(
+        "userbot.client._build_telegram_client",
+        lambda session_string, api_id, api_hash, proxy=None: fake_client,
+    )
+
+    class Requests:
+        class InputPeerSelf:
+            pass
+
+        class SendMessageTypingAction:
+            pass
+
+        class SetTypingRequest:
+            def __init__(self, *, peer, action):
+                self.peer = peer
+                self.action = action
+
+    monkeypatch.setattr("userbot.client._import_telethon_messaging_requests", lambda: Requests)
+    client = UserBotClient(session_string="session-string", api_id=1, api_hash="hash")
+
+    await client.start()
+    await client.verify_global_messaging_eligibility()
+
+    request = fake_client.invoke.await_args.args[0]
+    assert isinstance(request, Requests.SetTypingRequest)
+    assert isinstance(request.peer, Requests.InputPeerSelf)
+    assert isinstance(request.action, Requests.SendMessageTypingAction)
+    fake_client.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_userbot_client_stops_session_when_telegram_rejects_frozen_account(monkeypatch):
+    """Глобальная Telegram-блокировка при connect закрывает созданный клиент."""
+    fake_client = FakeTelegramClient("session-string", 1, "hash")
+    fake_client.start.side_effect = UserDeactivatedBanError(None)
+    monkeypatch.setattr(
+        "userbot.client._build_telegram_client",
+        lambda session_string, api_id, api_hash, proxy=None: fake_client,
+    )
+    client = UserBotClient(session_string="session-string", api_id=1, api_hash="hash")
+
+    with pytest.raises(AccountMessagingUnavailableError):
+        await client.start()
+
+    fake_client.disconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_userbot_client_quarantines_frozen_method_error_from_messaging_check(monkeypatch):
+    """Замороженный аккаунт распознаётся по FROZEN_METHOD_INVALID без публикации текста."""
+    fake_client = FakeTelegramClient("session-string", 1, "hash")
+    fake_client.invoke.side_effect = FrozenMethodInvalidError(None)
+    monkeypatch.setattr(
+        "userbot.client._build_telegram_client",
+        lambda session_string, api_id, api_hash, proxy=None: fake_client,
+    )
+
+    class Requests:
+        class InputPeerSelf:
+            pass
+
+        class SendMessageTypingAction:
+            pass
+
+        class SetTypingRequest:
+            def __init__(self, *, peer, action):
+                self.peer = peer
+                self.action = action
+
+    monkeypatch.setattr("userbot.client._import_telethon_messaging_requests", lambda: Requests)
+    client = UserBotClient(session_string="session-string", api_id=1, api_hash="hash")
+
+    await client.start()
+    with pytest.raises(AccountMessagingUnavailableError):
+        await client.verify_global_messaging_eligibility()
 
 
 def test_build_proxy_settings_for_http_proxy():
@@ -440,6 +527,38 @@ async def test_run_swarm_mode_requires_two_active_bots_after_start(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_swarm_mode_requires_two_enabled_bots_after_persisted_quarantine(monkeypatch):
+    """Persisted quarantine останавливает startup до подключения единственного оставшегося bot."""
+    import run
+
+    settings = Settings(
+        api_id=1,
+        api_hash="hash",
+        gemini_api_key="gemini-key",
+        group_target="@group",
+        db_path=":memory:",
+        settings_path=None,
+    )
+    settings.mode = "swarm"
+    settings.swarm_bots = [
+        SimpleNamespace(id="anna", session_string="anna-session", persona_file="anna.md", enabled=True, temperature=0.9, session_env="SESSION_STRING_ANNA"),
+        SimpleNamespace(id="mike", session_string="mike-session", persona_file="mike.md", enabled=True, temperature=0.8, session_env="SESSION_STRING_MIKE"),
+    ]
+    runtime = SimpleNamespace(
+        exchange_store=SimpleNamespace(get_quarantined_bot_ids=AsyncMock(return_value={"mike"})),
+    )
+    scheduler = SimpleNamespace(add_job=Mock())
+    manager_factory = Mock()
+    monkeypatch.setattr(run, "SwarmManager", manager_factory)
+
+    with pytest.raises(ValueError, match="at least two enabled bots"):
+        await run._run_swarm_mode(settings, runtime, scheduler)
+
+    manager_factory.assert_not_called()
+    scheduler.add_job.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_ensure_group_membership_joins_public_target(monkeypatch):
     """Проверяет автovступление в публичную группу через group_target."""
     import run
@@ -640,7 +759,6 @@ async def test_multi_group_membership_scans_dialogs_once_for_all_groups(monkeypa
     wrapper = SimpleNamespace(client=telegram_client, join_group=AsyncMock(), join_invite_link=AsyncMock())
     monkeypatch.setattr(run.asyncio, "sleep", AsyncMock())
     monkeypatch.setattr(run, "_pick_startup_membership_delay_seconds", lambda: 30.0)
-
     hook = run._build_multi_group_membership_startup_hook(
         groups=[
             SimpleNamespace(id="first", enabled=True, group_chat_id=101, group_target="@first"),
@@ -648,6 +766,7 @@ async def test_multi_group_membership_scans_dialogs_once_for_all_groups(monkeypa
         ],
     )
 
+    wrapper.verify_global_messaging_eligibility = AsyncMock()
     resolved = await hook(SimpleNamespace(id="anna"), wrapper)
 
     assert resolved == {"first": first_entity, "second": second_entity}
@@ -942,7 +1061,7 @@ async def test_multi_group_membership_startup_hook_waits_same_seconds_before_che
     )
 
     profile = SimpleNamespace(id="anna")
-    client = SimpleNamespace(client=SimpleNamespace())
+    client = SimpleNamespace(client=SimpleNamespace(), verify_global_messaging_eligibility=AsyncMock())
 
     resolved = await hook(profile, client)
 
@@ -954,6 +1073,27 @@ async def test_multi_group_membership_startup_hook_waits_same_seconds_before_che
     ]
     first_index = ensure_membership.await_args_list[0].kwargs["dialog_index"]
     assert ensure_membership.await_args_list[1].kwargs["dialog_index"] is first_index
+
+
+@pytest.mark.asyncio
+async def test_multi_group_startup_hook_persists_global_quarantine_for_frozen_account(monkeypatch):
+    """Замороженный аккаунт передаёт manager причину quarantine до membership."""
+    import run
+
+    hook = run._build_multi_group_membership_startup_hook(
+        groups=[SimpleNamespace(id="danang", enabled=True, group_chat_id=101, group_target="@group")],
+    )
+    root_error = RuntimeError("account frozen")
+    client = SimpleNamespace(
+        client=SimpleNamespace(),
+        verify_global_messaging_eligibility=AsyncMock(
+            side_effect=AccountMessagingUnavailableError("global messaging unavailable")
+        ),
+    )
+    client.verify_global_messaging_eligibility.side_effect.__cause__ = root_error
+
+    with pytest.raises(AccountMessagingUnavailableError, match="telegram_startup_global_messaging_unavailable"):
+        await hook(SimpleNamespace(id="anna"), client)
 
 
 class _AsyncNullContext:

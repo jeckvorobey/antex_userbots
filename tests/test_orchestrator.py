@@ -63,6 +63,32 @@ async def test_orchestrator_skips_exchange_outside_active_windows():
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_skips_new_exchange_when_active_pool_has_fewer_than_two_bots():
+    """После quarantine новый exchange не должен приводить к ValueError выбора пары."""
+    exchange_store = SimpleNamespace(
+        get_due_started_exchange=AsyncMock(return_value=None),
+        get_exchange_by_window_key=AsyncMock(return_value=None),
+    )
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md"),
+            SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md"),
+        ],
+        manager=SimpleNamespace(active_bot_ids=["anna"]),
+        topic_selector=SimpleNamespace(),
+        prompt_composer=SimpleNamespace(),
+        gemini_client=SimpleNamespace(),
+        history=SimpleNamespace(),
+        exchange_store=exchange_store,
+        group_target="@chat",
+        active_windows_utc=["19-20"],
+        now_provider=lambda: datetime(2026, 4, 20, 19, 10, tzinfo=UTC),
+    )
+
+    assert await orchestrator.run_once() is False
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_avoids_recent_bots_and_last_topics():
     """Проверяет anti-repeat по последним 4 ботам и последним темам."""
     exchange_store = SimpleNamespace(
@@ -620,6 +646,153 @@ async def test_responder_permanent_error_immediately_reassigns_turn_to_other_bot
     )
     replacement_client.send_message.assert_awaited_once_with("@chat", "Ответ Джона", reply_to=501)
     exchange_store.mark_exchange_completed.assert_awaited_once_with("exchange-1")
+
+
+@pytest.mark.asyncio
+async def test_persisted_unavailable_responder_is_reassigned_before_gemini_or_slot():
+    """Устаревший responder не занимает свой слот и заменяется до генерации ответа."""
+    replacement_client = SimpleNamespace(send_message=AsyncMock())
+    stale_exchange = {
+        "exchange_id": "exchange-1",
+        "initiator_bot_id": "anna",
+        "responder_bot_id": "missing",
+        "topic": "Тема",
+        "question_text": "Вопрос",
+        "initiator_message_id": 501,
+        "responder_text": None,
+    }
+    reassigned_exchange = {**stale_exchange, "responder_bot_id": "john"}
+    exchange_store = SimpleNamespace(
+        get_due_started_exchange=AsyncMock(return_value=stale_exchange),
+        reassign_after_permanent_send_error=AsyncMock(),
+        get_exchange=AsyncMock(return_value=reassigned_exchange),
+        mark_responder_generated=AsyncMock(),
+        mark_exchange_completed=AsyncMock(),
+        mark_exchange_skipped=AsyncMock(),
+    )
+    scheduled_slot_calls: list[str] = []
+
+    def scheduled_slot(bot_id: str):
+        scheduled_slot_calls.append(bot_id)
+        return _ScheduledSlot(True)
+
+    manager = SimpleNamespace(
+        active_bot_ids=["anna", "john"],
+        scheduled_slot=scheduled_slot,
+        get_client=lambda _bot_id: SimpleNamespace(client=replacement_client),
+    )
+    gemini = SimpleNamespace(generate_reply=AsyncMock(return_value="Ответ Джона"))
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md"),
+            SwarmBotProfile(id="john", session_string="john", persona_file="john.md"),
+        ],
+        manager=manager,
+        topic_selector=SimpleNamespace(),
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="prompt")),
+        gemini_client=gemini,
+        history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
+        exchange_store=exchange_store,
+        group_target="@chat",
+    )
+
+    assert await orchestrator.run_once() is True
+    exchange_store.reassign_after_permanent_send_error.assert_awaited_once_with(
+        "exchange-1", stage="responder", replacement_bot_id="john", counterpart_bot_id="anna"
+    )
+    assert scheduled_slot_calls == ["john"]
+    gemini.generate_reply.assert_awaited_once()
+    replacement_client.send_message.assert_awaited_once_with("@chat", "Ответ Джона", reply_to=501)
+
+
+@pytest.mark.asyncio
+async def test_persisted_unavailable_initiator_is_reassigned_before_gemini_or_slot():
+    """Устаревший initiator не должен вызывать KeyError и заменяется до генерации вопроса."""
+    replacement_client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=501)))
+    stale_exchange = {
+        "exchange_id": "exchange-1",
+        "initiator_bot_id": "missing",
+        "responder_bot_id": "john",
+        "topic": "Тема",
+        "initiator_scheduled_at": datetime(2026, 4, 20, 19, 0, tzinfo=UTC),
+    }
+    reassigned_exchange = {**stale_exchange, "initiator_bot_id": "anna"}
+    exchange_store = SimpleNamespace(
+        reassign_after_permanent_send_error=AsyncMock(),
+            get_exchange=AsyncMock(return_value=reassigned_exchange),
+            get_recent_questions=AsyncMock(return_value=[]),
+            get_recent_questions_by_bot=AsyncMock(return_value=[]),
+            get_recent_question_signatures=AsyncMock(return_value=set()),
+        mark_initiator_generated=AsyncMock(),
+        mark_exchange_started=AsyncMock(),
+        mark_exchange_completed=AsyncMock(),
+        mark_exchange_skipped=AsyncMock(),
+    )
+    scheduled_slot_calls: list[str] = []
+
+    def scheduled_slot(bot_id: str):
+        scheduled_slot_calls.append(bot_id)
+        return _ScheduledSlot(True)
+
+    gemini = SimpleNamespace(start_topic=AsyncMock(return_value="Новый вопрос"))
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md"),
+            SwarmBotProfile(id="john", session_string="john", persona_file="john.md"),
+        ],
+        manager=SimpleNamespace(
+            active_bot_ids=["anna", "john"],
+            scheduled_slot=scheduled_slot,
+            get_client=lambda _bot_id: SimpleNamespace(client=replacement_client),
+        ),
+        topic_selector=SimpleNamespace(topics=[]),
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="prompt")),
+        gemini_client=gemini,
+        history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
+        exchange_store=exchange_store,
+        group_target="@chat",
+        max_turns_per_exchange=1,
+    )
+
+    assert await orchestrator._run_due_planned_exchange(
+        exchange=stale_exchange,
+        now=datetime(2026, 4, 20, 19, 1, tzinfo=UTC),
+    ) is True
+    exchange_store.reassign_after_permanent_send_error.assert_awaited_once_with(
+        "exchange-1", stage="initiator", replacement_bot_id="anna", counterpart_bot_id="john"
+    )
+    assert scheduled_slot_calls == ["anna"]
+    gemini.start_topic.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_persisted_unavailable_responder_without_replacement_is_skipped():
+    """Устаревший responder без замены не зацикливает due exchange."""
+    exchange_store = SimpleNamespace(
+        get_due_started_exchange=AsyncMock(
+            return_value={
+                "exchange_id": "exchange-1",
+                "initiator_bot_id": "anna",
+                "responder_bot_id": "missing",
+                "topic": "Тема",
+                "question_text": "Вопрос",
+            }
+        ),
+        mark_exchange_skipped=AsyncMock(),
+    )
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md")],
+        manager=SimpleNamespace(active_bot_ids=["anna"], scheduled_slot=AsyncMock()),
+        topic_selector=SimpleNamespace(),
+        prompt_composer=SimpleNamespace(),
+        gemini_client=SimpleNamespace(),
+        history=SimpleNamespace(),
+        exchange_store=exchange_store,
+        group_target="@chat",
+    )
+
+    assert await orchestrator.run_once() is True
+    exchange_store.mark_exchange_skipped.assert_awaited_once_with("exchange-1", "scheduled_responder_bot_unavailable")
 
 
 @pytest.mark.asyncio
