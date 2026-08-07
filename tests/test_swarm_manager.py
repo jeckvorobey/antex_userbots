@@ -100,6 +100,76 @@ async def test_swarm_manager_disables_frozen_bot_when_global_messaging_check_fai
 
 
 @pytest.mark.asyncio
+async def test_swarm_manager_stops_startup_when_global_quarantine_cannot_be_persisted():
+    """Подтверждённо frozen-аккаунт не допускает запуск без durable quarantine."""
+    anna_client = SimpleNamespace(
+        start=AsyncMock(),
+        stop=AsyncMock(),
+        get_current_user=AsyncMock(return_value=SimpleNamespace(id=101)),
+        run_until_disconnected=AsyncMock(),
+    )
+    john_client = SimpleNamespace(
+        start=AsyncMock(),
+        stop=AsyncMock(),
+        get_current_user=AsyncMock(return_value=SimpleNamespace(id=202)),
+        run_until_disconnected=AsyncMock(),
+    )
+
+    async def startup_hook(profile, _client):
+        if profile.id == "anna":
+            raise AccountMessagingUnavailableError("global messaging unavailable")
+
+    quarantine_bot = AsyncMock(side_effect=RuntimeError("sqlite unavailable"))
+    manager = SwarmManager(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md"),
+            SwarmBotProfile(id="john", session_string="john", persona_file="john.md"),
+        ],
+        client_factory=lambda profile: anna_client if profile.id == "anna" else john_client,
+        startup_hook=startup_hook,
+        startup_quarantine_bot=quarantine_bot,
+    )
+
+    with pytest.raises(RuntimeError, match="sqlite unavailable"):
+        await manager.start()
+
+    assert manager.active_bot_ids == []
+    assert manager.runtime_states["anna"].status == "disabled"
+    anna_client.stop.assert_awaited_once()
+    john_client.start.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_swarm_manager_quarantines_frozen_bot_during_reconnect():
+    """Health-check после reconnect сохраняет quarantine и исключает аккаунт из пула."""
+    fake_client = SimpleNamespace(
+        start=AsyncMock(),
+        stop=AsyncMock(),
+        get_current_user=AsyncMock(return_value=SimpleNamespace(id=101)),
+        run_until_disconnected=AsyncMock(),
+    )
+    startup_hook = AsyncMock(
+        side_effect=[None, AccountMessagingUnavailableError("global messaging unavailable")]
+    )
+    quarantine_bot = AsyncMock()
+    profile = SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md")
+    manager = SwarmManager(
+        bot_profiles=[profile],
+        client_factory=lambda _profile: fake_client,
+        startup_hook=startup_hook,
+        startup_quarantine_bot=quarantine_bot,
+        reconnect_backoff_seconds=(0.0,),
+    )
+    await manager.start()
+
+    await manager._reconnect_bot(profile, manager.runtime_states["anna"], RuntimeError("disconnect"))
+
+    assert manager.is_active("anna") is False
+    assert manager.runtime_states["anna"].status == "disabled"
+    quarantine_bot.assert_awaited_once_with("anna", "global messaging unavailable")
+
+
+@pytest.mark.asyncio
 async def test_swarm_manager_rejects_scheduled_slot_for_unavailable_bot():
     """Недоступный bot_id не должен приводить к KeyError при попытке взять scheduled slot."""
     manager = SwarmManager(bot_profiles=[], client_factory=lambda _profile: None)

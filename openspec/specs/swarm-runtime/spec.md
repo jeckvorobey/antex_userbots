@@ -47,6 +47,14 @@ Before a swarm account is registered as active, the system SHALL perform a non-p
 - **WHEN** Telegram returns a confirmed deactivated, revoked, or globally banned account error during connection or the startup messaging check
 - **THEN** the client is stopped, the bot is not added to the active pool, global quarantine is saved, and an error log identifies the bot as requiring attention
 
+#### Scenario: Frozen messaging method is rejected
+- **WHEN** Telegram returns `FROZEN_METHOD_INVALID` during the non-publishing messaging action
+- **THEN** the runtime treats the account as globally unavailable and applies global quarantine
+
+#### Scenario: Global quarantine persistence fails
+- **WHEN** the runtime cannot persist global quarantine for a confirmed globally unavailable account
+- **THEN** the account remains disabled in memory and startup fails instead of continuing without durable quarantine
+
 #### Scenario: Recipient-specific restriction is not global quarantine
 - **WHEN** a recipient or group does not permit writing
 - **THEN** startup does not classify that recipient-specific condition as a global account freeze
@@ -170,6 +178,10 @@ The system SHALL keep active bot clients supervised and reconnect after unexpect
 #### Scenario: Client error triggers reconnect
 - **WHEN** `run_until_disconnected` raises an error
 - **THEN** the manager records reconnect state, waits according to backoff, stops the old client, and starts the bot again
+
+#### Scenario: Reconnect discovers globally unavailable account
+- **WHEN** the global messaging health-check fails during reconnect
+- **THEN** the runtime persistently quarantines and disables the account, removes it from the active pool, and does not schedule another reconnect
 
 ### Requirement: Human work has priority
 The system SHALL prioritize human reply processing over scheduled tasks for the same bot.

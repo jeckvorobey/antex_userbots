@@ -6,7 +6,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from telethon.errors import AuthKeyUnregisteredError, SessionRevokedError, UserDeactivatedBanError, UserDeactivatedError
+from telethon.errors import (
+    AuthKeyUnregisteredError,
+    FrozenMethodInvalidError,
+    SessionRevokedError,
+    UserDeactivatedBanError,
+    UserDeactivatedError,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -18,6 +24,7 @@ class AccountMessagingUnavailableError(RuntimeError):
 
 GLOBAL_ACCOUNT_UNAVAILABLE_ERRORS = (
     AuthKeyUnregisteredError,
+    FrozenMethodInvalidError,
     SessionRevokedError,
     UserDeactivatedBanError,
     UserDeactivatedError,

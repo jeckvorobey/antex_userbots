@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from core.config import Settings
-from telethon.errors import UserDeactivatedBanError
+from telethon.errors import FrozenMethodInvalidError, UserDeactivatedBanError
 from userbot.client import AccountMessagingUnavailableError, UserBotClient, _build_proxy_settings
 
 
@@ -137,6 +137,36 @@ async def test_userbot_client_stops_session_when_telegram_rejects_frozen_account
         await client.start()
 
     fake_client.disconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_userbot_client_quarantines_frozen_method_error_from_messaging_check(monkeypatch):
+    """Замороженный аккаунт распознаётся по FROZEN_METHOD_INVALID без публикации текста."""
+    fake_client = FakeTelegramClient("session-string", 1, "hash")
+    fake_client.invoke.side_effect = FrozenMethodInvalidError(None)
+    monkeypatch.setattr(
+        "userbot.client._build_telegram_client",
+        lambda session_string, api_id, api_hash, proxy=None: fake_client,
+    )
+
+    class Requests:
+        class InputPeerSelf:
+            pass
+
+        class SendMessageTypingAction:
+            pass
+
+        class SetTypingRequest:
+            def __init__(self, *, peer, action):
+                self.peer = peer
+                self.action = action
+
+    monkeypatch.setattr("userbot.client._import_telethon_messaging_requests", lambda: Requests)
+    client = UserBotClient(session_string="session-string", api_id=1, api_hash="hash")
+
+    await client.start()
+    with pytest.raises(AccountMessagingUnavailableError):
+        await client.verify_global_messaging_eligibility()
 
 
 def test_build_proxy_settings_for_http_proxy():
