@@ -76,6 +76,7 @@ class SwarmManager:
         }
         self.swarm_user_ids: set[int] = set()
         self.active_bot_ids: list[str] = []
+        self.disabled_bot_ids: set[str] = set()
         self._gates: dict[str, _BotGate] = {}
         self._stop_event = asyncio.Event()
 
@@ -106,12 +107,12 @@ class SwarmManager:
         profile = self.get_profile(bot_id)
         state = self.runtime_states[bot_id]
 
-        while not self._stop_event.is_set():
+        while not self._stop_event.is_set() and bot_id not in self.disabled_bot_ids:
             client = self.get_client(bot_id)
             try:
                 logger.info("swarm: bot_id=%s переходит в ожидание Telegram-событий", bot_id)
                 await client.run_until_disconnected()
-                if self._stop_event.is_set():
+                if self._stop_event.is_set() or bot_id in self.disabled_bot_ids:
                     break
                 logger.warning("swarm: bot_id=%s отключился без явной ошибки, будет переподключение", bot_id)
                 await self._reconnect_bot(profile, state)
@@ -119,6 +120,9 @@ class SwarmManager:
                 logger.info("swarm: supervise loop остановлен для bot_id=%s", bot_id)
                 raise
             except Exception as exc:
+                if bot_id in self.disabled_bot_ids:
+                    logger.info("swarm: bot_id=%s не будет переподключён после runtime disable", bot_id)
+                    break
                 logger.exception("swarm: ошибка клиента bot_id=%s: %s", bot_id, exc)
                 await self._reconnect_bot(profile, state, exc)
 
@@ -132,6 +136,28 @@ class SwarmManager:
             if profile.id == bot_id:
                 return profile
         raise KeyError(bot_id)
+
+    def is_active(self, bot_id: str) -> bool:
+        """Проверяет, доступен ли аккаунт для новых отправок."""
+        return bot_id in self.active_bot_ids and bot_id not in self.disabled_bot_ids
+
+    async def disable_bot(self, bot_id: str, *, reason: str) -> None:
+        """Немедленно выводит аккаунт из runtime-пула после постоянного Telegram запрета."""
+        if bot_id in self.disabled_bot_ids:
+            return
+        self.disabled_bot_ids.add(bot_id)
+        if bot_id in self.active_bot_ids:
+            self.active_bot_ids.remove(bot_id)
+        profile = self.get_profile(bot_id)
+        profile.enabled = False
+        self.runtime_states[bot_id].mark_disabled(reason)
+        telegram_user_id = profile.telegram_user_id
+        if isinstance(telegram_user_id, int):
+            self.swarm_user_ids.discard(telegram_user_id)
+        client = self.clients.get(bot_id)
+        if client is not None:
+            await client.stop()
+        logger.error("swarm: bot_id=%s отключён runtime reason=%s", bot_id, reason)
 
     @asynccontextmanager
     async def human_slot(self, bot_id: str) -> AsyncIterator[None]:

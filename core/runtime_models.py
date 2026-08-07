@@ -46,6 +46,12 @@ class BotRuntimeState:
         self.last_error_text = error_text
         self.reconnect_attempts += 1
 
+    def mark_disabled(self, reason: str) -> None:
+        """Фиксирует запрет на использование аккаунта в текущем runtime."""
+        self.status = "disabled"
+        self.last_error_at = datetime.now(UTC)
+        self.last_error_text = reason
+
     def mark_failed(self, error_text: str) -> None:
         """Фиксирует фатальную ошибку и исключение бота из активного пула."""
         self.status = "error"

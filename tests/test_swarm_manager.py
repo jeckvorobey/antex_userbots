@@ -44,6 +44,29 @@ async def test_swarm_manager_starts_enabled_bots_and_collects_user_ids():
 
 
 @pytest.mark.asyncio
+async def test_swarm_manager_disables_bot_after_permanent_send_error():
+    """Отключённый runtime-бот больше не считается активным и его клиент останавливается."""
+    fake_client = SimpleNamespace(
+        start=AsyncMock(),
+        stop=AsyncMock(),
+        get_current_user=AsyncMock(return_value=SimpleNamespace(id=101)),
+        run_until_disconnected=AsyncMock(),
+    )
+    manager = SwarmManager(
+        bot_profiles=[SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md")],
+        client_factory=lambda _profile: fake_client,
+    )
+    await manager.start()
+
+    await manager.disable_bot("anna", reason="telegram_responder_send_forbidden:UserBannedInChannelError")
+
+    assert manager.is_active("anna") is False
+    assert manager.runtime_states["anna"].status == "disabled"
+    assert manager.swarm_user_ids == set()
+    fake_client.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_swarm_manager_prioritizes_human_slot_over_scheduled():
     """Проверяет, что scheduled задача уступает human reply."""
     fake_client = SimpleNamespace(

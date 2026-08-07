@@ -45,6 +45,7 @@ class ExchangeStore:
                 topic_key TEXT NOT NULL,
                 question_text TEXT,
                 question_signature TEXT,
+                responder_text TEXT,
                 initiator_scheduled_at TIMESTAMP,
                 responder_scheduled_at TIMESTAMP,
                 initiator_message_id INTEGER,
@@ -59,6 +60,15 @@ class ExchangeStore:
                 )
                 """
             )
+            await connection.execute(
+                """CREATE TABLE IF NOT EXISTS quarantined_swarm_bots (
+                    group_key TEXT NOT NULL,
+                    bot_id TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    quarantined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (group_key, bot_id)
+                )"""
+            )
             await self._ensure_column(connection, "group_id", "TEXT")
             await self._ensure_column(connection, "group_chat_id", "INTEGER")
             await self._ensure_column(connection, "pair_key", "TEXT")
@@ -66,6 +76,7 @@ class ExchangeStore:
             await self._ensure_column(connection, "topic_key", "TEXT")
             await self._ensure_column(connection, "question_text", "TEXT")
             await self._ensure_column(connection, "question_signature", "TEXT")
+            await self._ensure_column(connection, "responder_text", "TEXT")
             await self._ensure_column(connection, "initiator_scheduled_at", "TIMESTAMP")
             await self._ensure_column(connection, "responder_scheduled_at", "TIMESTAMP")
             await self._ensure_column(connection, "initiator_message_id", "INTEGER")
@@ -81,6 +92,21 @@ class ExchangeStore:
 
         await self.database.write("init_exchange_store", initialize)
         logger.info("Таблица scheduled_exchanges готова")
+
+    async def quarantine_bot(self, *, group_key: str, bot_id: str, reason: str) -> None:
+        """Сохраняет запрет на использование аккаунта в целевой группе."""
+        await self.database.execute(
+            "quarantine_bot",
+            """INSERT INTO quarantined_swarm_bots (group_key, bot_id, reason)
+               VALUES (?, ?, ?)
+               ON CONFLICT(group_key, bot_id) DO UPDATE SET reason = excluded.reason, quarantined_at = CURRENT_TIMESTAMP""",
+            (group_key, bot_id, reason),
+        )
+
+    async def get_quarantined_bot_ids(self) -> set[str]:
+        """Возвращает аккаунты, которые нельзя автоматически запускать после рестарта."""
+        rows = await self.database.fetch_all("get_quarantined_bot_ids", "SELECT DISTINCT bot_id FROM quarantined_swarm_bots")
+        return {str(row[0]) for row in rows}
 
     async def create_exchange(
         self,
@@ -164,6 +190,46 @@ class ExchangeStore:
             (exchange_id,),
         )
         return dict(row) if row is not None else None
+
+    async def mark_initiator_generated(self, exchange_id: str, *, question_text: str, question_signature: str | None = None) -> None:
+        """Сохраняет вопрос до сетевой отправки Telegram."""
+        await self.database.execute(
+            "mark_initiator_generated",
+            """UPDATE scheduled_exchanges
+               SET question_text = ?, question_signature = ?, last_activity_at = CURRENT_TIMESTAMP
+               WHERE exchange_id = ?""",
+            (question_text, normalize_signature(question_signature or question_text), exchange_id),
+        )
+
+    async def mark_responder_generated(self, exchange_id: str, responder_text: str) -> None:
+        """Сохраняет ответ до сетевой отправки Telegram."""
+        await self.database.execute(
+            "mark_responder_generated",
+            """UPDATE scheduled_exchanges
+               SET responder_text = ?, last_activity_at = CURRENT_TIMESTAMP
+               WHERE exchange_id = ?""",
+            (responder_text, exchange_id),
+        )
+
+    async def reassign_after_permanent_send_error(
+        self, exchange_id: str, *, stage: str, replacement_bot_id: str, counterpart_bot_id: str
+    ) -> None:
+        """Переназначает неотправленный turn на другую персону."""
+        if stage == "initiator":
+            sql = """UPDATE scheduled_exchanges
+                     SET initiator_bot_id = ?, pair_key = ?, question_text = NULL,
+                         question_signature = NULL, last_activity_at = CURRENT_TIMESTAMP
+                     WHERE exchange_id = ?"""
+            params = (replacement_bot_id, self.build_pair_key(replacement_bot_id, counterpart_bot_id), exchange_id)
+        elif stage == "responder":
+            sql = """UPDATE scheduled_exchanges
+                     SET responder_bot_id = ?, pair_key = ?, responder_text = NULL,
+                         last_activity_at = CURRENT_TIMESTAMP
+                     WHERE exchange_id = ?"""
+            params = (replacement_bot_id, self.build_pair_key(counterpart_bot_id, replacement_bot_id), exchange_id)
+        else:
+            raise ValueError(f"Unsupported exchange stage: {stage}")
+        await self.database.execute("reassign_after_permanent_send_error", sql, params)
 
     async def mark_exchange_started(
         self,

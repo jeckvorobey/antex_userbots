@@ -648,6 +648,13 @@ async def _register_swarm_handlers(
 async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: AsyncIOScheduler) -> None:
     """Запускает swarm-режим с постоянным пулом клиентов."""
     bot_profiles = _build_swarm_bot_profiles(settings)
+    get_quarantined_bot_ids = getattr(runtime.exchange_store, "get_quarantined_bot_ids", None)
+    quarantined_bot_ids = await get_quarantined_bot_ids() if callable(get_quarantined_bot_ids) else set()
+    for profile in bot_profiles:
+        if profile.id in quarantined_bot_ids:
+            profile.enabled = False
+    if quarantined_bot_ids:
+        logger.warning("Исключены quarantined swarm-аккаунты: bot_ids=%s", sorted(quarantined_bot_ids))
     if len(bot_profiles) < 2:
         raise ValueError("Swarm mode requires at least two enabled bots")
     current_settings = settings
