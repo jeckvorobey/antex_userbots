@@ -669,7 +669,7 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
             profile.enabled = False
     if quarantined_bot_ids:
         logger.warning("Исключены quarantined swarm-аккаунты: bot_ids=%s", sorted(quarantined_bot_ids))
-    if len(bot_profiles) < 2:
+    if sum(profile.enabled for profile in bot_profiles) < 2:
         raise ValueError("Swarm mode requires at least two enabled bots")
     current_settings = settings
     current_groups = _enabled_groups_from_settings(current_settings)

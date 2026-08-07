@@ -63,7 +63,7 @@ Before a swarm account is registered as active, the system SHALL perform a non-p
 The system SHALL require at least two enabled bots before startup and at least two active bots after startup.
 
 #### Scenario: Fewer than two enabled bots
-- **WHEN** swarm mode is started with fewer than two enabled bot profiles
+- **WHEN** swarm mode is started with fewer than two enabled bot profiles, including after applying persisted quarantine
 - **THEN** startup fails
 
 #### Scenario: Fewer than two active bots after startup

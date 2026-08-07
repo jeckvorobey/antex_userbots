@@ -527,6 +527,38 @@ async def test_run_swarm_mode_requires_two_active_bots_after_start(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_swarm_mode_requires_two_enabled_bots_after_persisted_quarantine(monkeypatch):
+    """Persisted quarantine останавливает startup до подключения единственного оставшегося bot."""
+    import run
+
+    settings = Settings(
+        api_id=1,
+        api_hash="hash",
+        gemini_api_key="gemini-key",
+        group_target="@group",
+        db_path=":memory:",
+        settings_path=None,
+    )
+    settings.mode = "swarm"
+    settings.swarm_bots = [
+        SimpleNamespace(id="anna", session_string="anna-session", persona_file="anna.md", enabled=True, temperature=0.9, session_env="SESSION_STRING_ANNA"),
+        SimpleNamespace(id="mike", session_string="mike-session", persona_file="mike.md", enabled=True, temperature=0.8, session_env="SESSION_STRING_MIKE"),
+    ]
+    runtime = SimpleNamespace(
+        exchange_store=SimpleNamespace(get_quarantined_bot_ids=AsyncMock(return_value={"mike"})),
+    )
+    scheduler = SimpleNamespace(add_job=Mock())
+    manager_factory = Mock()
+    monkeypatch.setattr(run, "SwarmManager", manager_factory)
+
+    with pytest.raises(ValueError, match="at least two enabled bots"):
+        await run._run_swarm_mode(settings, runtime, scheduler)
+
+    manager_factory.assert_not_called()
+    scheduler.add_job.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_ensure_group_membership_joins_public_target(monkeypatch):
     """Проверяет автovступление в публичную группу через group_target."""
     import run
