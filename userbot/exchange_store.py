@@ -77,6 +77,12 @@ class ExchangeStore:
                     PRIMARY KEY (group_key, bot_id)
                 )"""
             )
+            for column_name, column_type in (("is_available", "INTEGER"), ("checked_at", "TIMESTAMP")):
+                try:
+                    await connection.execute(f"ALTER TABLE quarantined_swarm_bots ADD COLUMN {column_name} {column_type}")
+                except Exception as exc:
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
             await self._ensure_column(connection, "group_id", "TEXT")
             await self._ensure_column(connection, "group_chat_id", "INTEGER")
             await self._ensure_column(connection, "pair_key", "TEXT")
@@ -115,6 +121,21 @@ class ExchangeStore:
             bot_id,
             _redact_quarantine_group_key(group_key),
             reason,
+        )
+
+    async def reset_startup_availability(self) -> None:
+        """Очищает прошлый startup-снимок доступности ботов."""
+        await self.database.execute("reset_startup_availability", "DELETE FROM quarantined_swarm_bots")
+
+    async def record_startup_availability(self, *, bot_id: str, is_available: bool, reason: str | None) -> None:
+        """Сохраняет свежий итог startup-проверки без секретных данных."""
+        await self.database.execute(
+            "record_startup_availability",
+            """INSERT INTO quarantined_swarm_bots (group_key, bot_id, reason, is_available, checked_at)
+               VALUES ('__startup__', ?, ?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(group_key, bot_id) DO UPDATE SET reason=excluded.reason,
+                   is_available=excluded.is_available, checked_at=excluded.checked_at""",
+            (bot_id, reason or "", int(is_available)),
         )
 
     async def get_quarantined_bot_ids(self) -> set[str]:

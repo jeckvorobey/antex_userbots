@@ -65,12 +65,16 @@ class SwarmManager:
         client_factory: Callable[[SwarmBotProfile], UserBotClient | Any],
         startup_hook: Callable[[SwarmBotProfile, UserBotClient | Any], Any] | None = None,
         startup_quarantine_bot: Callable[[str, str], Any] | None = None,
+        startup_availability_bot: Callable[[str, bool, str | None], Any] | None = None,
+        startup_concurrency: int = 3,
         reconnect_backoff_seconds: tuple[float, ...] = (1.0, 3.0, 10.0, 30.0),
     ) -> None:
         self.bot_profiles = bot_profiles
         self.client_factory = client_factory
         self.startup_hook = startup_hook
         self.startup_quarantine_bot = startup_quarantine_bot
+        self.startup_availability_bot = startup_availability_bot
+        self.startup_concurrency = startup_concurrency
         self.reconnect_backoff_seconds = reconnect_backoff_seconds
         self.clients: dict[str, UserBotClient | Any] = {}
         self.runtime_states: dict[str, BotRuntimeState] = {
@@ -84,18 +88,32 @@ class SwarmManager:
 
     async def start(self) -> None:
         """Запускает всех enabled-ботов и собирает их Telegram user_id."""
-        for profile in self.bot_profiles:
+        async def start_profile(profile: SwarmBotProfile, semaphore: asyncio.Semaphore) -> None:
             if not profile.enabled:
                 logger.info("swarm: bot_id=%s отключён конфигурацией", profile.id)
-                continue
-            try:
-                await self._start_single_bot(profile)
-            except AccountMessagingUnavailableError as exc:
-                await self._quarantine_globally_unavailable_bot(profile, exc)
-            except Exception as exc:
-                state = self.runtime_states[profile.id]
-                state.mark_failed(str(exc))
-                logger.exception("swarm: bot_id=%s исключён из активного пула при startup: %s", profile.id, exc)
+                return
+            async with semaphore:
+                try:
+                    await self._start_single_bot(profile)
+                    await self._record_startup_availability(profile.id, True, None)
+                except AccountMessagingUnavailableError as exc:
+                    await self._quarantine_globally_unavailable_bot(profile, exc)
+                except Exception as exc:
+                    state = self.runtime_states[profile.id]
+                    state.mark_failed(str(exc))
+                    await self._record_startup_availability(profile.id, False, str(exc))
+                    logger.exception("swarm: bot_id=%s исключён из активного пула при startup: %s", profile.id, exc)
+
+        semaphore = asyncio.Semaphore(self.startup_concurrency)
+        await asyncio.gather(*(start_profile(profile, semaphore) for profile in self.bot_profiles))
+
+    async def _record_startup_availability(self, bot_id: str, is_available: bool, reason: str | None) -> None:
+        """Передаёт свежий результат startup-проверки в persisted snapshot."""
+        if self.startup_availability_bot is None:
+            return
+        result = self.startup_availability_bot(bot_id, is_available, reason)
+        if asyncio.iscoroutine(result):
+            await result
 
     async def stop(self) -> None:
         """Останавливает все активные клиенты и завершает supervise loops."""
@@ -244,6 +262,7 @@ class SwarmManager:
         """Отключает и сохраняет global quarantine без допуска к дальнейшей работе."""
         reason = str(exc)
         await self.disable_bot(profile.id, reason=reason)
+        await self._record_startup_availability(profile.id, False, reason)
         if self.startup_quarantine_bot is not None:
             try:
                 result = self.startup_quarantine_bot(profile.id, reason)

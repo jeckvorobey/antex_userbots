@@ -38,6 +38,19 @@ async def test_quarantine_log_redacts_private_invite_link(exchange_store, caplog
     assert "<private invite link>" in caplog.text
 
 
+@pytest.mark.asyncio
+async def test_startup_availability_snapshot_replaces_stale_rows(exchange_store):
+    """Startup хранит только свежий результат проверки настроенного бота."""
+    await exchange_store.quarantine_bot(group_key="old", bot_id="removed", reason="old")
+    await exchange_store.reset_startup_availability()
+    await exchange_store.record_startup_availability(bot_id="anna", is_available=True, reason=None)
+
+    rows = await exchange_store.database.fetch_all(
+        "availability_rows", "SELECT bot_id, is_available, reason FROM quarantined_swarm_bots"
+    )
+    assert [tuple(row) for row in rows] == [("anna", 1, "")]
+
+
 async def test_exchange_store_persists_recent_bot_ids_topics_and_signatures(exchange_store):
     """Проверяет persisted bot/topic/question state для orchestrator."""
     exchange_id = await exchange_store.create_exchange(

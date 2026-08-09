@@ -70,6 +70,13 @@ The system SHALL require at least two enabled bots before startup and at least t
 - **WHEN** startup leaves fewer than two active bots
 - **THEN** the orchestrator job is not registered and startup fails
 
+### Requirement: Fresh availability determines startup pool
+The system SHALL reset persisted startup availability before checking enabled bot profiles and SHALL admit a profile only after the global Telegram eligibility check and `can_write=True` for every enabled group.
+
+#### Scenario: Previous quarantine is stale
+- **WHEN** a previously quarantined enabled bot is started after a restart
+- **THEN** it receives a fresh Telegram availability check instead of being skipped from old persisted state
+
 ### Requirement: Handler registration per active bot
 The system SHALL register an addressed-reply handler for each active bot client.
 

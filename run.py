@@ -380,7 +380,7 @@ async def _log_bot_write_permission(
     *,
     bot_id: str,
     group_id: str,
-) -> None:
+) -> bool | None:
     """Логирует право текущего аккаунта отправлять сообщения в группу."""
     get_permissions = getattr(telegram_client, "get_permissions", None)
     if not callable(get_permissions):
@@ -389,7 +389,7 @@ async def _log_bot_write_permission(
             bot_id,
             group_id,
         )
-        return
+        return None
 
     try:
         participant_permissions = await get_permissions(group_target, "me")
@@ -401,7 +401,7 @@ async def _log_bot_write_permission(
             group_id,
             exc,
         )
-        return
+        return None
 
     is_admin = bool(getattr(participant_permissions, "is_admin", False))
     participant_banned_rights = getattr(
@@ -423,6 +423,7 @@ async def _log_bot_write_permission(
         default_send_messages_banned,
         is_admin,
     )
+    return can_write
 
 
 def _build_group_membership_startup_hook(
@@ -485,12 +486,14 @@ def _build_multi_group_membership_startup_hook(
             )
             resolved[group_id] = resolved_target
             if resolved_target is not None:
-                await _log_bot_write_permission(
+                can_write = await _log_bot_write_permission(
                     client_wrapper.client,
                     resolved_target,
                     bot_id=profile.id,
                     group_id=group_id,
                 )
+                if can_write is not True:
+                    raise AccountMessagingUnavailableError(f"telegram_startup_group_write_unavailable:{group_id}")
         return resolved
 
     return startup_hook
@@ -720,13 +723,9 @@ async def _register_swarm_handlers(
 async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: AsyncIOScheduler) -> None:
     """Запускает swarm-режим с постоянным пулом клиентов."""
     bot_profiles = _build_swarm_bot_profiles(settings)
-    get_quarantined_bot_ids = getattr(runtime.exchange_store, "get_quarantined_bot_ids", None)
-    quarantined_bot_ids = await get_quarantined_bot_ids() if callable(get_quarantined_bot_ids) else set()
-    for profile in bot_profiles:
-        if profile.id in quarantined_bot_ids:
-            profile.enabled = False
-    if quarantined_bot_ids:
-        logger.warning("Исключены quarantined swarm-аккаунты: bot_ids=%s", sorted(quarantined_bot_ids))
+    reset_startup_availability = getattr(runtime.exchange_store, "reset_startup_availability", None)
+    if callable(reset_startup_availability):
+        await reset_startup_availability()
     if sum(profile.enabled for profile in bot_profiles) < 2:
         raise ValueError("Swarm mode requires at least two enabled bots")
     current_settings = settings
@@ -734,6 +733,7 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
     if not current_groups:
         raise ValueError("Swarm mode requires at least one enabled group")
 
+    record_startup_availability = getattr(runtime.exchange_store, "record_startup_availability", None)
     manager = SwarmManager(
         bot_profiles=bot_profiles,
         client_factory=lambda profile: UserBotClient(
@@ -749,6 +749,13 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
             group_key=GLOBAL_ACCOUNT_QUARANTINE_KEY,
             bot_id=bot_id,
             reason=reason,
+        ),
+        startup_availability_bot=(
+            lambda bot_id, is_available, reason: record_startup_availability(
+                bot_id=bot_id, is_available=is_available, reason=reason
+            )
+            if callable(record_startup_availability)
+            else None
         ),
     )
     await manager.start()

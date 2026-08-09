@@ -527,8 +527,8 @@ async def test_run_swarm_mode_requires_two_active_bots_after_start(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_swarm_mode_requires_two_enabled_bots_after_persisted_quarantine(monkeypatch):
-    """Persisted quarantine останавливает startup до подключения единственного оставшегося bot."""
+async def test_run_swarm_mode_ignores_previous_persisted_quarantine(monkeypatch):
+    """Предыдущий quarantine не выключает configured bot до свежей проверки."""
     import run
 
     settings = Settings(
@@ -544,18 +544,17 @@ async def test_run_swarm_mode_requires_two_enabled_bots_after_persisted_quaranti
         SimpleNamespace(id="anna", session_string="anna-session", persona_file="anna.md", enabled=True, temperature=0.9, session_env="SESSION_STRING_ANNA"),
         SimpleNamespace(id="mike", session_string="mike-session", persona_file="mike.md", enabled=True, temperature=0.8, session_env="SESSION_STRING_MIKE"),
     ]
-    runtime = SimpleNamespace(
-        exchange_store=SimpleNamespace(get_quarantined_bot_ids=AsyncMock(return_value={"mike"})),
-    )
+    runtime = SimpleNamespace(exchange_store=SimpleNamespace(reset_startup_availability=AsyncMock()))
     scheduler = SimpleNamespace(add_job=Mock())
-    manager_factory = Mock()
-    monkeypatch.setattr(run, "SwarmManager", manager_factory)
+    manager = SimpleNamespace(start=AsyncMock(), stop=AsyncMock(), active_bot_ids=["anna", "mike"], get_client=lambda _: SimpleNamespace(client=FakeTelegramClient("anna", 1, "hash")), swarm_user_ids=set(), supervise_bot=AsyncMock())
+    monkeypatch.setattr(run, "SwarmManager", lambda **_: manager)
+    monkeypatch.setattr(run, "_register_swarm_handlers", AsyncMock())
+    monkeypatch.setattr(run, "_resolve_group_target", AsyncMock(return_value=SimpleNamespace(id=1)))
+    monkeypatch.setattr(run, "_log_resolved_group", AsyncMock())
 
-    with pytest.raises(ValueError, match="at least two enabled bots"):
-        await run._run_swarm_mode(settings, runtime, scheduler)
-
-    manager_factory.assert_not_called()
-    scheduler.add_job.assert_not_called()
+    await run._run_swarm_mode(settings, runtime, scheduler)
+    runtime.exchange_store.reset_startup_availability.assert_awaited_once()
+    manager.start.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -801,7 +800,7 @@ async def test_multi_group_membership_logs_bot_write_permission(monkeypatch, cap
         groups=[SimpleNamespace(id="first", enabled=True, group_chat_id=101, group_target="@first")],
     )
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.INFO), pytest.raises(AccountMessagingUnavailableError, match="group_write_unavailable:first"):
         await hook(SimpleNamespace(id="anna"), wrapper)
 
     assert any(
@@ -829,10 +828,8 @@ async def test_multi_group_membership_logs_unknown_write_permission_without_fail
         groups=[SimpleNamespace(id="first", enabled=True, group_chat_id=101, group_target="@first")],
     )
 
-    with caplog.at_level(logging.WARNING):
-        resolved = await hook(SimpleNamespace(id="anna"), wrapper)
-
-    assert resolved == {"first": SimpleNamespace(id=101)}
+    with caplog.at_level(logging.WARNING), pytest.raises(AccountMessagingUnavailableError, match="group_write_unavailable:first"):
+        await hook(SimpleNamespace(id="anna"), wrapper)
     assert any("bot_id=anna group_id=first can_write=unknown" in record.getMessage() for record in caplog.records)
 
 
@@ -1084,6 +1081,8 @@ async def test_group_membership_startup_hook_waits_random_delay_before_join(monk
 
     monkeypatch.setattr(run.asyncio, "sleep", sleep)
     monkeypatch.setattr(run, "_ensure_group_membership", ensure_membership)
+    monkeypatch.setattr(run, "_log_bot_write_permission", AsyncMock(return_value=True))
+    monkeypatch.setattr(run, "_log_bot_write_permission", AsyncMock(return_value=True))
     monkeypatch.setattr(run, "_pick_startup_membership_delay_seconds", lambda: 45.0, raising=False)
 
     hook = run._build_group_membership_startup_hook(
@@ -1110,6 +1109,7 @@ async def test_multi_group_membership_startup_hook_waits_same_seconds_before_che
     ensure_membership = AsyncMock(side_effect=["@first", "@second"])
     monkeypatch.setattr(run.asyncio, "sleep", sleep)
     monkeypatch.setattr(run, "_ensure_group_membership", ensure_membership)
+    monkeypatch.setattr(run, "_log_bot_write_permission", AsyncMock(return_value=True))
     monkeypatch.setattr(run, "_pick_startup_membership_delay_seconds", lambda: 58.0, raising=False)
 
     hook = run._build_multi_group_membership_startup_hook(

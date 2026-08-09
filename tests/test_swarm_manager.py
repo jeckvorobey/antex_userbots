@@ -133,10 +133,10 @@ async def test_swarm_manager_stops_startup_when_global_quarantine_cannot_be_pers
     with pytest.raises(RuntimeError, match="sqlite unavailable"):
         await manager.start()
 
-    assert manager.active_bot_ids == []
+    assert manager.active_bot_ids == ["john"]
     assert manager.runtime_states["anna"].status == "disabled"
     anna_client.stop.assert_awaited_once()
-    john_client.start.assert_not_awaited()
+    john_client.start.assert_awaited_once()
 
 
 @pytest.mark.asyncio
