@@ -71,6 +71,7 @@ bin/
 
 # Misc generated files
 .codex
+.worktrees/
 *.zip
 *.tar
 *.tar.gz
