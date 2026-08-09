@@ -63,7 +63,9 @@ class SQLiteDatabase:
     ) -> T:
         """Выполняет запись и commit под общим lock с retry блокировок."""
         async with self.write_lock:
-            return await self._retry_locked(operation, callback)
+            result = await self._retry_locked(operation, callback)
+            self._restrict_file_permissions()
+            return result
 
     async def execute(
         self,
@@ -163,7 +165,10 @@ class SQLiteDatabase:
             parent.mkdir(parents=True, exist_ok=True)
 
     def _restrict_file_permissions(self) -> None:
-        """Ограничивает доступ к persisted SQLite-файлу владельцем процесса."""
+        """Ограничивает доступ к SQLite-файлам владельцем процесса."""
         if self.db_path == ":memory:" or self.db_path.startswith("file:"):
             return
-        Path(self.db_path).chmod(0o600)
+        database_path = Path(self.db_path)
+        for path in (database_path, database_path.with_name(f"{database_path.name}-wal"), database_path.with_name(f"{database_path.name}-shm")):
+            if path.exists():
+                path.chmod(0o600)

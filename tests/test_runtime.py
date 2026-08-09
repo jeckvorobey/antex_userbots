@@ -777,6 +777,65 @@ async def test_multi_group_membership_scans_dialogs_once_for_all_groups(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_multi_group_membership_logs_bot_write_permission(monkeypatch, caplog):
+    """Проверяет стартовый лог возможности бота писать в группу."""
+    import logging
+    import run
+
+    telegram_client = FakeTelegramClient("anna", 1, "hash")
+    telegram_client.get_permissions = AsyncMock(
+        side_effect=[
+            SimpleNamespace(
+                is_admin=False,
+                participant=SimpleNamespace(banned_rights=SimpleNamespace(send_messages=True)),
+            ),
+            SimpleNamespace(send_messages=False),
+        ]
+    )
+    wrapper = SimpleNamespace(client=telegram_client)
+    monkeypatch.setattr(run.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(run, "_pick_startup_membership_delay_seconds", lambda: 30.0)
+    monkeypatch.setattr(run, "_ensure_group_membership", AsyncMock(return_value=SimpleNamespace(id=101)))
+
+    hook = run._build_multi_group_membership_startup_hook(
+        groups=[SimpleNamespace(id="first", enabled=True, group_chat_id=101, group_target="@first")],
+    )
+
+    with caplog.at_level(logging.INFO):
+        await hook(SimpleNamespace(id="anna"), wrapper)
+
+    assert any(
+        "bot_id=anna group_id=first can_write=False "
+        "participant_banned_rights.send_messages=True "
+        "default_banned_rights.send_messages=False is_admin=False" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_multi_group_membership_logs_unknown_write_permission_without_failure(monkeypatch, caplog):
+    """Проверяет, что недоступные права не прерывают startup."""
+    import logging
+    import run
+
+    telegram_client = FakeTelegramClient("anna", 1, "hash")
+    wrapper = SimpleNamespace(client=telegram_client)
+    monkeypatch.setattr(run.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(run, "_pick_startup_membership_delay_seconds", lambda: 30.0)
+    monkeypatch.setattr(run, "_ensure_group_membership", AsyncMock(return_value=SimpleNamespace(id=101)))
+
+    hook = run._build_multi_group_membership_startup_hook(
+        groups=[SimpleNamespace(id="first", enabled=True, group_chat_id=101, group_target="@first")],
+    )
+
+    with caplog.at_level(logging.WARNING):
+        resolved = await hook(SimpleNamespace(id="anna"), wrapper)
+
+    assert resolved == {"first": SimpleNamespace(id=101)}
+    assert any("bot_id=anna group_id=first can_write=unknown" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.asyncio
 async def test_dialog_index_preserves_channel_namespace_when_user_raw_id_collides():
     """Проверяет, что raw ID пользователя не вытесняет channel peer ID."""
     import run

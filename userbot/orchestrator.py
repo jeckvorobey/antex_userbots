@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import random
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date
 from datetime import UTC, datetime, timedelta
@@ -280,17 +281,31 @@ class SwarmOrchestrator:
 
     def _pick_bot_candidates(self, recent_bot_ids: list[str]) -> list[SwarmBotProfile]:
         """Возвращает кандидатов, ослабляя cooldown только если иначе пары не собрать."""
-        for cooldown_size in range(min(RECENT_BOT_COOLDOWN_LIMIT, len(recent_bot_ids)), -1, -1):
-            excluded_bot_ids = set(recent_bot_ids[:cooldown_size])
-            candidates = [profile for profile in self._active_bot_profiles() if profile.id not in excluded_bot_ids]
-            if len(candidates) >= 2:
-                if cooldown_size < min(RECENT_BOT_COOLDOWN_LIMIT, len(recent_bot_ids)):
+        active_profiles = self._active_bot_profiles()
+        max_cooldown_size = min(RECENT_BOT_COOLDOWN_LIMIT, len(recent_bot_ids))
+        profile_counts = Counter(profile.id for profile in active_profiles)
+        excluded_counts = Counter(recent_bot_ids[:max_cooldown_size])
+        excluded_profile_count = sum(profile_counts[bot_id] for bot_id in excluded_counts)
+
+        for cooldown_size in range(max_cooldown_size, -1, -1):
+            candidate_count = len(active_profiles) - excluded_profile_count
+            if candidate_count >= 2:
+                excluded_bot_ids = set(excluded_counts)
+                candidates = [profile for profile in active_profiles if profile.id not in excluded_bot_ids]
+                if cooldown_size < max_cooldown_size:
                     logger.info(
                         "orchestrator: relaxed recent bot cooldown cooldown_size=%s candidates=%s",
                         cooldown_size,
-                        len(candidates),
+                        candidate_count,
                     )
                 return candidates
+
+            if cooldown_size > 0:
+                restored_bot_id = recent_bot_ids[cooldown_size - 1]
+                excluded_counts[restored_bot_id] -= 1
+                if excluded_counts[restored_bot_id] == 0:
+                    excluded_counts.pop(restored_bot_id)
+                    excluded_profile_count -= profile_counts[restored_bot_id]
         raise ValueError("Для scheduled exchange нужно минимум два enabled userbot")
 
     async def _choose_topic(self) -> str:

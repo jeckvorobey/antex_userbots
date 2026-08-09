@@ -18,6 +18,39 @@ def _manager_with_clients(initiator_client, responder_client):
     )
 
 
+def test_orchestrator_selects_candidates_with_one_roster_scan_after_cooldown_resolution():
+    """Проверяет линейный доступ к roster при ослаблении cooldown."""
+
+    class CountingProfile:
+        def __init__(self, bot_id: str) -> None:
+            self._bot_id = bot_id
+            self.enabled = True
+            self.id_reads = 0
+
+        @property
+        def id(self) -> str:
+            self.id_reads += 1
+            return self._bot_id
+
+    profiles = [CountingProfile(bot_id) for bot_id in ("anna", "mike", "john", "kate")]
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=profiles,
+        manager=SimpleNamespace(),
+        topic_selector=SimpleNamespace(),
+        prompt_composer=SimpleNamespace(),
+        gemini_client=SimpleNamespace(),
+        history=SimpleNamespace(),
+        exchange_store=SimpleNamespace(),
+    )
+    for profile in profiles:
+        profile.id_reads = 0
+
+    candidates = orchestrator._pick_bot_candidates(["anna", "mike", "john", "kate"])
+
+    assert [profile.id for profile in candidates] == ["john", "kate"]
+    assert sum(profile.id_reads for profile in profiles) <= 10
+
+
 @pytest.mark.asyncio
 async def test_orchestrator_skips_exchange_when_recent_human_activity_detected():
     """Проверяет отказ от scheduled exchange при недавней активности людей."""

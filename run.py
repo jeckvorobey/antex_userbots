@@ -374,6 +374,57 @@ async def _ensure_group_membership(
     return None
 
 
+async def _log_bot_write_permission(
+    telegram_client: object,
+    group_target: object,
+    *,
+    bot_id: str,
+    group_id: str,
+) -> None:
+    """Логирует право текущего аккаунта отправлять сообщения в группу."""
+    get_permissions = getattr(telegram_client, "get_permissions", None)
+    if not callable(get_permissions):
+        logger.warning(
+            "swarm: bot_id=%s group_id=%s can_write=unknown: get_permissions недоступен",
+            bot_id,
+            group_id,
+        )
+        return
+
+    try:
+        participant_permissions = await get_permissions(group_target, "me")
+        default_banned_rights = await get_permissions(group_target)
+    except Exception as exc:
+        logger.warning(
+            "swarm: bot_id=%s group_id=%s can_write=unknown: не удалось получить права: %s",
+            bot_id,
+            group_id,
+            exc,
+        )
+        return
+
+    is_admin = bool(getattr(participant_permissions, "is_admin", False))
+    participant_banned_rights = getattr(
+        getattr(participant_permissions, "participant", None),
+        "banned_rights",
+        None,
+    )
+    participant_send_messages_banned = bool(getattr(participant_banned_rights, "send_messages", False))
+    default_send_messages_banned = bool(getattr(default_banned_rights, "send_messages", False))
+    can_write = is_admin or not (participant_send_messages_banned or default_send_messages_banned)
+    logger.info(
+        "swarm: bot_id=%s group_id=%s can_write=%s "
+        "participant_banned_rights.send_messages=%s "
+        "default_banned_rights.send_messages=%s is_admin=%s",
+        bot_id,
+        group_id,
+        can_write,
+        participant_send_messages_banned,
+        default_send_messages_banned,
+        is_admin,
+    )
+
+
 def _build_group_membership_startup_hook(
     *,
     group_chat_id: int | None,
@@ -433,6 +484,13 @@ def _build_multi_group_membership_startup_hook(
                 dialog_index=dialog_index,
             )
             resolved[group_id] = resolved_target
+            if resolved_target is not None:
+                await _log_bot_write_permission(
+                    client_wrapper.client,
+                    resolved_target,
+                    bot_id=profile.id,
+                    group_id=group_id,
+                )
         return resolved
 
     return startup_hook

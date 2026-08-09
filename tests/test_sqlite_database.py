@@ -57,6 +57,25 @@ async def test_sqlite_database_restricts_file_permissions(tmp_path):
         await database.close()
 
 
+async def test_sqlite_database_restricts_wal_sidecar_permissions_after_write(tmp_path):
+    """Проверяет owner-only права SQLite WAL и SHM после записи."""
+    db_path = tmp_path / "history.db"
+    database = SQLiteDatabase(str(db_path))
+
+    await database.open()
+    try:
+        await database.execute("create_messages", "CREATE TABLE messages (id INTEGER PRIMARY KEY)")
+        sidecar_paths = (db_path.with_name("history.db-wal"), db_path.with_name("history.db-shm"))
+        for sidecar_path in sidecar_paths:
+            assert sidecar_path.exists()
+            sidecar_path.chmod(0o666)
+        await database.execute("insert_message", "INSERT INTO messages DEFAULT VALUES")
+        for sidecar_path in sidecar_paths:
+            assert sidecar_path.stat().st_mode & 0o777 == 0o600
+    finally:
+        await database.close()
+
+
 async def test_sqlite_database_retries_temporary_lock(monkeypatch, caplog):
     """Проверяет retry временной блокировки с именем операции."""
     database = SQLiteDatabase(":memory:")
