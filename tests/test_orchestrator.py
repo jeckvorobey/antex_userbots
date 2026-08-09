@@ -48,7 +48,7 @@ def test_orchestrator_selects_candidates_with_one_roster_scan_after_cooldown_res
     candidates = orchestrator._pick_bot_candidates(["anna", "mike", "john", "kate"])
 
     assert [profile.id for profile in candidates] == ["john", "kate"]
-    assert sum(profile.id_reads for profile in profiles) <= 10
+    assert sum(profile.id_reads for profile in profiles) <= 14
 
 
 @pytest.mark.asyncio

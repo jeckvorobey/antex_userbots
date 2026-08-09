@@ -792,7 +792,7 @@ async def test_multi_group_membership_logs_bot_write_permission(monkeypatch, cap
             SimpleNamespace(send_messages=False),
         ]
     )
-    wrapper = SimpleNamespace(client=telegram_client)
+    wrapper = SimpleNamespace(client=telegram_client, verify_global_messaging_eligibility=AsyncMock())
     monkeypatch.setattr(run.asyncio, "sleep", AsyncMock())
     monkeypatch.setattr(run, "_pick_startup_membership_delay_seconds", lambda: 30.0)
     monkeypatch.setattr(run, "_ensure_group_membership", AsyncMock(return_value=SimpleNamespace(id=101)))
@@ -819,7 +819,8 @@ async def test_multi_group_membership_logs_unknown_write_permission_without_fail
     import run
 
     telegram_client = FakeTelegramClient("anna", 1, "hash")
-    wrapper = SimpleNamespace(client=telegram_client)
+    telegram_client.get_permissions = AsyncMock(side_effect=RuntimeError("permissions unavailable"))
+    wrapper = SimpleNamespace(client=telegram_client, verify_global_messaging_eligibility=AsyncMock())
     monkeypatch.setattr(run.asyncio, "sleep", AsyncMock())
     monkeypatch.setattr(run, "_pick_startup_membership_delay_seconds", lambda: 30.0)
     monkeypatch.setattr(run, "_ensure_group_membership", AsyncMock(return_value=SimpleNamespace(id=101)))
