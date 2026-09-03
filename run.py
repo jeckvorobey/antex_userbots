@@ -640,6 +640,7 @@ def _build_group_orchestrator_signature(
     group_target: object,
     group_chat_id: int | None,
     skip_if_recent_human_activity: bool,
+    allow_external_llm_for_scheduled: bool,
 ) -> tuple[object, ...]:
     """Строит стабильную подпись group runtime-настроек для кеша orchestrator."""
     return (
@@ -656,6 +657,7 @@ def _build_group_orchestrator_signature(
         tuple(getattr(group, "responder_delay_minutes", (3, 10))),
         getattr(group, "max_turns_per_exchange", 2),
         skip_if_recent_human_activity,
+        allow_external_llm_for_scheduled,
     )
 
 
@@ -922,6 +924,7 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
                 group_target=group_target,
                 group_chat_id=group_chat_id,
                 skip_if_recent_human_activity=current_settings.swarm_skip_if_recent_human_activity,
+                allow_external_llm_for_scheduled=current_settings.swarm_allow_external_llm_for_scheduled,
             )
 
             def build_orchestrator(

@@ -619,6 +619,39 @@ def test_rotate_groups_for_tick_normalizes_index_after_reload():
     assert empty_next_index == 0
 
 
+def test_group_orchestrator_signature_changes_with_scheduled_llm_gate():
+    """Отключение scheduled LLM инвалидирует кешированный orchestrator."""
+    import run
+
+    group = SimpleNamespace(
+        id="danang",
+        city="Da Nang",
+        group_chat_id=-100123,
+        group_target="@danang",
+        active_windows_utc=["10-11"],
+        initiator_offset_minutes=(0, 30),
+        responder_delay_minutes=(3, 10),
+        max_turns_per_exchange=2,
+    )
+    common = {
+        "group": group,
+        "group_target": "@danang",
+        "group_chat_id": -100123,
+        "skip_if_recent_human_activity": True,
+    }
+
+    enabled = run._build_group_orchestrator_signature(
+        **common,
+        allow_external_llm_for_scheduled=True,
+    )
+    disabled = run._build_group_orchestrator_signature(
+        **common,
+        allow_external_llm_for_scheduled=False,
+    )
+
+    assert enabled != disabled
+
+
 @pytest.mark.asyncio
 async def test_run_swarm_mode_requires_two_active_bots_after_start(monkeypatch, tmp_path):
     """Проверяет отказ запуска, если после startup остался один бот."""

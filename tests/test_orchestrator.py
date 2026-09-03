@@ -410,6 +410,62 @@ async def test_orchestrator_replaces_unsafe_responder_output_with_fallback():
     assert history.save_message.await_args.kwargs["text"] == SAFE_SCHEDULED_REPLY_FALLBACK_TEXT
 
 
+@pytest.mark.parametrize(
+    ("allow_external_llm", "output_is_safe"),
+    [(False, True), (True, False)],
+    ids=["llm-disabled", "unsafe-output"],
+)
+@pytest.mark.asyncio
+async def test_important_service_responder_fallback_keeps_approved_contact(
+    allow_external_llm: bool,
+    output_is_safe: bool,
+):
+    """Important-service fallback сохраняет обязательную разрешённую ссылку."""
+    responder_client = SimpleNamespace(send_message=AsyncMock())
+    exchange_store = SimpleNamespace(
+        mark_responder_generated=AsyncMock(),
+        mark_exchange_completed=AsyncMock(),
+    )
+    ai_client = SimpleNamespace(
+        generate_reply=AsyncMock(return_value="https://t.me/+unsafe"),
+        is_output_safe=lambda _text: output_is_safe,
+    )
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+            SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md", telegram_user_id=202),
+        ],
+        manager=_manager_with_clients(SimpleNamespace(send_message=AsyncMock()), responder_client),
+        topic_selector=SimpleNamespace(),
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system-reply")),
+        ai_client=ai_client,
+        history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
+        exchange_store=exchange_store,
+        group_target="@chat",
+        allow_external_llm_for_scheduled=allow_external_llm,
+    )
+    exchange = {
+        "exchange_id": "exchange-important",
+        "initiator_bot_id": "anna",
+        "responder_bot_id": "mike",
+        "topic": "Обмен рублей",
+        "question_text": "Где обменять рубли?",
+        "initiator_message_id": 501,
+        "exchange_kind": "important_service",
+        "important_scenario": "exchange_rub",
+    }
+
+    assert await orchestrator._run_due_responder_exchange(exchange=exchange) is True
+
+    responder_text = responder_client.send_message.await_args.args[1]
+    assert "https://t.me/tt_exchenge_bot/antex" in responder_text
+    assert "https://t.me/+unsafe" not in responder_text
+    if allow_external_llm:
+        ai_client.generate_reply.assert_awaited_once()
+    else:
+        ai_client.generate_reply.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_orchestrator_scopes_exchange_to_group_and_uses_real_chat_id():
     """Проверяет group scope для scheduled exchange."""
@@ -573,6 +629,42 @@ async def test_responder_user_banned_marks_exchange_skipped_without_history_or_r
         group_key="@chat", bot_id="mike", reason="telegram_responder_send_forbidden:UserBannedInChannelError"
     )
     history.save_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_permanent_send_quarantine_failure_disables_bot_before_propagating():
+    """Ошибка SQLite quarantine не оставляет Telegram-ограниченного бота активным."""
+    persistence_error = RuntimeError("quarantine unavailable")
+    exchange_store = SimpleNamespace(quarantine_bot=AsyncMock(side_effect=persistence_error))
+    manager = SimpleNamespace(disable_bot=AsyncMock())
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md"),
+            SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md"),
+        ],
+        manager=manager,
+        topic_selector=SimpleNamespace(),
+        prompt_composer=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
+        history=SimpleNamespace(),
+        exchange_store=exchange_store,
+        group_target="@chat",
+    )
+
+    with pytest.raises(RuntimeError, match="quarantine unavailable"):
+        await orchestrator._handle_permanent_send_error(
+            exchange_id="exchange-1",
+            bot_id="mike",
+            counterpart_bot_id="anna",
+            stage="responder",
+            exc=UserBannedInChannelError(None),
+        )
+
+    assert "mike" in orchestrator.disabled_bot_ids
+    manager.disable_bot.assert_awaited_once_with(
+        "mike",
+        reason="telegram_responder_send_forbidden:UserBannedInChannelError",
+    )
 
 
 @pytest.mark.asyncio

@@ -182,14 +182,14 @@ The system SHALL maintain runtime state for configured groups separately from im
 - **THEN** runtime returns no active groups and does not create a legacy fallback from compatibility fields
 
 ### Requirement: Group orchestrator reuse
-The system SHALL reuse per-group scheduled orchestrators across scheduler ticks while the group's effective runtime signature is unchanged.
+The system SHALL reuse per-group scheduled orchestrators across scheduler ticks while the group's effective runtime signature, including its scheduled LLM security gate, is unchanged.
 
 #### Scenario: Unchanged group reuses orchestrator
 - **WHEN** two scheduler ticks run for the same enabled group without settings or resolved target changes
 - **THEN** the second tick reuses the existing `SwarmOrchestrator` instance for that group
 
 #### Scenario: Changed group rebuilds orchestrator
-- **WHEN** a group's effective schedule, target, city, max turns, or skip-human-activity setting changes
+- **WHEN** a group's effective schedule, target, city, max turns, skip-human-activity setting, or scheduled LLM gate changes
 - **THEN** the next scheduler tick creates a replacement `SwarmOrchestrator` for that group
 
 #### Scenario: Disabled group cache is pruned
@@ -234,7 +234,7 @@ The system SHALL prioritize human reply processing over scheduled tasks for the 
 - **THEN** a scheduled task for that bot receives `acquired = false`
 
 ### Requirement: Scheduled exchange устойчив к Telegram send restrictions
-Swarm runtime SHALL не завершать scheduler tick исключением при permanent Telegram send error: `UserBannedInChannelError`, `ChatWriteForbiddenError`, `ChannelPrivateError` или `UserNotParticipantError`.
+Swarm runtime SHALL не завершать scheduler tick исключением при permanent Telegram send error: `UserBannedInChannelError`, `ChatWriteForbiddenError`, `ChannelPrivateError` или `UserNotParticipantError`, кроме отдельной observability-ветки, где durable quarantine не удалось сохранить после обязательного runtime-disable аккаунта.
 
 #### Scenario: У ответчика нет права писать в целевой чат
 - **WHEN** responder `send_message` возвращает permanent Telegram send error
@@ -276,6 +276,10 @@ Swarm runtime SHALL не завершать scheduler tick исключение�
 #### Scenario: Quarantine запись addressed reply не сохранилась
 - **WHEN** запись durable quarantine после permanent addressed-reply error завершается ошибкой
 - **THEN** runtime MUST всё равно отключить bot до распространения ошибки persistence
+
+#### Scenario: Quarantine запись scheduled exchange не сохранилась
+- **WHEN** запись durable quarantine после permanent scheduled send error завершается ошибкой
+- **THEN** runtime MUST всё равно отключить bot от всех runtime flows до распространения ошибки persistence
 
 #### Scenario: Активный пул уменьшился
 - **WHEN** после quarantine в active pool остаётся меньше двух ботов

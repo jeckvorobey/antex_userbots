@@ -429,6 +429,8 @@ class Settings:
 
         self.openrouter_api_key = _required_secret(self.openrouter_api_key)
         self.proxy = _optional_secret(self.proxy)
+        self._group_chat_id_fallback = self.group_chat_id
+        self._group_target_fallback = self.group_target
 
         app_config = _load_toml_config(settings_path, require_exists=settings_path_required)
         self.settings_path = str(settings_path or DEFAULT_SETTINGS_PATH)
@@ -576,8 +578,8 @@ class SettingsReloadWatcher:
             _env_file=self.settings._env_file,
             openrouter_api_key=self.settings.openrouter_api_key,
             proxy=self.settings.proxy,
-            group_chat_id=self.settings.group_chat_id,
-            group_target=self.settings.group_target,
+            group_chat_id=self.settings._group_chat_id_fallback,
+            group_target=self.settings._group_target_fallback,
             settings_path=self.settings.settings_path,
         )
         self.settings = reloaded

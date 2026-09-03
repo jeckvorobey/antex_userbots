@@ -48,6 +48,7 @@
 - сценарии идут по кругу: обмен RUB -> Airbnb оплата/бронь -> обмен USDT -> Booking оплата/бронь;
 - вопрос звучит как обычная реплика и не упоминает контакт;
 - ответ второго бота естественно и разными формулировками упоминает miniapp-ссылку `https://t.me/tt_exchenge_bot/antex`.
+- если scheduled LLM отключён или вернул unsafe output, important-service ответ использует короткий локальный fallback с той же разрешённой ссылкой.
 
 ## Что нужно для запуска
 
@@ -257,6 +258,8 @@ uv run python run.py
 - добавленные, включённые или изменённые группы попадут в runtime только после membership и `can_write=True` checks для каждого active bot;
 - группа, которую хотя бы один active bot не смог разрешить, подключить или подтвердить для записи, не активируется до следующего изменения конфигурации или restart;
 - выключенные группы перестанут получать scheduled exchanges и addressed replies;
+- удаление всех `[[groups]]` не восстанавливает прежнюю группу через compatibility fallback;
+- изменение `swarm.security.allow_external_llm_for_scheduled` применяется к group orchestrator на следующем tick;
 - боты не перезапускаются, изменения списка ботов и `SESSION_STRING_*` по-прежнему требуют restart.
 
 ## Проверка доступности ботов при startup

@@ -492,6 +492,43 @@ def test_settings_reload_watcher_returns_new_settings_on_mtime_change(tmp_path):
     assert [group.id for group in reloaded.groups] == ["danang", "batumi"]
 
 
+def test_settings_reload_does_not_restore_removed_toml_group_as_legacy(tmp_path):
+    """Удалённая из TOML группа не возвращается через derived fallback-поля."""
+    settings_path = write_settings(
+        tmp_path,
+        """
+        [[groups]]
+        id = "danang"
+        city = "Da Nang"
+        group_chat_id = -100111
+        """,
+    )
+    env = {
+        "OPENROUTER_API_KEY": "test_key",
+        "SETTINGS_PATH": str(settings_path),
+    }
+
+    with patch.dict("os.environ", env, clear=True):
+        settings = Settings(_env_file=None)
+        watcher = SettingsReloadWatcher(settings)
+        settings_path.write_text(
+            """
+            [telegram]
+            api_id = 87654321
+            api_hash = "updated_api_hash"
+
+            [openrouter]
+            models = ["test/new-primary", "test/new-fallback"]
+            """.strip(),
+            encoding="utf-8",
+        )
+        reloaded = watcher.poll()
+
+    assert reloaded is not None
+    assert reloaded.groups == []
+    assert reloaded.enabled_groups == []
+
+
 def test_settings_rejects_missing_explicit_settings_path(tmp_path):
     """Проверяет ошибку при отсутствующем явно переданном TOML-файле."""
     missing_path = tmp_path / "missing-settings.toml"

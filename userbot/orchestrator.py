@@ -33,6 +33,9 @@ IMPORTANT_SERVICE_KIND = "important_service"
 REGULAR_EXCHANGE_KIND = "regular"
 IMPORTANT_SERVICE_CONTACT = "https://t.me/tt_exchenge_bot/antex"
 SAFE_SCHEDULED_REPLY_FALLBACK_TEXT = "Я бы уточнил это у тех, кто сталкивался с этим совсем недавно."
+SAFE_IMPORTANT_SERVICE_REPLY_FALLBACK_TEXT = (
+    f"Можно обратиться сюда: {IMPORTANT_SERVICE_CONTACT} — там подскажут по обмену или оплате."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -533,9 +536,9 @@ class SwarmOrchestrator:
                         system_prompt=responder_prompt, history=responder_history, user_message=str(exchange["question_text"]),
                     )
                     if not getattr(self.ai_client, "is_output_safe", lambda _text: True)(responder_text):
-                        responder_text = SAFE_SCHEDULED_REPLY_FALLBACK_TEXT
+                        responder_text = self._responder_fallback_text(exchange)
                 else:
-                    responder_text = SAFE_SCHEDULED_REPLY_FALLBACK_TEXT
+                    responder_text = self._responder_fallback_text(exchange)
                 mark_generated = getattr(self.exchange_store, "mark_responder_generated", None)
                 if callable(mark_generated):
                     await mark_generated(str(exchange["exchange_id"]), responder_text)
@@ -572,6 +575,13 @@ class SwarmOrchestrator:
         logger.info("orchestrator: exchange completed exchange_id=%s", exchange["exchange_id"])
         return True
 
+    @staticmethod
+    def _responder_fallback_text(exchange: dict[str, object]) -> str:
+        """Выбирает безопасный fallback с учётом типа scheduled exchange."""
+        if exchange.get("exchange_kind") == IMPORTANT_SERVICE_KIND:
+            return SAFE_IMPORTANT_SERVICE_REPLY_FALLBACK_TEXT
+        return SAFE_SCHEDULED_REPLY_FALLBACK_TEXT
+
     async def _handle_permanent_send_error(
         self, *, exchange_id: str, bot_id: str, counterpart_bot_id: str, stage: str, exc: Exception
     ) -> dict[str, object] | None:
@@ -582,13 +592,25 @@ class SwarmOrchestrator:
             exchange_id, bot_id, self.group_id, stage,
         )
         self.disabled_bot_ids.add(bot_id)
+        quarantine_error: Exception | None = None
         quarantine_bot = getattr(self.exchange_store, "quarantine_bot", None)
         if callable(quarantine_bot):
             group_key = str(self.group_chat_id if self.group_chat_id is not None else self.group_target)
-            await quarantine_bot(group_key=group_key, bot_id=bot_id, reason=reason)
+            try:
+                await quarantine_bot(group_key=group_key, bot_id=bot_id, reason=reason)
+            except Exception as persist_exc:
+                quarantine_error = persist_exc
+                logger.error(
+                    "orchestrator: quarantine persistence failed bot_id=%s group_id=%s "
+                    "action=disable_before_propagate",
+                    bot_id,
+                    self.group_id,
+                )
         manager_disable = getattr(self.manager, "disable_bot", None)
         if callable(manager_disable):
             await manager_disable(bot_id, reason=reason)
+        if quarantine_error is not None:
+            raise quarantine_error
         replacement = self._pick_replacement_bot(failed_bot_id=bot_id, counterpart_bot_id=counterpart_bot_id)
         reassign = getattr(self.exchange_store, "reassign_after_permanent_send_error", None)
         get_exchange = getattr(self.exchange_store, "get_exchange", None)
