@@ -65,6 +65,38 @@ def test_extract_event_chat_id_uses_telethon_marked_channel_id():
     assert run._extract_event_chat_id(channel, None) == -(10**12 + 123456)
 
 
+def test_extract_event_chat_id_normalizes_positive_fallback_from_resolved_entity():
+    """Положительный raw ID не вытесняет marked peer ID resolved channel."""
+    from telethon.tl.types import Channel, ChatPhotoEmpty
+
+    import run
+
+    channel = Channel(
+        id=123456,
+        title="Group",
+        photo=ChatPhotoEmpty(),
+        date=None,
+        megagroup=True,
+    )
+
+    assert run._extract_event_chat_id(channel, 123456) == -(10**12 + 123456)
+
+
+def test_enabled_groups_do_not_fall_back_when_explicit_groups_are_all_disabled():
+    """Явно отключённая группа не активируется через legacy compatibility fields."""
+    import run
+
+    disabled_group = SimpleNamespace(id="off", enabled=False, group_chat_id=-100123, group_target=None)
+    settings = SimpleNamespace(
+        groups=[disabled_group],
+        enabled_groups=[],
+        group_chat_id=-100123,
+        group_target=None,
+    )
+
+    assert run._enabled_groups_from_settings(settings) == []
+
+
 @pytest.mark.asyncio
 async def test_userbot_client_start_and_stop(monkeypatch):
     """Проверяет, что обёртка делегирует запуск и остановку Telethon-клиенту."""

@@ -165,6 +165,7 @@ temperature = 0.8
 - timeout равен 45 секундам, а SDK retry ограничен 15 секундами для connection/timeout, 408, 429, 5xx, 524 и 529;
 - необязательный `PROXY` из `.env` применяется одновременно к Telethon и OpenRouter; без него оба соединения прямые;
 - группы задаются через `[[groups]]`; старый `[target]` в TOML больше не поддерживается;
+- если все явно настроенные `[[groups]]` имеют `enabled = false`, routing и scheduled exchanges не запускаются через legacy fallback;
 - старые секции `[app]`, `[storage]` и `[prompts]` больше не входят в публичный TOML-контракт;
 - `group.id` должен быть уникальным;
 - каждая группа должна иметь `group_chat_id` или `group_target`;

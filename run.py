@@ -241,17 +241,16 @@ def _extract_resolved_chat_id(resolved_target: object | None, fallback_chat_id: 
 
 def _extract_event_chat_id(resolved_target: object | None, fallback_chat_id: int | None) -> int | None:
     """Возвращает marked peer id в том же формате, что Telegram event.chat_id."""
-    if fallback_chat_id is not None:
-        return fallback_chat_id
-    if resolved_target is None:
-        return None
-    try:
-        from telethon import utils
+    if resolved_target is not None:
+        try:
+            from telethon import utils
 
-        peer_id = utils.get_peer_id(resolved_target)
-    except (ImportError, TypeError, ValueError):
-        return None
-    return peer_id if isinstance(peer_id, int) else None
+            peer_id = utils.get_peer_id(resolved_target)
+        except (ImportError, TypeError, ValueError):
+            peer_id = None
+        if isinstance(peer_id, int):
+            return peer_id
+    return fallback_chat_id
 
 
 def _group_target_cache_key(group_chat_id: int | None, group_target: str | None) -> tuple[int | None, str | None]:
@@ -614,6 +613,8 @@ def _enabled_groups_from_settings(settings: object) -> list[object]:
     groups = list(getattr(settings, "enabled_groups", []) or [])
     if groups:
         return groups
+    if list(getattr(settings, "groups", []) or []):
+        return []
     group_chat_id = getattr(settings, "group_chat_id", None)
     group_target = getattr(settings, "group_target", None)
     if group_chat_id is None and group_target is None:
