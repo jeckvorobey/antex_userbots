@@ -45,6 +45,33 @@ async def test_swarm_manager_starts_enabled_bots_and_collects_user_ids():
 
 
 @pytest.mark.asyncio
+async def test_swarm_manager_stops_and_removes_client_after_partial_startup_failure():
+    """Ошибка membership hook не оставляет подключённый частичный клиент."""
+    fake_client = SimpleNamespace(
+        start=AsyncMock(),
+        stop=AsyncMock(),
+        get_current_user=AsyncMock(return_value=SimpleNamespace(id=101)),
+        run_until_disconnected=AsyncMock(),
+    )
+
+    async def startup_hook(_profile, _client):
+        raise RuntimeError("group unavailable")
+
+    manager = SwarmManager(
+        bot_profiles=[SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md")],
+        client_factory=lambda _profile: fake_client,
+        startup_hook=startup_hook,
+    )
+
+    await manager.start()
+
+    fake_client.stop.assert_awaited_once()
+    assert "anna" not in manager.clients
+    assert manager.active_bot_ids == []
+    assert manager.runtime_states["anna"].status == "error"
+
+
+@pytest.mark.asyncio
 async def test_swarm_manager_disables_bot_after_permanent_send_error():
     """Отключённый runtime-бот больше не считается активным и его клиент останавливается."""
     fake_client = SimpleNamespace(

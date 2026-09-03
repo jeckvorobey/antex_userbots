@@ -30,7 +30,7 @@ The system SHALL initialize one shared SQLite connection and one shared provider
 - **THEN** runtime constructs Telethon and OpenRouter without proxy configuration
 
 ### Requirement: Enabled bot startup
-The system SHALL start only enabled swarm bot profiles and collect their Telegram user ids.
+The system SHALL start only enabled swarm bot profiles, collect their Telegram user ids, and clean up any client that fails before active-pool registration completes.
 
 #### Scenario: Disabled bot is skipped
 - **WHEN** a bot profile has `enabled = false`
@@ -40,12 +40,12 @@ The system SHALL start only enabled swarm bot profiles and collect their Telegra
 - **WHEN** an enabled bot starts successfully and returns a Telegram user id
 - **THEN** its bot id is added to the active pool and its Telegram user id is added to `swarm_user_ids`
 
-#### Scenario: Startup failure excludes bot
-- **WHEN** an enabled bot fails during startup
-- **THEN** the bot runtime state is marked as error and it is not added to the active pool
+#### Scenario: Startup failure excludes and stops bot
+- **WHEN** an enabled bot fails after its Telegram client was created or connected
+- **THEN** the client is stopped and removed, the runtime state is marked as error, and the bot is not added to the active pool
 
 ### Requirement: Global account messaging eligibility at startup
-Before a swarm account is registered as active, the system SHALL perform a non-publishing global messaging API health-check. A confirmed deactivated, revoked, or globally banned account SHALL be disabled, stopped, persistently quarantined, and logged as requiring attention.
+Before a swarm account is registered as active, the system SHALL perform a non-publishing global messaging API health-check. A confirmed deactivated, revoked, or globally banned account SHALL be disabled, stopped, persistently quarantined, and logged as requiring attention; group-level failures SHALL remain non-global.
 
 #### Scenario: Global messaging check succeeds
 - **WHEN** an enabled bot starts and Telegram accepts the non-publishing messaging action
@@ -64,8 +64,8 @@ Before a swarm account is registered as active, the system SHALL perform a non-p
 - **THEN** the account remains disabled in memory and startup fails instead of continuing without durable quarantine
 
 #### Scenario: Recipient-specific restriction is not global quarantine
-- **WHEN** a recipient or group does not permit writing
-- **THEN** startup does not classify that recipient-specific condition as a global account freeze
+- **WHEN** a group cannot be resolved or does not confirm `can_write=True`
+- **THEN** startup rejects that bot without classifying the condition or persisting it as a global account freeze
 
 ### Requirement: Minimum active bot count
 The system SHALL require at least two enabled bots before startup and at least two active bots after startup.
@@ -79,11 +79,15 @@ The system SHALL require at least two enabled bots before startup and at least t
 - **THEN** the orchestrator job is not registered and startup fails
 
 ### Requirement: Fresh availability determines startup pool
-The system SHALL reset persisted startup availability before checking enabled bot profiles and SHALL admit a profile only after the global Telegram eligibility check and `can_write=True` for every enabled group.
+The system SHALL replace only the transient startup availability snapshot before checking enabled bot profiles, preserve durable quarantine rows, and admit a profile only after the global Telegram eligibility check and `can_write=True` for every enabled group.
 
-#### Scenario: Previous quarantine is stale
-- **WHEN** a previously quarantined enabled bot is started after a restart
-- **THEN** it receives a fresh Telegram availability check instead of being skipped from old persisted state
+#### Scenario: Startup snapshot is replaced
+- **WHEN** startup begins with previous `__startup__` availability rows
+- **THEN** those transient rows are removed before fresh results are recorded
+
+#### Scenario: Durable quarantine survives startup reset
+- **WHEN** a bot has a quarantine row created for a permanent Telegram send restriction
+- **THEN** startup reset preserves that row until an explicit manual removal
 
 ### Requirement: Handler registration per active bot
 The system SHALL register an addressed-reply handler for each active bot client.
@@ -97,7 +101,7 @@ The system SHALL register an addressed-reply handler for each active bot client.
 - **THEN** handler registration skips that bot id
 
 ### Requirement: Target group membership
-The system SHALL wait a random inclusive 30–60 second delay before each bot's startup membership check, build one reusable dialog index for that bot, then resolve or join every enabled configured group for that bot during startup and after group reload.
+The system SHALL wait a random inclusive 30–60 second delay before each bot's startup membership check, build one reusable dialog index for that bot, resolve or join every enabled configured group during startup, and validate new or changed enabled groups for every active bot after reload before activation.
 
 #### Scenario: Startup membership delay stays within the configured range
 - **WHEN** an enabled bot reaches either startup membership hook
@@ -106,6 +110,22 @@ The system SHALL wait a random inclusive 30–60 second delay before each bot's 
 #### Scenario: Multi-group membership reuses one dialog scan
 - **WHEN** one bot checks membership for multiple enabled groups during startup
 - **THEN** the runtime scans that bot's available dialogs once and reuses the resulting index for every group check
+
+#### Scenario: Unresolved enabled group rejects startup
+- **WHEN** an enabled group cannot be resolved or joined for a bot
+- **THEN** that bot does not enter the active pool
+
+#### Scenario: Group write permission is required
+- **WHEN** group permission lookup returns false or unknown for a bot
+- **THEN** the group check fails without creating global account quarantine
+
+#### Scenario: Reloaded group is checked before activation
+- **WHEN** reload adds, enables, or changes the identity of an enabled group
+- **THEN** every active bot resolves or joins it and confirms `can_write=True` before routing or scheduling activates the group
+
+#### Scenario: Reloaded group check fails
+- **WHEN** any active bot cannot resolve, join, or write to a new or changed enabled group
+- **THEN** that group remains excluded from routing and scheduling without globally quarantining the bot
 
 #### Scenario: Telegram peer namespaces remain isolated
 - **WHEN** a user dialog and a channel dialog expose the same raw entity id

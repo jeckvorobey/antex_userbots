@@ -36,6 +36,10 @@ STARTUP_MEMBERSHIP_DELAY_SECONDS = (30, 60)
 GLOBAL_ACCOUNT_QUARANTINE_KEY = "__global_account__"
 
 
+class GroupAvailabilityError(RuntimeError):
+    """Enabled-группа недоступна конкретному аккаунту без глобальной блокировки."""
+
+
 def _pick_startup_membership_delay_seconds() -> float:
     """Выбирает секундовую задержку перед проверкой membership при startup."""
     start_seconds, end_seconds = STARTUP_MEMBERSHIP_DELAY_SECONDS
@@ -436,6 +440,84 @@ async def _log_bot_write_permission(
     return can_write
 
 
+async def _require_group_availability(
+    client_wrapper: object,
+    group: object,
+    *,
+    bot_id: str,
+    dialog_index: dict[object, object] | None = None,
+) -> object:
+    """Требует resolved target и подтверждённое право записи для одного аккаунта."""
+    group_id = str(getattr(group, "id"))
+    try:
+        resolved_target = await _ensure_group_membership(
+            client_wrapper,
+            getattr(group, "group_chat_id", None),
+            getattr(group, "group_target", None),
+            bot_id,
+            dialog_index=dialog_index,
+        )
+    except Exception as exc:
+        raise GroupAvailabilityError(f"group_membership_unavailable:{group_id}") from exc
+    if resolved_target is None:
+        raise GroupAvailabilityError(f"group_unresolved:{group_id}")
+    can_write = await _log_bot_write_permission(
+        getattr(client_wrapper, "client", None),
+        resolved_target,
+        bot_id=bot_id,
+        group_id=group_id,
+    )
+    if can_write is not True:
+        raise GroupAvailabilityError(f"group_write_unavailable:{group_id}")
+    return resolved_target
+
+
+def _group_membership_signature(group: object) -> tuple[object, ...]:
+    """Возвращает поля группы, требующие повторной membership-проверки."""
+    return (
+        getattr(group, "id", None),
+        getattr(group, "group_chat_id", None),
+        getattr(group, "group_target", None),
+    )
+
+
+async def _filter_reload_ready_groups(
+    manager: SwarmManager,
+    previous_groups: list[object],
+    candidate_groups: list[object],
+) -> list[object]:
+    """Оставляет новые и изменённые группы только после checks всех active bots."""
+    previous_signatures = {
+        str(getattr(group, "id")): _group_membership_signature(group) for group in previous_groups
+    }
+    dialog_indexes: dict[str, dict[object, object]] = {}
+    ready_groups: list[object] = []
+    for group in candidate_groups:
+        group_id = str(getattr(group, "id"))
+        if previous_signatures.get(group_id) == _group_membership_signature(group):
+            ready_groups.append(group)
+            continue
+        try:
+            for bot_id in manager.active_bot_ids:
+                client_wrapper = manager.get_client(bot_id)
+                if bot_id not in dialog_indexes:
+                    try:
+                        dialog_indexes[bot_id] = await _build_group_dialog_index(client_wrapper.client)
+                    except Exception as exc:
+                        raise GroupAvailabilityError(f"group_dialog_unavailable:{group_id}") from exc
+                await _require_group_availability(
+                    client_wrapper,
+                    group,
+                    bot_id=bot_id,
+                    dialog_index=dialog_indexes[bot_id],
+                )
+        except GroupAvailabilityError:
+            logger.warning("settings reload: group excluded after availability check group_id=%s", group_id)
+            continue
+        ready_groups.append(group)
+    return ready_groups
+
+
 def _build_group_membership_startup_hook(
     *,
     group_chat_id: int | None,
@@ -487,23 +569,13 @@ def _build_multi_group_membership_startup_hook(
             if not getattr(group, "enabled", True):
                 continue
             group_id = getattr(group, "id")
-            resolved_target = await _ensure_group_membership(
+            resolved_target = await _require_group_availability(
                 client_wrapper,
-                getattr(group, "group_chat_id", None),
-                getattr(group, "group_target", None),
-                profile.id,
+                group,
+                bot_id=profile.id,
                 dialog_index=dialog_index,
             )
             resolved[group_id] = resolved_target
-            if resolved_target is not None:
-                can_write = await _log_bot_write_permission(
-                    client_wrapper.client,
-                    resolved_target,
-                    bot_id=profile.id,
-                    group_id=group_id,
-                )
-                if can_write is not True:
-                    raise AccountMessagingUnavailableError(f"telegram_startup_group_write_unavailable:{group_id}")
         return resolved
 
     return startup_hook
@@ -745,6 +817,11 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
     reset_startup_availability = getattr(runtime.exchange_store, "reset_startup_availability", None)
     if callable(reset_startup_availability):
         await reset_startup_availability()
+    get_quarantined_bot_ids = getattr(runtime.exchange_store, "get_quarantined_bot_ids", None)
+    quarantined_bot_ids = await get_quarantined_bot_ids() if callable(get_quarantined_bot_ids) else set()
+    if quarantined_bot_ids:
+        bot_profiles = [profile for profile in bot_profiles if profile.id not in quarantined_bot_ids]
+        logger.warning("swarm: durable quarantine excluded bots count=%s", len(quarantined_bot_ids))
     if sum(profile.enabled for profile in bot_profiles) < 2:
         raise ValueError("Swarm mode requires at least two enabled bots")
     current_settings = settings
@@ -808,7 +885,8 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
         reloaded_settings = reload_watcher.poll()
         if reloaded_settings is not None:
             current_settings = reloaded_settings
-            current_groups = _enabled_groups_from_settings(current_settings)
+            candidate_groups = _enabled_groups_from_settings(current_settings)
+            current_groups = await _filter_reload_ready_groups(manager, current_groups, candidate_groups)
             enabled_group_chat_ids.clear()
             enabled_group_chat_ids.update(
                 group.group_chat_id for group in current_groups if isinstance(getattr(group, "group_chat_id", None), int)

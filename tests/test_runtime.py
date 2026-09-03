@@ -631,8 +631,8 @@ async def test_run_swarm_mode_requires_two_active_bots_after_start(monkeypatch, 
 
 
 @pytest.mark.asyncio
-async def test_run_swarm_mode_ignores_previous_persisted_quarantine(monkeypatch, tmp_path):
-    """Предыдущий quarantine не выключает configured bot до свежей проверки."""
+async def test_run_swarm_mode_excludes_durably_quarantined_bot(monkeypatch, tmp_path):
+    """Durable quarantine не позволяет автоматически запустить аккаунт повторно."""
     import run
 
     settings = Settings(
@@ -646,7 +646,12 @@ async def test_run_swarm_mode_ignores_previous_persisted_quarantine(monkeypatch,
         SimpleNamespace(id="anna", session_string="anna-session", persona_file="anna.md", enabled=True, temperature=0.9, session_env="SESSION_STRING_ANNA"),
         SimpleNamespace(id="mike", session_string="mike-session", persona_file="mike.md", enabled=True, temperature=0.8, session_env="SESSION_STRING_MIKE"),
     ]
-    runtime = SimpleNamespace(exchange_store=SimpleNamespace(reset_startup_availability=AsyncMock()))
+    runtime = SimpleNamespace(
+        exchange_store=SimpleNamespace(
+            reset_startup_availability=AsyncMock(),
+            get_quarantined_bot_ids=AsyncMock(return_value={"anna"}),
+        )
+    )
     scheduler = SimpleNamespace(add_job=Mock())
     manager = SimpleNamespace(start=AsyncMock(), stop=AsyncMock(), active_bot_ids=["anna", "mike"], get_client=lambda _: SimpleNamespace(client=FakeTelegramClient("anna", 1, "hash")), swarm_user_ids=set(), supervise_bot=AsyncMock())
     monkeypatch.setattr(run, "SwarmManager", lambda **_: manager)
@@ -654,9 +659,12 @@ async def test_run_swarm_mode_ignores_previous_persisted_quarantine(monkeypatch,
     monkeypatch.setattr(run, "_resolve_group_target", AsyncMock(return_value=SimpleNamespace(id=1)))
     monkeypatch.setattr(run, "_log_resolved_group", AsyncMock())
 
-    await run._run_swarm_mode(settings, runtime, scheduler)
+    with pytest.raises(ValueError, match="at least two enabled bots"):
+        await run._run_swarm_mode(settings, runtime, scheduler)
+
     runtime.exchange_store.reset_startup_availability.assert_awaited_once()
-    manager.start.assert_awaited_once()
+    runtime.exchange_store.get_quarantined_bot_ids.assert_awaited_once()
+    manager.start.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -902,7 +910,7 @@ async def test_multi_group_membership_logs_bot_write_permission(monkeypatch, cap
         groups=[SimpleNamespace(id="first", enabled=True, group_chat_id=101, group_target="@first")],
     )
 
-    with caplog.at_level(logging.INFO), pytest.raises(AccountMessagingUnavailableError, match="group_write_unavailable:first"):
+    with caplog.at_level(logging.INFO), pytest.raises(run.GroupAvailabilityError, match="group_write_unavailable:first"):
         await hook(SimpleNamespace(id="anna"), wrapper)
 
     assert any(
@@ -914,8 +922,8 @@ async def test_multi_group_membership_logs_bot_write_permission(monkeypatch, cap
 
 
 @pytest.mark.asyncio
-async def test_multi_group_membership_logs_unknown_write_permission_without_failure(monkeypatch, caplog):
-    """Проверяет, что недоступные права не прерывают startup."""
+async def test_multi_group_membership_rejects_unknown_write_permission(monkeypatch, caplog):
+    """Проверяет, что неизвестное право записи отклоняет group-level startup."""
     import logging
     import run
 
@@ -930,9 +938,73 @@ async def test_multi_group_membership_logs_unknown_write_permission_without_fail
         groups=[SimpleNamespace(id="first", enabled=True, group_chat_id=101, group_target="@first")],
     )
 
-    with caplog.at_level(logging.WARNING), pytest.raises(AccountMessagingUnavailableError, match="group_write_unavailable:first"):
+    with caplog.at_level(logging.WARNING), pytest.raises(run.GroupAvailabilityError, match="group_write_unavailable:first"):
         await hook(SimpleNamespace(id="anna"), wrapper)
     assert any("bot_id=anna group_id=first can_write=unknown" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_multi_group_membership_rejects_unresolved_enabled_group(monkeypatch):
+    """Unresolved enabled-группа делает startup аккаунта неуспешным."""
+    import run
+
+    wrapper = SimpleNamespace(
+        client=FakeTelegramClient("anna", 1, "hash"),
+        verify_global_messaging_eligibility=AsyncMock(),
+    )
+    monkeypatch.setattr(run, "_pick_startup_membership_delay_seconds", lambda: 0.0)
+    monkeypatch.setattr(run, "_build_group_dialog_index", AsyncMock(return_value={}))
+    monkeypatch.setattr(run, "_ensure_group_membership", AsyncMock(return_value=None))
+    hook = run._build_multi_group_membership_startup_hook(
+        groups=[SimpleNamespace(id="missing", enabled=True, group_chat_id=-1001, group_target=None)]
+    )
+
+    with pytest.raises(run.GroupAvailabilityError, match="group_unresolved:missing"):
+        await hook(SimpleNamespace(id="anna"), wrapper)
+
+
+@pytest.mark.asyncio
+async def test_reload_checks_new_group_for_every_active_bot_before_activation(monkeypatch):
+    """Новая reload-группа активируется только после checks всех active bots."""
+    import run
+
+    clients = {
+        "anna": SimpleNamespace(client=FakeTelegramClient("anna", 1, "hash")),
+        "mike": SimpleNamespace(client=FakeTelegramClient("mike", 1, "hash")),
+    }
+    manager = SimpleNamespace(active_bot_ids=["anna", "mike"], get_client=clients.__getitem__)
+    old_group = SimpleNamespace(id="old", enabled=True, group_chat_id=-1001, group_target="@old")
+    new_group = SimpleNamespace(id="new", enabled=True, group_chat_id=-1002, group_target="@new")
+    ensure_membership = AsyncMock(return_value=SimpleNamespace(id=1002))
+    monkeypatch.setattr(run, "_build_group_dialog_index", AsyncMock(return_value={}))
+    monkeypatch.setattr(run, "_ensure_group_membership", ensure_membership)
+    monkeypatch.setattr(run, "_log_bot_write_permission", AsyncMock(return_value=True))
+
+    ready = await run._filter_reload_ready_groups(manager, [old_group], [old_group, new_group])
+
+    assert ready == [old_group, new_group]
+    assert ensure_membership.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_reload_excludes_new_group_when_any_active_bot_cannot_write(monkeypatch):
+    """Reload не включает группу при group-level отказе одного аккаунта."""
+    import run
+
+    clients = {
+        "anna": SimpleNamespace(client=FakeTelegramClient("anna", 1, "hash")),
+        "mike": SimpleNamespace(client=FakeTelegramClient("mike", 1, "hash")),
+    }
+    manager = SimpleNamespace(active_bot_ids=["anna", "mike"], get_client=clients.__getitem__)
+    old_group = SimpleNamespace(id="old", enabled=True, group_chat_id=-1001, group_target="@old")
+    new_group = SimpleNamespace(id="new", enabled=True, group_chat_id=-1002, group_target="@new")
+    monkeypatch.setattr(run, "_build_group_dialog_index", AsyncMock(return_value={}))
+    monkeypatch.setattr(run, "_ensure_group_membership", AsyncMock(return_value=SimpleNamespace(id=1002)))
+    monkeypatch.setattr(run, "_log_bot_write_permission", AsyncMock(side_effect=[True, False]))
+
+    ready = await run._filter_reload_ready_groups(manager, [old_group], [old_group, new_group])
+
+    assert ready == [old_group]
 
 
 @pytest.mark.asyncio

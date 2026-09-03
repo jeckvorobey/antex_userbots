@@ -207,15 +207,23 @@ class SwarmManager:
     async def _start_single_bot(self, profile: SwarmBotProfile) -> None:
         """Запускает одного бота и регистрирует его runtime-state."""
         client = self.client_factory(profile)
-        await client.start()
-        # Клиент регистрируется до startup-hook, чтобы quarantine мог корректно остановить его.
-        self.clients[profile.id] = client
-        if self.startup_hook is not None:
-            result = self.startup_hook(profile, client)
-            if asyncio.iscoroutine(result):
-                await result
-        current_user = await client.get_current_user()
-        telegram_user_id = getattr(current_user, "id", None)
+        try:
+            await client.start()
+            # Клиент регистрируется до startup-hook, чтобы quarantine мог корректно остановить его.
+            self.clients[profile.id] = client
+            if self.startup_hook is not None:
+                result = self.startup_hook(profile, client)
+                if asyncio.iscoroutine(result):
+                    await result
+            current_user = await client.get_current_user()
+            telegram_user_id = getattr(current_user, "id", None)
+        except BaseException:
+            self.clients.pop(profile.id, None)
+            try:
+                await client.stop()
+            except Exception:
+                logger.warning("swarm: cleanup частично запущенного клиента не выполнен bot_id=%s", profile.id)
+            raise
 
         self.clients[profile.id] = client
         if profile.id not in self.active_bot_ids:

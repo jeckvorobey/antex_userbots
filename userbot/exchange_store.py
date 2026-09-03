@@ -125,7 +125,10 @@ class ExchangeStore:
 
     async def reset_startup_availability(self) -> None:
         """Очищает прошлый startup-снимок доступности ботов."""
-        await self.database.execute("reset_startup_availability", "DELETE FROM quarantined_swarm_bots")
+        await self.database.execute(
+            "reset_startup_availability",
+            "DELETE FROM quarantined_swarm_bots WHERE group_key = '__startup__'",
+        )
 
     async def record_startup_availability(self, *, bot_id: str, is_available: bool, reason: str | None) -> None:
         """Сохраняет свежий итог startup-проверки без секретных данных."""
@@ -140,7 +143,10 @@ class ExchangeStore:
 
     async def get_quarantined_bot_ids(self) -> set[str]:
         """Возвращает аккаунты, которые нельзя автоматически запускать после рестарта."""
-        rows = await self.database.fetch_all("get_quarantined_bot_ids", "SELECT DISTINCT bot_id FROM quarantined_swarm_bots")
+        rows = await self.database.fetch_all(
+            "get_quarantined_bot_ids",
+            "SELECT DISTINCT bot_id FROM quarantined_swarm_bots WHERE group_key != '__startup__'",
+        )
         return {str(row[0]) for row in rows}
 
     async def create_exchange(
