@@ -1,6 +1,6 @@
 # Project Overview
 
-`tg_userbot` is a Python 3.11+ Telegram userbot that runs multiple Telethon user accounts in one `swarm` process. The application is started through `run.py`, keeps enabled accounts online across multiple configured Telegram groups, routes addressed human replies to the matching account, starts scheduled `A -> B` bot exchanges per group, persists message and exchange state in SQLite, and uses Gemini for generated text.
+`tg_userbot` is a Python 3.11+ Telegram userbot that runs multiple Telethon user accounts in one `swarm` process. The application is started through `run.py`, keeps enabled accounts online across multiple configured Telegram groups, routes addressed human replies to the matching account, starts scheduled `A -> B` bot exchanges per group, persists message and exchange state in SQLite, and uses OpenRouter for generated text.
 
 ## Repository
 
@@ -10,7 +10,8 @@ The canonical Git repository is `git@github.com:jeckvorobey/antex_userbots.git`.
 
 - Python 3.11+
 - Telethon for Telegram MTProto user sessions
-- Google Gemini SDK (`google-genai`) for text generation
+- Official OpenRouter SDK (`openrouter`) for async Chat Completions
+- HTTPX with SOCKS support for optional OpenRouter proxy transport
 - APScheduler for periodic orchestrator ticks
 - aiosqlite for message history and scheduled exchange state
 - pydantic-settings and TOML for configuration
@@ -23,8 +24,8 @@ run.py
   -> core.config.Settings
   -> RuntimeContext
        -> ai.history.MessageHistory
-       -> ai.gemini.PromptLoader
-       -> ai.gemini.GeminiClient
+       -> ai.prompt_loader.PromptLoader
+       -> ai.openrouter.OpenRouterClient through ai.generation.TextGenerationClient
        -> userbot.scheduler.TopicSelector
        -> ai.prompt_composer.PromptComposer
        -> userbot.exchange_store.ExchangeStore
@@ -45,7 +46,7 @@ Telegram NewMessage reply in enabled configured group
   -> SwarmManager human slot
   -> MessageHistory session history
   -> PromptComposer reply prompt + persona
-  -> GeminiClient.generate_reply
+  -> TextGenerationClient.generate_reply
   -> Telegram reply
   -> MessageHistory saves user and assistant records
 ```
@@ -64,16 +65,16 @@ APScheduler tick
   -> city-aware start-topic adaptation
   -> bot/topic/question anti-repeat
   -> PromptComposer start_topic/reply prompts
-  -> GeminiClient start_topic/generate_reply
+  -> TextGenerationClient start_topic/generate_reply
   -> Telegram send_message
   -> MessageHistory and ExchangeStore state updates
 ```
 
 ## Configuration Model
 
-Secrets are loaded from `.env` or process environment: `API_ID`, `API_HASH`, `GEMINI_API_KEY`, optional `PROXY_URL`, optional `SETTINGS_PATH`, and per-bot `SESSION_STRING_*` variables referenced by `[[swarm.bots]].session_env`. `GROUP_CHAT_ID` and `GROUP_TARGET` are legacy environment overrides only and are not part of the example configuration.
+Environment-backed secrets are loaded from `.env` or process environment: `OPENROUTER_API_KEY`, optional shared `PROXY`, optional `SETTINGS_PATH`, and per-bot `SESSION_STRING_*` variables referenced by `[[swarm.bots]].session_env`. Telegram `api_id` and `api_hash` are loaded from the required `[telegram]` TOML section; legacy `API_ID` and `API_HASH` environment values are ignored. The same `PROXY` is applied to Telethon and OpenRouter; when absent, both connect directly. `GROUP_CHAT_ID` and `GROUP_TARGET` are legacy environment overrides only and are not part of the example configuration.
 
-Non-secret settings are loaded from TOML through strict pydantic models. Supported TOML sections are `[[groups]]`, `[groups.schedule]`, `[gemini]`, `[logging]`, `[swarm.schedule]`, `[swarm.orchestrator]`, `[swarm.security]`, and `[[swarm.bots]]`. The only supported app mode is the internal `swarm` default, not a user-configurable TOML field. Global `[swarm.schedule]` values are defaults; group-level schedule fields override only the values they define. The runtime watches TOML `mtime` and reloads group enable/disable/add changes without mutating the old settings instance. Prompt, topic, and persona `.md` files under `ai/prompts/` are repository-managed production instance files. Production persona inventory in `ai/prompts/bots` is expected to match `config/settings.prod.toml`, and `settings.prod.toml` is expected to reference the production `SESSION_STRING_*` keys declared in `.env.prod` without storing secret values in TOML.
+Instance settings are loaded from TOML through strict pydantic models. Supported TOML sections are required `[telegram]`, `[[groups]]`, `[groups.schedule]`, required `[openrouter]`, `[logging]`, `[swarm.schedule]`, `[swarm.orchestrator]`, `[swarm.security]`, and `[[swarm.bots]]`. `[openrouter].models` contains at least two unique non-empty slugs in primary-to-fallback order; optional `temperature` is omitted from requests when absent. Every request requires ZDR providers, denies data collection, enables provider fallback, and requires parameter support. Timeout is 45 seconds and SDK retries are bounded to 15 seconds of exponential backoff for connection, timeout, 408, 429, 5xx, 524, and 529 failures. The only supported app mode is the internal `swarm` default. Global schedule values are inherited by groups. Runtime watches TOML `mtime` and reloads group changes without mutating the old settings instance. Prompt, topic, and persona files are repository-managed.
 
 ## Data Storage
 
@@ -87,7 +88,7 @@ Important-service exchanges are stored in the same `scheduled_exchanges` lifecyc
 
 - Follow `AGENTS.md`.
 - Prefer TDD for behavior changes.
-- Mock Gemini, Telethon, and SQLite filesystem dependencies in tests.
+- Mock OpenRouter, Telethon, and SQLite filesystem dependencies in tests.
 - Keep DB and network operations async.
 - Do not hardcode prompts in code.
 - Load bot persona strictly from configured `persona_file` under `bot_profiles_dir`.

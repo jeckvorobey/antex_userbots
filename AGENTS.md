@@ -18,10 +18,11 @@ Telegram userbot на базе Telethon, который работает в ре
 | Компонент | Библиотека | Назначение |
 |---|---|---|
 | MTProto | `telethon` | Подключение к Telegram как user |
-| AI | `google-generativeai` | Генерация ответов через Gemini |
+| AI | `openrouter` | Async Chat Completions через OpenRouter |
+| HTTP | `httpx[socks]` | Async proxy-транспорт OpenRouter |
 | Scheduler | `apscheduler` | Планирование orchestrator tick |
 | Database | `aiosqlite` | История сообщений и persisted state |
-| Config | `pydantic-settings` | Секреты из `.env`, несекретные настройки из TOML |
+| Config | `pydantic-settings` | Provider/session secrets из `.env`, Telegram credentials и настройки из TOML |
 | Testing | `pytest`, `pytest-asyncio` | TDD и async unit/integration tests |
 | Python | `3.11+` | Целевая версия |
 
@@ -29,8 +30,10 @@ Telegram userbot на базе Telethon, который работает в ре
 
 ```text
 ai/
-  gemini.py
+  generation.py
   history.py
+  openrouter.py
+  prompt_loader.py
   prompt_composer.py
   prompts/
 core/
@@ -53,7 +56,7 @@ Human reply в группе
   → reply_router.py
   → per-bot coordinator
   → prompt_composer.py
-  → gemini.py
+  → openrouter.py
   → history.py
   → ответ адресованным bot
 
@@ -61,7 +64,7 @@ Scheduled tick
   → orchestrator.py
   → exchange_store.py (persisted anti-repeat state)
   → prompt_composer.py
-  → gemini.py
+  → openrouter.py
   → history.py
   → A задаёт вопрос, B отвечает
 ```
@@ -71,7 +74,7 @@ Scheduled tick
 1. Сначала изучай существующий код и тесты, затем меняй реализацию.
 2. Предпочитай TDD: тест до реализации, затем минимальное изменение кода.
 3. Не завязывай тесты на внешние сервисы:
-   - Gemini API мокировать;
+   - OpenRouter SDK мокировать;
    - SQLite подменять на `":memory:"`;
    - Telethon-клиенты подменять fake/stub-объектами.
 4. Для async-логики использовать только асинхронные интерфейсы.
@@ -119,7 +122,7 @@ Scheduled tick
 - только SQLite, без PostgreSQL и Redis;
 - persona загружать строго из `persona_file` в конфиге;
 - все сообщения сохранять в БД;
-- `SESSION_STRING_*` не логировать и не коммитить.
+- `SESSION_STRING_*`, `OPENROUTER_API_KEY`, Telegram `api_hash` и proxy credentials не логировать и не коммитить.
 
 ## Рабочие команды
 
@@ -138,7 +141,7 @@ Scheduled tick
 | `ai/prompts/reply.md` | Базовый промт ответа |
 | `ai/prompts/start_topic.md` | Базовый промт старта темы |
 | `ai/prompts/bots/` | Persona-файлы ботов |
-| `.env.example` | Шаблон секретов |
+| `.env.example` | Шаблон provider key, proxy и session secrets |
 
 ## Ожидания от Codex
 

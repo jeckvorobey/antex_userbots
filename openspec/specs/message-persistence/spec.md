@@ -151,7 +151,7 @@ Runtime SHALL сохранять сгенерированный текст в SQ
 #### Scenario: Ответ responder уже сгенерирован
 - **WHEN** started exchange содержит `responder_text`
 - **THEN** runtime MUST использовать этот текст для send retry
-- **AND** MUST NOT снова вызывать Gemini `generate_reply`
+- **AND** MUST NOT снова вызывать AI client `generate_reply`
 
 #### Scenario: Отправка успешна
 - **WHEN** Telegram подтверждает send

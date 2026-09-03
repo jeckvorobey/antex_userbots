@@ -10,9 +10,7 @@ from core.config import Settings, SettingsReloadWatcher
 
 
 BASE_SECRETS = {
-    "api_id": 12345678,
-    "api_hash": "test_api_hash_abc",
-    "gemini_api_key": "test_gemini_key_xyz",
+    "openrouter_api_key": "test_openrouter_key_xyz",
     "group_chat_id": -100123,
     "group_target": "@group",
 }
@@ -21,7 +19,12 @@ BASE_SECRETS = {
 def write_settings(tmp_path: Path, content: str) -> Path:
     """Создаёт временный settings.toml для теста."""
     path = tmp_path / "settings.toml"
-    path.write_text(content.strip(), encoding="utf-8")
+    normalized = content.strip()
+    if "[telegram]" not in normalized:
+        normalized = '[telegram]\napi_id = 12345678\napi_hash = "test_api_hash_abc"\n\n' + normalized
+    if "[openrouter]" not in normalized and "[gemini]" not in normalized:
+        normalized = '[openrouter]\nmodels = ["test/primary", "test/fallback"]\n\n' + normalized
+    path.write_text(normalized, encoding="utf-8")
     return path
 
 
@@ -29,7 +32,12 @@ def write_default_settings(tmp_path: Path, content: str) -> Path:
     """Создаёт встроенный config/settings.toml для проверки default path."""
     path = tmp_path / "config" / "settings.toml"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content.strip(), encoding="utf-8")
+    normalized = content.strip()
+    if "[telegram]" not in normalized:
+        normalized = '[telegram]\napi_id = 12345678\napi_hash = "test_api_hash_abc"\n\n' + normalized
+    if "[openrouter]" not in normalized and "[gemini]" not in normalized:
+        normalized = '[openrouter]\nmodels = ["test/primary", "test/fallback"]\n\n' + normalized
+    path.write_text(normalized, encoding="utf-8")
     return path
 
 
@@ -61,10 +69,11 @@ def test_settings_loads_non_secret_values_from_minimal_toml(tmp_path):
     assert settings.topics_path == "ai/prompts/topics.md"
     assert settings.prompts_dir == "ai/prompts"
     assert settings.bot_profiles_dir == "ai/prompts/bots"
-    assert settings.gemini_model == "gemini-2.5-flash"
-    assert settings.gemini_fallback_model == "gemini-2.5-flash-lite"
-    assert settings.gemini_temperature == 0.9
-    assert settings.gemini_max_retries == 3
+    assert settings.openrouter_models == ["test/primary", "test/fallback"]
+    assert settings.openrouter_temperature is None
+    assert settings.api_id == 12345678
+    assert settings.api_hash == "test_api_hash_abc"
+    assert settings.openrouter_request_timeout_seconds == 45.0
     assert settings.group_chat_id == -100123
     assert settings.group_target == "@group"
     assert settings.log_level == "INFO"
@@ -75,8 +84,8 @@ def test_settings_uses_builtin_default_settings_path(tmp_path, monkeypatch):
     write_default_settings(
         tmp_path,
         """
-        [gemini]
-        model = "gemini-default-path"
+        [openrouter]
+        models = ["test/default", "test/fallback"]
 
         [[groups]]
         id = "danang"
@@ -92,9 +101,7 @@ def test_settings_uses_builtin_default_settings_path(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
     env = {
-        "API_ID": "12345678",
-        "API_HASH": "test_hash",
-        "GEMINI_API_KEY": "test_key",
+        "OPENROUTER_API_KEY": "test_key",
         "SESSION_STRING_ANNA": "anna-session",
     }
 
@@ -102,7 +109,7 @@ def test_settings_uses_builtin_default_settings_path(tmp_path, monkeypatch):
         settings = Settings(_env_file=None)
 
     assert settings.settings_path == "config/settings.toml"
-    assert settings.gemini_model == "gemini-default-path"
+    assert settings.openrouter_models == ["test/default", "test/fallback"]
 
 
 def test_settings_path_can_come_from_env(tmp_path):
@@ -110,8 +117,8 @@ def test_settings_path_can_come_from_env(tmp_path):
     settings_path = write_settings(
         tmp_path,
         """
-        [gemini]
-        model = "gemini-local-toml"
+        [openrouter]
+        models = ["test/local", "test/fallback"]
 
         [[groups]]
         id = "danang"
@@ -125,9 +132,7 @@ def test_settings_path_can_come_from_env(tmp_path):
         """,
     )
     env = {
-        "API_ID": "12345678",
-        "API_HASH": "test_hash",
-        "GEMINI_API_KEY": "test_key",
+        "OPENROUTER_API_KEY": "test_key",
         "SESSION_STRING_ANNA": "anna-session",
         "SETTINGS_PATH": str(settings_path),
     }
@@ -136,7 +141,96 @@ def test_settings_path_can_come_from_env(tmp_path):
         settings = Settings(_env_file=None)
 
     assert settings.mode == "swarm"
-    assert settings.gemini_model == "gemini-local-toml"
+    assert settings.openrouter_models == ["test/local", "test/fallback"]
+
+
+@pytest.mark.parametrize(
+    "models",
+    [
+        '["only/one"]',
+        '["one/model", " one/model "]',
+        '["one/model", "   "]',
+    ],
+)
+def test_settings_rejects_invalid_openrouter_model_lists(tmp_path, models):
+    """Проверяет минимум, уникальность и непустые slug моделей."""
+    settings_path = write_settings(
+        tmp_path,
+        f"""
+        [openrouter]
+        models = {models}
+        """,
+    )
+
+    with pytest.raises(Exception):
+        Settings(**BASE_SECRETS, settings_path=str(settings_path))
+
+
+def test_settings_rejects_missing_openrouter_section(tmp_path):
+    """Проверяет обязательность операторского списка моделей."""
+    settings_path = tmp_path / "settings.toml"
+    settings_path.write_text(
+        '[telegram]\napi_id = 12345678\napi_hash = "test_api_hash_abc"\n\n'
+        '[logging]\nlevel = "INFO"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(Exception):
+        Settings(**BASE_SECRETS, settings_path=str(settings_path))
+
+
+@pytest.mark.parametrize(
+    "telegram_toml",
+    [
+        "",
+        '[telegram]\napi_hash = "test_api_hash_abc"',
+        "[telegram]\napi_id = 12345678",
+    ],
+)
+def test_settings_requires_telegram_credentials_in_toml(tmp_path, telegram_toml):
+    """Проверяет обязательность обоих Telegram credentials в TOML."""
+    settings_path = tmp_path / "settings.toml"
+    settings_path.write_text(
+        f'{telegram_toml}\n\n[openrouter]\nmodels = ["test/primary", "test/fallback"]\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(Exception, match="telegram|api_id|api_hash"):
+        Settings(**BASE_SECRETS, settings_path=str(settings_path))
+
+
+@pytest.mark.parametrize(
+    "telegram_toml",
+    [
+        '[telegram]\napi_id = 0\napi_hash = "test_api_hash_abc"',
+        '[telegram]\napi_id = -1\napi_hash = "test_api_hash_abc"',
+        '[telegram]\napi_id = 12345678\napi_hash = "   "',
+    ],
+)
+def test_settings_rejects_invalid_telegram_credentials(tmp_path, telegram_toml):
+    """Проверяет положительный api_id и непустой api_hash."""
+    settings_path = tmp_path / "settings.toml"
+    settings_path.write_text(
+        f'{telegram_toml}\n\n[openrouter]\nmodels = ["test/primary", "test/fallback"]\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(Exception, match="api_id|api_hash"):
+        Settings(**BASE_SECRETS, settings_path=str(settings_path))
+
+
+def test_settings_rejects_legacy_gemini_section(tmp_path):
+    """Проверяет удаление TOML-контракта Gemini."""
+    settings_path = write_settings(
+        tmp_path,
+        """
+        [gemini]
+        model = "legacy/model"
+        """,
+    )
+
+    with pytest.raises(Exception, match="gemini"):
+        Settings(**BASE_SECRETS, settings_path=str(settings_path))
 
 
 def test_settings_rejects_group_target_in_toml(tmp_path):
@@ -176,9 +270,7 @@ def test_settings_rejects_target_section_from_toml(tmp_path):
     )
 
     env = {
-        "API_ID": "12345678",
-        "API_HASH": "test_hash",
-        "GEMINI_API_KEY": "test_key",
+        "OPENROUTER_API_KEY": "test_key",
         "SESSION_STRING_ANNA": "anna-session",
         "SESSION_STRING_MIKE": "mike-session",
         "SETTINGS_PATH": str(settings_path),
@@ -225,9 +317,7 @@ def test_settings_reads_multi_group_config_and_schedule_overrides(tmp_path):
     )
 
     env = {
-        "API_ID": "12345678",
-        "API_HASH": "test_hash",
-        "GEMINI_API_KEY": "test_key",
+        "OPENROUTER_API_KEY": "test_key",
         "SESSION_STRING_ANNA": "anna-session",
         "SETTINGS_PATH": str(settings_path),
     }
@@ -310,9 +400,7 @@ def test_settings_rejects_duplicate_group_ids(tmp_path):
     )
 
     env = {
-        "API_ID": "12345678",
-        "API_HASH": "test_hash",
-        "GEMINI_API_KEY": "test_key",
+        "OPENROUTER_API_KEY": "test_key",
         "SESSION_STRING_ANNA": "anna-session",
         "SETTINGS_PATH": str(settings_path),
     }
@@ -339,9 +427,7 @@ def test_settings_rejects_group_without_target(tmp_path):
     )
 
     env = {
-        "API_ID": "12345678",
-        "API_HASH": "test_hash",
-        "GEMINI_API_KEY": "test_key",
+        "OPENROUTER_API_KEY": "test_key",
         "SESSION_STRING_ANNA": "anna-session",
         "SETTINGS_PATH": str(settings_path),
     }
@@ -363,9 +449,8 @@ def test_settings_reload_watcher_returns_new_settings_on_mtime_change(tmp_path):
         """,
     )
     env = {
-        "API_ID": "12345678",
-        "API_HASH": "test_hash",
-        "GEMINI_API_KEY": "test_key",
+        "OPENROUTER_API_KEY": "test_key",
+        "PROXY": "http://user:pass@127.0.0.1:8080",
         "SETTINGS_PATH": str(settings_path),
     }
 
@@ -375,6 +460,13 @@ def test_settings_reload_watcher_returns_new_settings_on_mtime_change(tmp_path):
         assert watcher.poll() is None
         settings_path.write_text(
             """
+            [telegram]
+            api_id = 87654321
+            api_hash = "updated_api_hash"
+
+            [openrouter]
+            models = ["test/new-primary", "test/new-fallback"]
+
             [[groups]]
             id = "danang"
             city = "Da Nang"
@@ -391,6 +483,12 @@ def test_settings_reload_watcher_returns_new_settings_on_mtime_change(tmp_path):
 
     assert reloaded is not None
     assert reloaded is not settings
+    assert reloaded.openrouter_api_key.get_secret_value() == "test_key"
+    assert reloaded.api_id == 87654321
+    assert reloaded.api_hash == "updated_api_hash"
+    assert reloaded.openrouter_models == ["test/new-primary", "test/new-fallback"]
+    assert reloaded.proxy is not None
+    assert reloaded.proxy.get_secret_value() == "http://user:pass@127.0.0.1:8080"
     assert [group.id for group in reloaded.groups] == ["danang", "batumi"]
 
 
@@ -406,9 +504,7 @@ def test_settings_rejects_missing_settings_path_from_env(tmp_path):
     """Проверяет ошибку при отсутствующем SETTINGS_PATH из окружения."""
     missing_path = tmp_path / "missing-settings.toml"
     env = {
-        "API_ID": "12345678",
-        "API_HASH": "test_hash",
-        "GEMINI_API_KEY": "test_key",
+        "OPENROUTER_API_KEY": "test_key",
         "SETTINGS_PATH": str(missing_path),
     }
 
@@ -424,9 +520,7 @@ def test_settings_rejects_missing_settings_path_from_env_file(tmp_path):
     env_path.write_text(
         "\n".join(
             [
-                "API_ID=12345678",
-                "API_HASH=test_hash",
-                "GEMINI_API_KEY=test_key",
+                "OPENROUTER_API_KEY=test_key",
                 f"SETTINGS_PATH={missing_path}",
             ],
         ),
@@ -453,9 +547,7 @@ def test_settings_reads_swarm_sessions_from_env_file(tmp_path):
     env_path.write_text(
         "\n".join(
             [
-                "API_ID=12345678",
-                "API_HASH=test_hash",
-                "GEMINI_API_KEY=test_key",
+                "OPENROUTER_API_KEY=test_key",
                 "SESSION_STRING_SOFIA=sofia-session",
                 f"SETTINGS_PATH={settings_path}",
             ],
@@ -503,9 +595,7 @@ def test_settings_loads_swarm_mode_and_bots(tmp_path):
     )
 
     env = {
-        "API_ID": "12345678",
-        "API_HASH": "test_hash",
-        "GEMINI_API_KEY": "test_key",
+        "OPENROUTER_API_KEY": "test_key",
         "SESSION_STRING_ANNA": "anna-session",
         "SESSION_STRING_MIKE": "mike-session",
         "SETTINGS_PATH": str(settings_path),
@@ -550,9 +640,7 @@ def test_settings_rejects_invalid_active_windows(tmp_path, window_value: str):
     )
 
     env = {
-        "API_ID": "12345678",
-        "API_HASH": "test_hash",
-        "GEMINI_API_KEY": "test_key",
+        "OPENROUTER_API_KEY": "test_key",
         "SESSION_STRING_ANNA": "anna-session",
         "SETTINGS_PATH": str(settings_path),
     }
@@ -579,9 +667,7 @@ def test_settings_rejects_invalid_minute_ranges(tmp_path, value: str):
     )
 
     env = {
-        "API_ID": "12345678",
-        "API_HASH": "test_hash",
-        "GEMINI_API_KEY": "test_key",
+        "OPENROUTER_API_KEY": "test_key",
         "SESSION_STRING_ANNA": "anna-session",
         "SETTINGS_PATH": str(settings_path),
     }
@@ -609,9 +695,7 @@ def test_settings_rejects_duplicate_swarm_bot_ids(tmp_path):
     )
 
     env = {
-        "API_ID": "12345678",
-        "API_HASH": "test_hash",
-        "GEMINI_API_KEY": "test_key",
+        "OPENROUTER_API_KEY": "test_key",
         "SESSION_STRING_ANNA": "anna-session",
         "SESSION_STRING_ANNA_2": "anna-session-2",
         "SETTINGS_PATH": str(settings_path),
@@ -635,9 +719,7 @@ def test_settings_rejects_missing_swarm_session_env(tmp_path):
     )
 
     env = {
-        "API_ID": "12345678",
-        "API_HASH": "test_hash",
-        "GEMINI_API_KEY": "test_key",
+        "OPENROUTER_API_KEY": "test_key",
         "SETTINGS_PATH": str(settings_path),
     }
 
@@ -653,7 +735,11 @@ def test_settings_rejects_missing_swarm_session_env(tmp_path):
         ("[storage]\ndb_path = \":memory:\"", "storage"),
         ("[prompts]\nbase_dir = \"custom/prompts\"", "prompts"),
         ("[paths]\nreply_" + "rules_path = \"custom/rules.md\"", "paths"),
-        ("[telegram]\nwhite" + "list_user_ids = [111, 222]", "telegram"),
+        (
+            '[telegram]\napi_id = 12345678\napi_hash = "test_api_hash_abc"\nwhite'
+            + "list_user_ids = [111, 222]",
+            "white" + "list_user_ids",
+        ),
         ("[swarm]\nenabled = true", "enabled"),
         ("[swarm]\nmax_parallel_bots = 12", "max_parallel_bots"),
         ("[swarm]\nignore_messages_from_swarm = true", "ignore_messages_from_swarm"),
@@ -681,9 +767,7 @@ def test_settings_rejects_removed_toml_keys(tmp_path, toml_fragment: str, key_na
     )
 
     env = {
-        "API_ID": "12345678",
-        "API_HASH": "test_hash",
-        "GEMINI_API_KEY": "test_key",
+        "OPENROUTER_API_KEY": "test_key",
         "SESSION_STRING_ANNA": "anna-session",
         "SETTINGS_PATH": str(settings_path),
     }
@@ -707,9 +791,7 @@ def test_settings_rejects_persona_file_outside_profiles_dir(tmp_path, persona_fi
     )
 
     env = {
-        "API_ID": "12345678",
-        "API_HASH": "test_hash",
-        "GEMINI_API_KEY": "test_key",
+        "OPENROUTER_API_KEY": "test_key",
         "SESSION_STRING_ANNA": "anna-session",
         "SETTINGS_PATH": str(settings_path),
     }
@@ -754,16 +836,23 @@ def test_prod_settings_toml_is_valid_and_matches_env_sessions():
         for key in prod_env_keys
         if key.startswith("SESSION_STRING_")
     }
+    telegram = settings_data.get("telegram", {})
 
     assert configured_session_keys
     assert len(configured_session_keys) == len(set(configured_session_keys))
     assert set(configured_session_keys) == prod_session_keys
+    assert isinstance(telegram.get("api_id"), int) and telegram["api_id"] > 0
+    assert isinstance(telegram.get("api_hash"), str) and telegram["api_hash"].strip()
+    assert "API_ID" not in prod_env_keys
+    assert "API_HASH" not in prod_env_keys
 
 
 def test_prod_settings_load_with_declared_session_keys():
     """Проверяет, что production TOML проходит строгую Settings-валидацию."""
     settings_path, _env_path = _require_local_prod_files()
     settings_data = tomllib.loads(settings_path.read_text(encoding="utf-8"))
+    if "openrouter" not in settings_data:
+        pytest.skip("Локальный production config ещё не мигрирован оператором на OpenRouter")
     env = {
         bot["session_env"]: "test-session"
         for bot in settings_data["swarm"]["bots"]

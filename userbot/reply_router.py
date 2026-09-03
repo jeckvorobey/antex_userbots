@@ -11,7 +11,7 @@ from typing import Any
 
 from telethon.errors import ChannelPrivateError, ChatWriteForbiddenError, UserBannedInChannelError, UserNotParticipantError
 
-from ai.gemini import GeminiClient
+from ai.generation import TextGenerationClient
 from ai.history import MessageHistory
 from ai.prompt_composer import PromptComposer
 from core.runtime_models import SwarmBotProfile
@@ -71,7 +71,7 @@ class AddressedReplyRouter:
         bot_profile: SwarmBotProfile,
         history: MessageHistory | Any,
         prompt_composer: PromptComposer | Any,
-        gemini_client: GeminiClient | Any,
+        ai_client: TextGenerationClient | Any,
         swarm_user_ids: set[int],
         enabled_group_chat_ids: set[int] | None = None,
         manager: SwarmManager | Any | None = None,
@@ -83,7 +83,7 @@ class AddressedReplyRouter:
         self.bot_profile = bot_profile
         self.history = history
         self.prompt_composer = prompt_composer
-        self.gemini_client = gemini_client
+        self.ai_client = ai_client
         self.swarm_user_ids = swarm_user_ids
         self.enabled_group_chat_ids = enabled_group_chat_ids if enabled_group_chat_ids is not None else set()
         self.manager = manager
@@ -199,14 +199,14 @@ class AddressedReplyRouter:
         )
         security_settings = self.security_settings_getter()
         if getattr(security_settings, "swarm_allow_external_llm_for_replies", True):
-            response_text = await self.gemini_client.generate_reply(
+            response_text = await self.ai_client.generate_reply(
                 system_prompt=system_prompt,
                 history=history,
                 user_message=user_text,
             )
-            output_safe_checker = getattr(self.gemini_client, "is_output_safe", lambda _text: True)
+            output_safe_checker = getattr(self.ai_client, "is_output_safe", lambda _text: True)
             if not output_safe_checker(response_text):
-                logger.warning("router: bot_id=%s replaced unsafe Gemini reply", self.bot_profile.id)
+                logger.warning("router: bot_id=%s replaced unsafe AI reply", self.bot_profile.id)
                 response_text = SAFE_REPLY_FALLBACK_TEXT
         else:
             logger.info("router: bot_id=%s uses local fallback because reply LLM is disabled", self.bot_profile.id)

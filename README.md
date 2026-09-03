@@ -24,7 +24,7 @@
 - игнорирует остальные аккаунты swarm;
 - собирает историю диалога из SQLite;
 - подставляет persona нужного бота и базовые промты;
-- запрашивает текст ответа у Gemini;
+- запрашивает текст ответа у OpenRouter через provider-neutral AI client;
 - отправляет ответ в группу;
 - сохраняет и сообщение пользователя, и ответ бота в БД.
 
@@ -54,8 +54,8 @@
 Для работы нужны:
 - Python `3.11+`;
 - `uv` для установки зависимостей и запуска команд;
-- `API_ID` и `API_HASH` Telegram;
-- `GEMINI_API_KEY`;
+- `API_ID` и `API_HASH` Telegram в `config/settings.toml`;
+- `OPENROUTER_API_KEY`;
 - `SESSION_STRING_*` для каждого Telegram-аккаунта из swarm-конфига;
 - файл настроек TOML;
 - persona-файлы для ботов.
@@ -79,9 +79,7 @@ cp .env.example .env
 Минимально в `.env` должны быть:
 
 ```dotenv
-API_ID=12345678
-API_HASH=your_telegram_api_hash
-GEMINI_API_KEY=your_gemini_api_key
+OPENROUTER_API_KEY=your_openrouter_api_key
 SESSION_STRING_DMITRY=...
 SESSION_STRING_VITALY=...
 ```
@@ -89,7 +87,7 @@ SESSION_STRING_VITALY=...
 Важно:
 - имя переменной `SESSION_STRING_*` должно совпадать с `session_env` у бота в TOML;
 - `SESSION_STRING_*` нельзя коммитить и нельзя логировать.
-- `.env`, `.env.prod` и SQLite-файлы должны быть доступны только владельцу (`chmod 600`); runtime автоматически применяет `0600` к файловой БД и созданным SQLite `-wal`/`-shm` файлам.
+- `.env`, `.env.prod`, `config/settings.toml`, `config/settings.prod.toml` и SQLite-файлы должны быть доступны только владельцу (`chmod 600`); runtime автоматически применяет `0600` к файловой БД и созданным SQLite `-wal`/`-shm` файлам.
 - `config/settings.toml` подхватывается автоматически; `SETTINGS_PATH` больше не нужен для обычного запуска.
 
 ### 3. Создать файл настроек
@@ -103,8 +101,12 @@ cp config/settings.example.toml config/settings.toml
 Минимальный пример:
 
 ```toml
-[gemini]
-model = "gemini-2.5-flash"
+[telegram]
+api_id = 12345678
+api_hash = "your_telegram_api_hash"
+
+[openrouter]
+models = ["provider/primary-model", "provider/fallback-model"]
 
 [logging]
 level = "INFO"
@@ -154,6 +156,14 @@ temperature = 0.8
 ```
 
 На что обратить внимание:
+- `[telegram].api_id` и `[telegram].api_hash` обязательны; переменные окружения `API_ID` и `API_HASH` не читаются;
+- `[openrouter].models` обязателен и содержит минимум две уникальные непустые модели в порядке primary -> fallback; конкретные slugs выбирает оператор;
+- `temperature` в `[openrouter]` необязательна и не отправляется в OpenRouter, если отсутствует;
+- каждый запрос использует Chat Completions с `zdr=true`, `data_collection="deny"`, `allow_fallbacks=true`, `require_parameters=true` и server-side пределом `max_completion_tokens=256`;
+- credential-bearing URL маскируются до отправки провайдеру, а в Telegram-ответах разрешена только служебная ссылка `https://t.me/tt_exchenge_bot/antex`;
+- `OPENROUTER_API_KEY` и `PROXY` хранятся в runtime-конфигурации как маскируемые секреты и раскрываются только при создании OpenRouter/Telethon клиентов;
+- timeout равен 45 секундам, а SDK retry ограничен 15 секундами для connection/timeout, 408, 429, 5xx, 524 и 529;
+- необязательный `PROXY` из `.env` применяется одновременно к Telethon и OpenRouter; без него оба соединения прямые;
 - группы задаются через `[[groups]]`; старый `[target]` в TOML больше не поддерживается;
 - старые секции `[app]`, `[storage]` и `[prompts]` больше не входят в публичный TOML-контракт;
 - `group.id` должен быть уникальным;
@@ -361,7 +371,7 @@ uv run pytest tests/test_reply_router.py
 - `[prompts]`
 - `SETTINGS_PATH` из `.env`
 
-После этого проверь, что в файле остались только реально нужные override-секции вроде `[gemini]`, `[logging]`, `[swarm.schedule]`, `[swarm.orchestrator]`, `[swarm.security]`, `[[groups]]` и `[[swarm.bots]]`.
+Замени `[gemini]` на обязательный `[openrouter]` со списком минимум из двух уникальных model slugs. Удали `GEMINI_API_KEY` и `PROXY_URL`; используй `OPENROUTER_API_KEY` и необязательный общий `PROXY`. Остальные поддерживаемые секции: `[logging]`, `[swarm.schedule]`, `[swarm.orchestrator]`, `[swarm.security]`, `[[groups]]` и `[[swarm.bots]]`.
 
 ## Коротко: минимальный путь до первого запуска
 
@@ -370,7 +380,7 @@ uv run pytest tests/test_reply_router.py
 1. Установить зависимости: `uv sync`.
 2. Скопировать `.env.example` в `.env`.
 3. Скопировать `config/settings.example.toml` в `config/settings.toml`.
-4. Заполнить `API_ID`, `API_HASH`, `GEMINI_API_KEY`.
+4. Заполнить `[telegram].api_id`, `[telegram].api_hash`, `OPENROUTER_API_KEY` и заменить model placeholders в `[openrouter].models`.
 5. Получить `SESSION_STRING_*` для каждого аккаунта и добавить их в `.env`.
 6. Проверить, что persona-файлы существуют.
 7. Запустить тесты: `uv run pytest`.

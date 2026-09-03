@@ -9,9 +9,7 @@ import pytest
 
 # Базовый набор обязательных переменных окружения для тестов
 BASE_ENV = {
-    "API_ID": "12345678",
-    "API_HASH": "test_api_hash_abc",
-    "GEMINI_API_KEY": "test_gemini_key_xyz",
+    "OPENROUTER_API_KEY": "test_openrouter_key_xyz",
 }
 
 
@@ -19,17 +17,24 @@ BASE_ENV = {
 def isolate_cwd(tmp_path, monkeypatch):
     """Изолирует cwd, чтобы тесты не зависели от локального config/settings.toml."""
     monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "settings.toml").write_text(
+        '[telegram]\napi_id = 12345678\napi_hash = "test_api_hash_abc"\n\n'
+        '[openrouter]\nmodels = ["test/primary", "test/fallback"]\n',
+        encoding="utf-8",
+    )
 
 
-def test_settings_loads_required_fields():
-    """Проверяет, что обязательные поля загружаются из переменных окружения."""
+def test_settings_loads_telegram_credentials_from_toml():
+    """Проверяет загрузку Telegram credentials из TOML."""
     with patch.dict(os.environ, BASE_ENV, clear=True):
         from core.config import Settings
 
         s = Settings(_env_file=None)
         assert s.api_id == 12345678
         assert s.api_hash == "test_api_hash_abc"
-        assert s.gemini_api_key == "test_gemini_key_xyz"
+        assert s.openrouter_api_key.get_secret_value() == "test_openrouter_key_xyz"
 
 
 def test_settings_ignores_legacy_session_string():
@@ -44,13 +49,9 @@ def test_settings_ignores_legacy_session_string():
     assert not hasattr(s, "session_string")
 
 
-def test_settings_missing_required_field_raises():
-    """Проверяет, что отсутствие обязательного поля вызывает исключение."""
-    env_without_api_id = {
-        "API_HASH": "test_hash",
-        "GEMINI_API_KEY": "test_key",
-    }
-    with patch.dict(os.environ, env_without_api_id, clear=True):
+def test_settings_missing_openrouter_key_raises():
+    """Проверяет обязательность OpenRouter key в окружении."""
+    with patch.dict(os.environ, {}, clear=True):
         from core.config import Settings
 
         with pytest.raises(Exception):
@@ -60,9 +61,7 @@ def test_settings_missing_required_field_raises():
 def test_settings_missing_session_string_is_allowed_for_swarm_setup():
     """Проверяет, что legacy session env key не требуется для swarm setup."""
     env_without_session_string = {
-        "API_ID": "12345678",
-        "API_HASH": "test_hash",
-        "GEMINI_API_KEY": "test_key",
+        "OPENROUTER_API_KEY": "test_key",
     }
     with patch.dict(os.environ, env_without_session_string, clear=True):
         from core.config import Settings
@@ -76,9 +75,7 @@ def test_settings_ignores_empty_legacy_session_string():
     """Проверяет, что пустой legacy session env key игнорируется."""
     legacy_key = "SESSION" + "_STRING"
     env = {
-        "API_ID": "12345678",
-        "API_HASH": "test_hash",
-        "GEMINI_API_KEY": "test_key",
+        "OPENROUTER_API_KEY": "test_key",
         legacy_key: "   ",
     }
     with patch.dict(os.environ, env, clear=True):
@@ -91,11 +88,7 @@ def test_settings_ignores_empty_legacy_session_string():
 
 def test_load_settings_or_exit_logs_validation_error(monkeypatch, caplog, tmp_path):
     """Проверяет, что ошибка конфигурации логируется перед остановкой."""
-    env_without_api_id = {
-        "API_HASH": "test_hash",
-        "GEMINI_API_KEY": "test_key",
-    }
-    with patch.dict(os.environ, env_without_api_id, clear=True):
+    with patch.dict(os.environ, {}, clear=True):
         from core.config import get_settings, load_settings_or_exit
 
         monkeypatch.chdir(tmp_path)
@@ -131,15 +124,30 @@ def test_get_settings_returns_settings_instance(monkeypatch, tmp_path):
         assert settings.api_id == 12345678
 
 
-def test_settings_reads_proxy_url():
-    """Проверяет загрузку общего proxy URL из переменных окружения."""
-    env = {**BASE_ENV, "PROXY_URL": "http://user:pass@127.0.0.1:8080"}
+def test_settings_reads_proxy():
+    """Проверяет загрузку общего proxy из переменных окружения."""
+    env = {**BASE_ENV, "PROXY": "http://user:pass@127.0.0.1:8080"}
     with patch.dict(os.environ, env, clear=True):
         from core.config import Settings
 
         s = Settings(_env_file=None)
 
-        assert s.proxy_url == "http://user:pass@127.0.0.1:8080"
+        assert s.proxy is not None
+        assert s.proxy.get_secret_value() == "http://user:pass@127.0.0.1:8080"
+
+
+def test_settings_masks_openrouter_key_and_proxy():
+    """Проверяет маскирование provider key и proxy credentials в диагностике."""
+    env = {**BASE_ENV, "PROXY": "http://user:pass@127.0.0.1:8080"}
+    with patch.dict(os.environ, env, clear=True):
+        from core.config import Settings
+
+        settings = Settings(_env_file=None)
+
+    assert "test_openrouter_key_xyz" not in str(settings.openrouter_api_key)
+    assert "test_openrouter_key_xyz" not in repr(settings.openrouter_api_key)
+    assert "user:pass" not in str(settings.proxy)
+    assert "user:pass" not in repr(settings.proxy)
 
 
 def test_settings_reads_group_target_from_env():
@@ -170,14 +178,14 @@ def test_settings_normalizes_empty_group_target_env():
     assert s.group_target is None
 
 
-def test_settings_proxy_url_defaults_to_none():
-    """Проверяет, что proxy URL по умолчанию отключён."""
+def test_settings_proxy_defaults_to_none():
+    """Проверяет, что proxy по умолчанию отключён."""
     with patch.dict(os.environ, BASE_ENV, clear=True):
         from core.config import Settings
 
         s = Settings(_env_file=None)
 
-        assert s.proxy_url is None
+        assert s.proxy is None
 
 
 def test_settings_log_level_defaults_to_info():
@@ -190,8 +198,8 @@ def test_settings_log_level_defaults_to_info():
         assert s.log_level == "INFO"
 
 
-def test_settings_reads_gemini_resilience_options():
-    """Проверяет загрузку резервной модели и retry-параметров Gemini из TOML."""
+def test_settings_reads_openrouter_models_and_optional_temperature():
+    """Проверяет порядок моделей и необязательную температуру OpenRouter."""
     import tempfile
     from pathlib import Path
 
@@ -199,11 +207,13 @@ def test_settings_reads_gemini_resilience_options():
         settings_path = Path(tmpdir) / "settings.toml"
         settings_path.write_text(
             """
-            [gemini]
-            fallback_model = "gemini-2.5-flash-lite"
-            max_retries = 4
-            retry_backoff_seconds = 2.0
-            retry_jitter_seconds = 0.4
+            [telegram]
+            api_id = 12345678
+            api_hash = "test_api_hash_abc"
+
+            [openrouter]
+            models = [" vendor/primary ", "vendor/fallback"]
+            temperature = 0.7
             """,
             encoding="utf-8",
         )
@@ -214,10 +224,71 @@ def test_settings_reads_gemini_resilience_options():
 
             s = Settings(_env_file=None)
 
-    assert s.gemini_fallback_model == "gemini-2.5-flash-lite"
-    assert s.gemini_max_retries == 4
-    assert s.gemini_retry_backoff_seconds == 2.0
-    assert s.gemini_retry_jitter_seconds == 0.4
+    assert s.openrouter_models == ["vendor/primary", "vendor/fallback"]
+    assert s.openrouter_temperature == 0.7
+    assert s.openrouter_request_timeout_seconds == 45.0
+    assert s.openrouter_retry_initial_interval_ms == 500
+    assert s.openrouter_retry_max_interval_ms == 5000
+    assert s.openrouter_retry_max_elapsed_time_ms == 15000
+    assert s.openrouter_retry_jitter_ms == 300
+
+
+def test_settings_legacy_gemini_key_does_not_replace_required_openrouter_key():
+    """Проверяет, что legacy Gemini key не заменяет обязательный OpenRouter key."""
+    env = {
+        "GEMINI_API_KEY": "legacy-key",
+        "PROXY_URL": "http://legacy:secret@127.0.0.1:8080",
+    }
+    with patch.dict(os.environ, env, clear=True):
+        from core.config import Settings
+
+        with pytest.raises(Exception):
+            Settings(_env_file=None)
+
+
+def test_settings_ignores_legacy_gemini_and_proxy_url_when_new_key_exists():
+    """Проверяет отсутствие legacy aliases при валидном новом контракте."""
+    env = {
+        **BASE_ENV,
+        "GEMINI_API_KEY": "legacy-key",
+        "PROXY_URL": "http://legacy:secret@127.0.0.1:8080",
+    }
+    with patch.dict(os.environ, env, clear=True):
+        from core.config import Settings
+
+        settings = Settings(_env_file=None)
+
+    assert settings.proxy is None
+    assert not hasattr(settings, "gemini_api_key")
+
+
+@pytest.mark.parametrize("key", [None, "", "   "])
+def test_settings_requires_non_empty_openrouter_key(key):
+    """Проверяет обязательность непустого OpenRouter API key."""
+    env = {}
+    if key is not None:
+        env["OPENROUTER_API_KEY"] = key
+    with patch.dict(os.environ, env, clear=True):
+        from core.config import Settings
+
+        with pytest.raises(Exception):
+            Settings(_env_file=None)
+
+
+def test_settings_ignores_legacy_telegram_environment_variables():
+    """Проверяет, что API_ID/API_HASH из env не заменяют значения TOML."""
+    env = {
+        **BASE_ENV,
+        "API_ID": "87654321",
+        "API_HASH": "legacy_env_hash",
+    }
+    with patch.dict(os.environ, env, clear=True):
+        from core.config import Settings
+
+        settings = Settings(_env_file=None)
+
+    assert settings.api_id == 12345678
+    assert settings.api_hash == "test_api_hash_abc"
 
 
 def test_settings_exposes_swarm_security_defaults():

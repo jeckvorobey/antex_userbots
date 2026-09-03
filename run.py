@@ -13,7 +13,8 @@ from urllib.parse import urlparse
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from ai.gemini import GeminiClient, PromptLoader
+from ai.openrouter import OpenRouterClient
+from ai.prompt_loader import PromptLoader
 from ai.history import MessageHistory
 from ai.prompt_composer import PromptComposer
 from core.config import SettingsReloadWatcher, load_settings_or_exit
@@ -48,19 +49,28 @@ class RuntimeContext:
     database: SQLiteDatabase
     history: MessageHistory
     prompt_loader: PromptLoader
-    gemini_client: GeminiClient
+    ai_client: OpenRouterClient
     topic_selector: TopicSelector
     prompt_composer: PromptComposer
     exchange_store: ExchangeStore
 
     async def close(self) -> None:
         """Закрывает runtime-ресурсы с внешними соединениями."""
-        await self.database.close()
+        try:
+            await self.ai_client.close()
+        finally:
+            await self.database.close()
 
 
 def _utc_now() -> datetime:
     """Возвращает текущее время в UTC."""
     return datetime.now(UTC)
+
+
+def _unwrap_secret(value: object) -> object:
+    """Раскрывает маскирующий тип только на границе внешнего клиента."""
+    get_secret_value = getattr(value, "get_secret_value", None)
+    return get_secret_value() if callable(get_secret_value) else value
 
 
 def _iter_candidate_chat_ids(chat_id: int) -> tuple[int, ...]:
@@ -615,21 +625,22 @@ async def _build_runtime_context(settings: object) -> RuntimeContext:
     """Создаёт общие runtime-зависимости swarm."""
     database = SQLiteDatabase(settings.db_path)
     await database.open()
+    ai_client = None
     try:
         history = MessageHistory(database)
         await history.init_db()
 
         prompt_loader = PromptLoader(settings.prompts_dir)
-        gemini_client = GeminiClient(
-            settings.gemini_api_key,
-            model_name=settings.gemini_model,
-            proxy_url=settings.proxy_url,
-            fallback_model_name=settings.gemini_fallback_model,
-            max_retries=settings.gemini_max_retries,
-            retry_backoff_seconds=settings.gemini_retry_backoff_seconds,
-            retry_jitter_seconds=settings.gemini_retry_jitter_seconds,
-            request_timeout_seconds=settings.gemini_request_timeout_seconds,
-            temperature=settings.gemini_temperature,
+        ai_client = OpenRouterClient(
+            api_key=_unwrap_secret(settings.openrouter_api_key),
+            models=settings.openrouter_models,
+            proxy=_unwrap_secret(settings.proxy),
+            temperature=settings.openrouter_temperature,
+            request_timeout_seconds=settings.openrouter_request_timeout_seconds,
+            retry_initial_interval_ms=settings.openrouter_retry_initial_interval_ms,
+            retry_max_interval_ms=settings.openrouter_retry_max_interval_ms,
+            retry_max_elapsed_time_ms=settings.openrouter_retry_max_elapsed_time_ms,
+            retry_jitter_ms=settings.openrouter_retry_jitter_ms,
             max_output_chars=getattr(settings, "swarm_max_output_chars", 400),
             max_mentions_per_message=getattr(settings, "swarm_max_mentions_per_message", 2),
         )
@@ -642,7 +653,15 @@ async def _build_runtime_context(settings: object) -> RuntimeContext:
         await history.prune_older_than(retention_days=retention_days)
         await exchange_store.prune_older_than(retention_days=retention_days)
     except BaseException:
-        await database.close()
+        if ai_client is not None:
+            try:
+                await ai_client.close()
+            except Exception:
+                logger.warning("Runtime initialization cleanup failed: resource=ai_client")
+        try:
+            await database.close()
+        except Exception:
+            logger.warning("Runtime initialization cleanup failed: resource=database")
         raise
 
     logger.info(
@@ -655,7 +674,7 @@ async def _build_runtime_context(settings: object) -> RuntimeContext:
         database=database,
         history=history,
         prompt_loader=prompt_loader,
-        gemini_client=gemini_client,
+        ai_client=ai_client,
         topic_selector=topic_selector,
         prompt_composer=prompt_composer,
         exchange_store=exchange_store,
@@ -705,7 +724,7 @@ async def _register_swarm_handlers(
             bot_profile=profile,
             history=runtime.history,
             prompt_composer=runtime.prompt_composer,
-            gemini_client=runtime.gemini_client,
+            ai_client=runtime.ai_client,
             swarm_user_ids=manager.swarm_user_ids,
             enabled_group_chat_ids=enabled_group_chat_ids,
             manager=manager,
@@ -740,7 +759,7 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
             session_string=profile.session_string,
             api_id=settings.api_id,
             api_hash=settings.api_hash,
-            proxy_url=settings.proxy_url,
+            proxy=_unwrap_secret(settings.proxy),
         ),
         startup_hook=_build_multi_group_membership_startup_hook(
             groups=current_groups,
@@ -838,7 +857,7 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
                     manager=manager,
                     topic_selector=runtime.topic_selector,
                     prompt_composer=runtime.prompt_composer,
-                    gemini_client=runtime.gemini_client,
+                    ai_client=runtime.ai_client,
                     history=runtime.history,
                     exchange_store=runtime.exchange_store,
                     group_id=_group.id,

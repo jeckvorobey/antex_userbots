@@ -1,10 +1,18 @@
-# Минимальный несекретный конфиг swarm-инстанса.
+# Минимальный конфиг swarm-инстанса. Реальную копию с Telegram credentials не коммить.
 # По умолчанию runtime читает именно config/settings.toml.
 # Стабильные пути вроде data/history.db и ai/prompts/* задаются кодом и здесь не дублируются.
 
-[gemini]
-# Необязательный override основной модели.
-model = "gemini-2.5-flash"
+[telegram]
+# Telegram API credentials из https://my.telegram.org/apps.
+api_id = 12345678
+api_hash = "your_api_hash_here"
+
+[openrouter]
+# Обязательный ordered-список: основная модель и минимум одна fallback-модель.
+# Замени placeholders на доступные model slugs из OpenRouter.
+models = ["provider/primary-model", "provider/fallback-model"]
+# temperature необязательна; если строку не добавлять, параметр не отправляется модели.
+# temperature = 0.9
 
 [logging]
 # Необязательный override уровня логирования.

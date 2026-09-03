@@ -1,8 +1,8 @@
-# Prompt And Gemini Generation
+# Prompt And Text Generation
 
 ## Purpose
 
-Define prompt loading, persona composition, topic loading, and Gemini generation behavior.
+Define provider-neutral prompt loading, persona composition, topic loading, safety, and OpenRouter generation behavior.
 ## Requirements
 ### Requirement: Runtime prompt files
 The system SHALL load prompt text from tracked production `.md` files through a non-blocking file cache rather than hardcoding prompt content or blocking the event loop for repeated reads.
@@ -74,7 +74,7 @@ The system SHALL use production persona overlays that describe each character as
 - **THEN** it preserves the character name, base role as a living chat participant, and existing high-level instruction not to mention AI or bot identity
 
 #### Scenario: Persona guides varied replies
-- **WHEN** Gemini composes a reply or scheduled exchange with a production persona
+- **WHEN** AI client composes a reply or scheduled exchange with a production persona
 - **THEN** the persona overlay includes guidance for variable message length, questions, humor, disagreement, silence, and non-deterministic behavior
 
 #### Scenario: Persona avoids identical output patterns
@@ -115,16 +115,16 @@ The system SHALL cache normalized keys for loaded scheduled exchange topic inten
 - **WHEN** scheduled topic anti-repeat receives a selector without `topic_key`
 - **THEN** it falls back to normalizing the topic text directly
 
-### Requirement: Gemini reply generation
-The system SHALL generate replies by sending system instruction, rendered history, and user message to the configured Gemini model.
+### Requirement: Provider-neutral generation interface
+The system SHALL expose an async `TextGenerationClient` with `generate_reply`, `start_topic`, `close`, and `is_output_safe` operations, and Telegram flows SHALL depend on it as `ai_client`.
 
-#### Scenario: Reply request includes history and message
+#### Scenario: Reply request separates instruction and user context
 - **WHEN** `generate_reply` is called with history and a user message
-- **THEN** the Gemini request contents include rendered history followed by `Пользователь: <message>`
+- **THEN** the request contains one system message and one redacted user message with rendered history followed by `Пользователь: <message>`
 
 #### Scenario: Start topic request includes topic
 - **WHEN** `start_topic` is called
-- **THEN** the Gemini request contents include `Тема разговора: <topic>`
+- **THEN** the redacted user message contains `Тема разговора: <topic>`
 
 #### Scenario: Start topic adapts intent to group city
 - **WHEN** scheduled start-topic generation is composed for a group
@@ -132,29 +132,55 @@ The system SHALL generate replies by sending system instruction, rendered histor
 
 #### Scenario: Start topic uses human opening variants
 - **WHEN** scheduled start-topic generation is composed
-- **THEN** the prompt instructs Gemini to begin like an ordinary chat participant using `привет`, `всем привет`, `здравствуйте`, or by asking the question directly without an introductory word
+- **THEN** the prompt instructs the AI client to begin like an ordinary chat participant using `привет`, `всем привет`, `здравствуйте`, or by asking the question directly without an introductory word
 
-### Requirement: Gemini resilience
-The system SHALL retry temporary Gemini failures and optionally switch to a fallback model.
+### Requirement: Strict OpenRouter requests
+The system SHALL send non-streaming Chat Completions through the official async OpenRouter SDK with ordered models and strict provider privacy preferences.
 
-#### Scenario: Temporary server error is retried
-- **WHEN** Gemini raises a temporary status such as 503 before retry limit is reached
-- **THEN** the client waits using exponential backoff and retries
+#### Scenario: Request contains ordered models and ZDR policy
+- **WHEN** either generation method calls OpenRouter
+- **THEN** `chat.send_async` receives configured `models` in order and provider preferences with `zdr=true`, `data_collection="deny"`, `allow_fallbacks=true`, and `require_parameters=true`
 
-#### Scenario: Retry limit raises temporary error
-- **WHEN** temporary failures continue through the configured retry limit without fallback success
-- **THEN** `GeminiTemporaryError` is raised
+#### Scenario: Optional temperature is omitted
+- **WHEN** `[openrouter].temperature` is absent
+- **THEN** the SDK request omits the temperature argument
 
-#### Scenario: Fallback model is used
-- **WHEN** the primary model exhausts retry attempts and a distinct fallback model is configured
-- **THEN** the client attempts generation with the fallback model
+#### Scenario: Configured temperature is forwarded
+- **WHEN** `[openrouter].temperature` is present
+- **THEN** the SDK request contains that exact value
 
-#### Scenario: Request timeout is temporary
-- **WHEN** a Gemini request times out
-- **THEN** it is treated as a temporary error and retried while attempts remain
+### Requirement: Bounded OpenRouter completion
+The system SHALL bound every OpenRouter Chat Completion to at most 256 generated tokens before provider execution while retaining the stricter publish-time character limit.
+
+#### Scenario: Reply completion is bounded
+- **WHEN** `generate_reply` sends an OpenRouter request
+- **THEN** the request contains `max_completion_tokens=256`
+
+#### Scenario: Start-topic completion is bounded
+- **WHEN** `start_topic` sends an OpenRouter request
+- **THEN** the request contains `max_completion_tokens=256`
+
+### Requirement: OpenRouter resilience and model fallback
+The system SHALL use a 45-second timeout and bounded SDK retries for connection failures, 408, 429, all 5xx statuses, 524, and 529 while delegating ordered model fallback to OpenRouter.
+
+#### Scenario: Retry configuration is bounded
+- **WHEN** the client is created
+- **THEN** exponential backoff starts at 500 ms, caps at 5000 ms, stops after 15000 ms, and adds at most 300 ms jitter
+
+#### Scenario: Temporary failure is classified
+- **WHEN** a retryable transport or status failure remains after SDK retries
+- **THEN** `TemporaryGenerationError` is raised without raw provider details
+
+#### Scenario: Permanent or empty response fails safely
+- **WHEN** a non-retryable SDK failure or missing non-empty first-choice text occurs
+- **THEN** `GenerationError` is raised without raw provider details
+
+#### Scenario: Model order is preserved
+- **WHEN** primary and fallback models are configured
+- **THEN** every request sends the complete list in operator-defined order without local per-model loops
 
 ### Requirement: Safe proxy reporting
-The system SHALL avoid exposing proxy credentials in Gemini logs.
+The system SHALL avoid exposing proxy credentials in AI client logs.
 
 #### Scenario: Proxy description redacts credentials
 - **WHEN** a proxy URL with credentials is configured
@@ -180,7 +206,7 @@ The system SHALL generate important-service responder messages as short natural 
 
 #### Scenario: Important answer varies wording
 - **WHEN** important-service answers are generated for repeated service scenarios
-- **THEN** the prompt instructs Gemini to avoid copying a fixed advertising sentence and to vary wording in a similar conversational style
+- **THEN** the prompt instructs AI client to avoid copying a fixed advertising sentence and to vary wording in a similar conversational style
 
 #### Scenario: Important answer stays brief
 - **WHEN** reply generation receives exchange context marked `important_service_answer`
@@ -197,19 +223,23 @@ The system SHALL keep ordinary scheduled exchanges and addressed replies from au
 - **WHEN** reply generation receives ordinary exchange context without `important_service_answer`
 - **THEN** the prompt does not require mentioning `https://t.me/tt_exchenge_bot/antex`
 
-### Requirement: Gemini input redaction
-The system SHALL redact obvious secret-like and invite-link content before sending prompts to Gemini.
+### Requirement: Generation input redaction
+The system SHALL redact obvious secret-like content, private invite links, and URLs containing embedded credentials before sending prompts to the AI provider.
 
 #### Scenario: Invite link is redacted before request
 - **WHEN** reply history or user input contains a Telegram invite link
-- **THEN** the Gemini request uses a redacted placeholder instead of the raw invite link
+- **THEN** the AI client request uses a redacted placeholder instead of the raw invite link
 
 #### Scenario: Token-like string is redacted before request
 - **WHEN** reply history or user input contains an obvious token-like or session-like secret string
-- **THEN** the Gemini request uses a redacted placeholder instead of the raw secret
+- **THEN** the AI client request uses a redacted placeholder instead of the raw secret
 
-### Requirement: Gemini output safety validation
-The system SHALL validate generated output against runtime safety rules before publish-time callers accept it.
+#### Scenario: URL credentials are redacted before request
+- **WHEN** reply history, user input, or topic contains an HTTP or HTTPS URL with username or password userinfo
+- **THEN** the AI client request replaces the complete credential-bearing URL with a redacted placeholder
+
+### Requirement: Generation output safety validation
+The system SHALL validate generated output against runtime safety rules and an explicit URL allowlist before publish-time callers accept it.
 
 #### Scenario: Too-long output is rejected
 - **WHEN** the generated output exceeds the configured maximum length
@@ -218,3 +248,29 @@ The system SHALL validate generated output against runtime safety rules before p
 #### Scenario: Forbidden pattern output is rejected
 - **WHEN** the generated output contains blocked invite-link, token-like, or excessive-mention patterns
 - **THEN** the output validator marks it unsafe
+
+#### Scenario: Unapproved external URL is rejected
+- **WHEN** generated output contains an HTTP or HTTPS URL outside the approved output URL allowlist
+- **THEN** the output validator marks it unsafe
+
+#### Scenario: Approved Mini App URL is accepted
+- **WHEN** otherwise safe generated output contains the exact approved Mini App URL `https://t.me/tt_exchenge_bot/antex`
+- **THEN** the output validator does not reject it because of that URL
+
+### Requirement: Managed OpenRouter lifecycle
+The system SHALL close the SDK transport and any adapter-owned proxy HTTP client exactly once.
+
+#### Scenario: Direct transport closes
+- **WHEN** runtime shuts down after direct OpenRouter use
+- **THEN** the SDK async lifecycle closes its internal transport once
+
+#### Scenario: Proxy transport closes
+- **WHEN** runtime shuts down after proxied OpenRouter use
+- **THEN** the SDK lifecycle and adapter-owned HTTPX client each close once
+
+### Requirement: Safe provider observability
+The system SHALL log only safe operation categories, model count, status, and credential-free proxy description.
+
+#### Scenario: Provider failure hides sensitive details
+- **WHEN** a provider request fails with a raw payload or exception
+- **THEN** logs and the raised exception chain omit keys, proxy credentials, prompts, history, generated text, and raw provider text

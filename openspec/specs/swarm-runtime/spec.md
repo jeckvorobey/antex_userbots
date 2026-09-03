@@ -7,19 +7,27 @@ Define how enabled Telegram userbot accounts are started, supervised, registered
 ## Requirements
 
 ### Requirement: Runtime context initialization
-The system SHALL initialize one shared SQLite database connection and other shared runtime dependencies before starting swarm clients, and SHALL close the SQLite connection exactly once during shutdown.
+The system SHALL initialize one shared SQLite connection and one shared provider-neutral AI client before starting swarm clients, and SHALL close both exactly once during shutdown.
 
 #### Scenario: Runtime dependencies are created
-- **WHEN** the application starts
-- **THEN** one SQLite database connection is opened and passed to message history and exchange storage, both tables are initialized, prompt loading is configured, Gemini client is configured, topics are loaded, and prompt composer is created
+- **WHEN** the application starts with valid settings
+- **THEN** SQLite stores, prompt loading, topic selection, prompt composition, and one shared OpenRouter-backed `ai_client` are initialized before bot clients
 
-#### Scenario: Runtime persistence is closed once
-- **WHEN** the runtime context shuts down
-- **THEN** the shared SQLite database closes its connection once and the message history and exchange store do not close it independently
+#### Scenario: Runtime dependencies close once
+- **WHEN** runtime shuts down
+- **THEN** the AI client and shared SQLite connection each close exactly once
 
-#### Scenario: Partial initialization cleans up persistence
-- **WHEN** runtime context construction fails after opening SQLite
-- **THEN** the shared SQLite connection is closed before the initialization error is propagated
+#### Scenario: Partial initialization cleans up resources
+- **WHEN** context construction fails after SQLite or the AI client is created
+- **THEN** every successfully created owned resource is closed before the error propagates
+
+#### Scenario: Shared proxy reaches both transports
+- **WHEN** settings provide `PROXY`
+- **THEN** runtime passes the same value to every Telethon client and the OpenRouter AI client
+
+#### Scenario: Direct transports omit proxy
+- **WHEN** settings do not provide `PROXY`
+- **THEN** runtime constructs Telethon and OpenRouter without proxy configuration
 
 ### Requirement: Enabled bot startup
 The system SHALL start only enabled swarm bot profiles and collect their Telegram user ids.

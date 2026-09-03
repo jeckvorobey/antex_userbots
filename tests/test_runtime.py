@@ -4,10 +4,22 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from pydantic import SecretStr
 
 from core.config import Settings
 from telethon.errors import FrozenMethodInvalidError, UserDeactivatedBanError
 from userbot.client import AccountMessagingUnavailableError, UserBotClient, _build_proxy_settings
+
+
+def write_openrouter_settings(tmp_path):
+    """Создаёт минимальный TOML с Telegram credentials и моделями."""
+    path = tmp_path / "settings.toml"
+    path.write_text(
+        '[telegram]\napi_id = 1\napi_hash = "hash"\n\n'
+        '[openrouter]\nmodels = ["test/primary", "test/fallback"]\n',
+        encoding="utf-8",
+    )
+    return path
 
 
 class FakeTelegramClient:
@@ -195,16 +207,104 @@ def test_build_proxy_settings_rejects_https_proxy():
 
 
 @pytest.mark.asyncio
-async def test_main_runs_swarm_mode(monkeypatch):
+async def test_build_runtime_context_wires_and_closes_openrouter(monkeypatch, tmp_path):
+    """Проверяет единый OpenRouter client и его lifecycle в RuntimeContext."""
+    import run
+
+    captured = {}
+    fake_ai_client = SimpleNamespace(close=AsyncMock())
+
+    def build_ai_client(**kwargs):
+        captured.update(kwargs)
+        return fake_ai_client
+
+    monkeypatch.setattr(run, "OpenRouterClient", build_ai_client)
+    settings = SimpleNamespace(
+        db_path=":memory:",
+        prompts_dir="ai/prompts",
+        topics_path="ai/prompts/topics.md",
+        bot_profiles_dir="ai/prompts/bots",
+        openrouter_api_key=SecretStr("test-key"),
+        openrouter_models=["test/primary", "test/fallback"],
+        openrouter_temperature=None,
+        openrouter_request_timeout_seconds=45.0,
+        openrouter_retry_initial_interval_ms=500,
+        openrouter_retry_max_interval_ms=5000,
+        openrouter_retry_max_elapsed_time_ms=15000,
+        openrouter_retry_jitter_ms=300,
+        proxy=SecretStr("http://user:pass@127.0.0.1:8080"),
+        swarm_max_output_chars=400,
+        swarm_max_mentions_per_message=2,
+        swarm_history_retention_days=30,
+    )
+
+    runtime = await run._build_runtime_context(settings)
+
+    assert runtime.ai_client is fake_ai_client
+    assert captured == {
+        "api_key": "test-key",
+        "models": ["test/primary", "test/fallback"],
+        "temperature": None,
+        "proxy": "http://user:pass@127.0.0.1:8080",
+        "request_timeout_seconds": 45.0,
+        "retry_initial_interval_ms": 500,
+        "retry_max_interval_ms": 5000,
+        "retry_max_elapsed_time_ms": 15000,
+        "retry_jitter_ms": 300,
+        "max_output_chars": 400,
+        "max_mentions_per_message": 2,
+    }
+    await runtime.close()
+    fake_ai_client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_build_runtime_context_preserves_init_error_and_closes_all_resources(monkeypatch):
+    """Проверяет cleanup после создания AI client без потери исходной ошибки."""
+    import run
+
+    database = SimpleNamespace(open=AsyncMock(), close=AsyncMock())
+    history = SimpleNamespace(init_db=AsyncMock(), prune_older_than=AsyncMock())
+    ai_client = SimpleNamespace(close=AsyncMock(side_effect=RuntimeError("close failed")))
+    topic_selector = SimpleNamespace(load=AsyncMock(side_effect=RuntimeError("topics failed")))
+    monkeypatch.setattr(run, "SQLiteDatabase", lambda _path: database)
+    monkeypatch.setattr(run, "MessageHistory", lambda _database: history)
+    monkeypatch.setattr(run, "PromptLoader", lambda _path: object())
+    monkeypatch.setattr(run, "OpenRouterClient", lambda **_kwargs: ai_client)
+    monkeypatch.setattr(run, "TopicSelector", lambda _path: topic_selector)
+    settings = SimpleNamespace(
+        db_path=":memory:",
+        prompts_dir="prompts",
+        topics_path="topics.md",
+        openrouter_api_key="key",
+        openrouter_models=["one", "two"],
+        openrouter_temperature=None,
+        openrouter_request_timeout_seconds=45.0,
+        openrouter_retry_initial_interval_ms=500,
+        openrouter_retry_max_interval_ms=5000,
+        openrouter_retry_max_elapsed_time_ms=15000,
+        openrouter_retry_jitter_ms=300,
+        proxy=None,
+        swarm_max_output_chars=400,
+        swarm_max_mentions_per_message=2,
+    )
+
+    with pytest.raises(RuntimeError, match="topics failed"):
+        await run._build_runtime_context(settings)
+
+    ai_client.close.assert_awaited_once()
+    database.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_main_runs_swarm_mode(monkeypatch, tmp_path):
     """Проверяет, что main() запускает swarm-bootstrap и закрывает runtime."""
     import run
 
     settings = Settings(
-        api_id=1,
-        api_hash="hash",
-        gemini_api_key="gemini-key",
+        openrouter_api_key="openrouter-key",
         db_path=":memory:",
-        settings_path=None,
+        settings_path=str(write_openrouter_settings(tmp_path)),
     )
     settings.mode = "swarm"
     runtime_context = SimpleNamespace(close=AsyncMock())
@@ -239,7 +339,7 @@ async def test_register_swarm_handlers_registers_handler_per_bot(monkeypatch):
         swarm_user_ids={101, 202},
         human_slot=lambda _bot_id: _AsyncNullContext(),
     )
-    runtime = SimpleNamespace(history=object(), prompt_composer=object(), gemini_client=object())
+    runtime = SimpleNamespace(history=object(), prompt_composer=object(), ai_client=object())
     monkeypatch.setitem(__import__("sys").modules, "telethon", SimpleNamespace(events=SimpleNamespace(NewMessage=lambda: "new-message")))
 
     await run._register_swarm_handlers(manager, runtime, lambda: SimpleNamespace())
@@ -264,7 +364,7 @@ async def test_register_swarm_handlers_skips_profiles_outside_active_pool(monkey
         swarm_user_ids={101},
         human_slot=lambda _bot_id: _AsyncNullContext(),
     )
-    runtime = SimpleNamespace(history=object(), prompt_composer=object(), gemini_client=object())
+    runtime = SimpleNamespace(history=object(), prompt_composer=object(), ai_client=object())
     monkeypatch.setitem(__import__("sys").modules, "telethon", SimpleNamespace(events=SimpleNamespace(NewMessage=lambda: "new-message")))
 
     await run._register_swarm_handlers(manager, runtime, lambda: SimpleNamespace())
@@ -273,19 +373,18 @@ async def test_register_swarm_handlers_skips_profiles_outside_active_pool(monkey
 
 
 @pytest.mark.asyncio
-async def test_run_swarm_mode_starts_manager_registers_scheduler_and_supervises(monkeypatch):
+async def test_run_swarm_mode_starts_manager_registers_scheduler_and_supervises(monkeypatch, tmp_path):
     """Интеграционно проверяет запуск swarm-режима с несколькими ботами."""
     import run
 
     settings = Settings(
-        api_id=1,
-        api_hash="hash",
-        gemini_api_key="gemini-key",
+        openrouter_api_key="openrouter-key",
         group_target="@group",
         db_path=":memory:",
-        settings_path=None,
+        settings_path=str(write_openrouter_settings(tmp_path)),
     )
     settings.mode = "swarm"
+    settings.proxy = SecretStr("http://user:pass@127.0.0.1:8080")
     settings.swarm_tick_seconds = 30
     settings.swarm_bots = [
         SimpleNamespace(id="anna", session_string="anna-session", persona_file="anna.md", enabled=True, temperature=0.9, session_env="SESSION_STRING_ANNA"),
@@ -309,13 +408,19 @@ async def test_run_swarm_mode_starts_manager_registers_scheduler_and_supervises(
     runtime = SimpleNamespace(
         topic_selector=SimpleNamespace(),
         prompt_composer=SimpleNamespace(),
-        gemini_client=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
         history=SimpleNamespace(),
         exchange_store=SimpleNamespace(),
     )
     scheduler = SimpleNamespace(add_job=Mock())
 
-    monkeypatch.setattr(run, "SwarmManager", lambda **kwargs: manager)
+    manager_kwargs = {}
+
+    def build_manager(**kwargs):
+        manager_kwargs.update(kwargs)
+        return manager
+
+    monkeypatch.setattr(run, "SwarmManager", build_manager)
     monkeypatch.setattr(run, "_register_swarm_handlers", AsyncMock())
     monkeypatch.setattr(run, "_log_resolved_group", AsyncMock())
     resolved_group = SimpleNamespace(id=123456, username="group")
@@ -325,7 +430,10 @@ async def test_run_swarm_mode_starts_manager_registers_scheduler_and_supervises(
 
     await run._run_swarm_mode(settings, runtime, scheduler)
 
+    constructed_client = manager_kwargs["client_factory"](settings.swarm_bots[0])
+
     manager.start.assert_awaited_once()
+    assert constructed_client.proxy == "http://user:pass@127.0.0.1:8080"
     run._register_swarm_handlers.assert_awaited_once_with(
         manager,
         runtime,
@@ -337,18 +445,16 @@ async def test_run_swarm_mode_starts_manager_registers_scheduler_and_supervises(
 
 
 @pytest.mark.asyncio
-async def test_run_swarm_mode_reuses_group_orchestrator_between_ticks(monkeypatch):
+async def test_run_swarm_mode_reuses_group_orchestrator_between_ticks(monkeypatch, tmp_path):
     """Проверяет, что scheduler tick переиспользует orchestrator для неизменной группы."""
     import run
 
     settings = Settings(
-        api_id=1,
-        api_hash="hash",
-        gemini_api_key="gemini-key",
+        openrouter_api_key="openrouter-key",
         group_chat_id=-100111,
         group_target="@group",
         db_path=":memory:",
-        settings_path=None,
+        settings_path=str(write_openrouter_settings(tmp_path)),
     )
     settings.mode = "swarm"
     settings.swarm_tick_seconds = 30
@@ -372,7 +478,7 @@ async def test_run_swarm_mode_reuses_group_orchestrator_between_ticks(monkeypatc
     runtime = SimpleNamespace(
         topic_selector=SimpleNamespace(),
         prompt_composer=SimpleNamespace(),
-        gemini_client=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
         history=SimpleNamespace(),
         exchange_store=SimpleNamespace(),
     )
@@ -482,17 +588,15 @@ def test_rotate_groups_for_tick_normalizes_index_after_reload():
 
 
 @pytest.mark.asyncio
-async def test_run_swarm_mode_requires_two_active_bots_after_start(monkeypatch):
+async def test_run_swarm_mode_requires_two_active_bots_after_start(monkeypatch, tmp_path):
     """Проверяет отказ запуска, если после startup остался один бот."""
     import run
 
     settings = Settings(
-        api_id=1,
-        api_hash="hash",
-        gemini_api_key="gemini-key",
+        openrouter_api_key="openrouter-key",
         group_target="@group",
         db_path=":memory:",
-        settings_path=None,
+        settings_path=str(write_openrouter_settings(tmp_path)),
     )
     settings.mode = "swarm"
     settings.swarm_bots = [
@@ -511,7 +615,7 @@ async def test_run_swarm_mode_requires_two_active_bots_after_start(monkeypatch):
     runtime = SimpleNamespace(
         topic_selector=SimpleNamespace(),
         prompt_composer=SimpleNamespace(),
-        gemini_client=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
         history=SimpleNamespace(),
         exchange_store=SimpleNamespace(),
     )
@@ -527,17 +631,15 @@ async def test_run_swarm_mode_requires_two_active_bots_after_start(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_swarm_mode_ignores_previous_persisted_quarantine(monkeypatch):
+async def test_run_swarm_mode_ignores_previous_persisted_quarantine(monkeypatch, tmp_path):
     """Предыдущий quarantine не выключает configured bot до свежей проверки."""
     import run
 
     settings = Settings(
-        api_id=1,
-        api_hash="hash",
-        gemini_api_key="gemini-key",
+        openrouter_api_key="openrouter-key",
         group_target="@group",
         db_path=":memory:",
-        settings_path=None,
+        settings_path=str(write_openrouter_settings(tmp_path)),
     )
     settings.mode = "swarm"
     settings.swarm_bots = [

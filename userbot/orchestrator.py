@@ -78,7 +78,7 @@ class SwarmOrchestrator:
         manager: Any,
         topic_selector: Any,
         prompt_composer: Any,
-        gemini_client: Any,
+        ai_client: Any,
         history: Any,
         exchange_store: ExchangeStore | Any,
         group_id: str | None = None,
@@ -103,7 +103,7 @@ class SwarmOrchestrator:
         self.manager = manager
         self.topic_selector = topic_selector
         self.prompt_composer = prompt_composer
-        self.gemini_client = gemini_client
+        self.ai_client = ai_client
         self.history = history
         self.exchange_store = exchange_store
         self.group_id = group_id
@@ -419,7 +419,7 @@ class SwarmOrchestrator:
                     initiator_text = await self._generate_non_repeating_question(
                         initiator_prompt=initiator_prompt, topic=decision.topic, recent_bot_questions=recent_initiator_questions,
                     )
-                    if not getattr(self.gemini_client, "is_output_safe", lambda _text: True)(initiator_text):
+                    if not getattr(self.ai_client, "is_output_safe", lambda _text: True)(initiator_text):
                         initiator_text = self._build_safe_start_topic(decision.topic)
                 else:
                     initiator_text = self._build_safe_start_topic(decision.topic)
@@ -529,10 +529,10 @@ class SwarmOrchestrator:
                 )
                 responder_history = await self.history.get_session_history(chat_id=history_chat_id, bot_id=responder.id)
                 if self._allow_external_llm_for_scheduled():
-                    responder_text = await self.gemini_client.generate_reply(
+                    responder_text = await self.ai_client.generate_reply(
                         system_prompt=responder_prompt, history=responder_history, user_message=str(exchange["question_text"]),
                     )
-                    if not getattr(self.gemini_client, "is_output_safe", lambda _text: True)(responder_text):
+                    if not getattr(self.ai_client, "is_output_safe", lambda _text: True)(responder_text):
                         responder_text = SAFE_SCHEDULED_REPLY_FALLBACK_TEXT
                 else:
                     responder_text = SAFE_SCHEDULED_REPLY_FALLBACK_TEXT
@@ -698,7 +698,7 @@ class SwarmOrchestrator:
         tried_topics = {topic}
 
         for attempt in range(1, 4):
-            question_text = await self.gemini_client.start_topic(system_prompt=prompt, topic=current_topic)
+            question_text = await self.ai_client.start_topic(system_prompt=prompt, topic=current_topic)
             signature = normalize_signature(question_text)
             if signature not in recent_signatures:
                 return question_text

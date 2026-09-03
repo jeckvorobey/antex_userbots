@@ -39,7 +39,7 @@ class UserBotClient:
         session_string: str,
         api_id: int,
         api_hash: str,
-        proxy_url: str | None = None,
+        proxy: str | None = None,
     ) -> None:
         """
         Инициализирует Telethon клиент.
@@ -48,12 +48,12 @@ class UserBotClient:
             session_string: Строковая Telethon-сессия.
             api_id: Telegram API ID (получить на https://my.telegram.org).
             api_hash: Telegram API Hash.
-            proxy_url: URL proxy для подключения к Telegram.
+            proxy: URL proxy для подключения к Telegram.
         """
         self.session_string = session_string
         self.api_id = api_id
         self.api_hash = api_hash
-        self.proxy_url = proxy_url
+        self.proxy = proxy
         self._client: Any | None = None
 
     async def start(self) -> None:
@@ -64,7 +64,7 @@ class UserBotClient:
                 self.session_string,
                 self.api_id,
                 self.api_hash,
-                proxy=_build_proxy_settings(self.proxy_url),
+                proxy=_build_proxy_settings(self.proxy),
             )
         logger.info("Подключение Telegram-клиента запущено")
         try:
@@ -192,15 +192,15 @@ def _build_telegram_client(
     return TelegramClient(StringSession(normalized_session_string), api_id, api_hash, proxy=proxy)
 
 
-def _build_proxy_settings(proxy_url: str | None) -> dict[str, Any] | None:
+def _build_proxy_settings(proxy: str | None) -> dict[str, Any] | None:
     """Преобразует proxy URL в формат, поддерживаемый Telethon."""
-    if not proxy_url:
+    if not proxy:
         logger.debug("Proxy для Telethon не настроен")
         return None
 
-    parsed = urlparse(proxy_url)
+    parsed = urlparse(proxy)
     if not parsed.scheme or not parsed.hostname or parsed.port is None:
-        raise ValueError("Некорректный PROXY_URL: ожидается схема, хост и порт")
+        raise ValueError("Некорректный PROXY: ожидается схема, хост и порт")
 
     proxy_type = parsed.scheme.lower()
     if proxy_type not in {"http", "socks4", "socks5"}:

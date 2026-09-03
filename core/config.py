@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 from dotenv import dotenv_values
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, SecretStr, ValidationError, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -46,6 +46,26 @@ def _normalize_optional_str(v: object) -> object:
     return v
 
 
+def _required_secret(v: object) -> SecretStr:
+    """Нормализует обязательный секрет и сохраняет его в маскирующем типе."""
+    raw_value = v.get_secret_value() if isinstance(v, SecretStr) else v
+    normalized = _require_non_empty_str(raw_value)
+    if not isinstance(normalized, str):
+        raise PydanticCustomError("invalid_secret_value", "Секрет должен быть строкой")
+    return SecretStr(normalized)
+
+
+def _optional_secret(v: object) -> SecretStr | None:
+    """Нормализует необязательный секрет и сохраняет его в маскирующем типе."""
+    raw_value = v.get_secret_value() if isinstance(v, SecretStr) else v
+    normalized = _normalize_optional_str(raw_value)
+    if normalized is None:
+        return None
+    if not isinstance(normalized, str):
+        raise PydanticCustomError("invalid_secret_value", "Секрет должен быть строкой")
+    return SecretStr(normalized)
+
+
 def _normalize_optional_chat_id(v: object) -> object:
     """Считает 0 и пустую строку отсутствующим chat_id."""
     v = _empty_str_to_none(v)
@@ -57,6 +77,8 @@ def _normalize_optional_chat_id(v: object) -> object:
 OptionalChatId = Annotated[int | None, BeforeValidator(_normalize_optional_chat_id)]
 OptionalStr = Annotated[str | None, BeforeValidator(_normalize_optional_str)]
 RequiredStr = Annotated[str, BeforeValidator(_require_non_empty_str)]
+RequiredSecretStr = Annotated[SecretStr, BeforeValidator(_required_secret)]
+OptionalSecretStr = Annotated[SecretStr | None, BeforeValidator(_optional_secret)]
 MinuteRange = tuple[int, int]
 
 
@@ -69,10 +91,8 @@ class Secrets(BaseSettings):
         extra="ignore",
     )
 
-    api_id: int
-    api_hash: str
-    gemini_api_key: str
-    proxy_url: OptionalStr = None
+    openrouter_api_key: RequiredSecretStr
+    proxy: OptionalSecretStr = None
     group_chat_id: OptionalChatId = None
     group_target: OptionalStr = None
     settings_path: OptionalStr = None
@@ -84,16 +104,31 @@ class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class GeminiConfig(_StrictModel):
-    """Несекретные параметры Gemini."""
+class TelegramConfig(_StrictModel):
+    """Telegram API credentials из операторского TOML-файла."""
 
-    model: str = "gemini-2.5-flash"
-    fallback_model: str | None = "gemini-2.5-flash-lite"
-    temperature: float = Field(default=0.9, ge=0.0, le=2.0)
-    max_retries: int = Field(default=3, ge=1)
-    retry_backoff_seconds: float = Field(default=1.0, ge=0.0)
-    retry_jitter_seconds: float = Field(default=0.3, ge=0.0)
-    request_timeout_seconds: float = Field(default=45.0, gt=0.0)
+    api_id: int = Field(gt=0)
+    api_hash: RequiredStr
+
+
+class OpenRouterConfig(_StrictModel):
+    """Несекретные параметры OpenRouter."""
+
+    models: list[str]
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+
+    @field_validator("models")
+    @classmethod
+    def validate_models(cls, value: list[str]) -> list[str]:
+        """Требует основную и резервную уникальные модели в заданном порядке."""
+        normalized = [model.strip() for model in value]
+        if len(normalized) < 2:
+            raise ValueError("openrouter.models должен содержать минимум две модели")
+        if any(not model for model in normalized):
+            raise ValueError("openrouter.models не должен содержать пустые модели")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("openrouter.models должен содержать уникальные модели")
+        return normalized
 
 
 class LoggingConfig(_StrictModel):
@@ -275,7 +310,8 @@ class AppConfig(_StrictModel):
     """Полная несекретная TOML-конфигурация."""
 
     groups: list[GroupConfig] = Field(default_factory=list)
-    gemini: GeminiConfig = Field(default_factory=GeminiConfig)
+    telegram: TelegramConfig
+    openrouter: OpenRouterConfig
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     swarm: SwarmConfig = Field(default_factory=SwarmConfig)
 
@@ -320,6 +356,11 @@ DEFAULT_DB_PATH = "data/history.db"
 DEFAULT_PROMPTS_DIR = "ai/prompts"
 DEFAULT_TOPICS_PATH = "ai/prompts/topics.md"
 DEFAULT_BOT_PROFILES_DIR = "ai/prompts/bots"
+OPENROUTER_REQUEST_TIMEOUT_SECONDS = 45.0
+OPENROUTER_RETRY_INITIAL_INTERVAL_MS = 500
+OPENROUTER_RETRY_MAX_INTERVAL_MS = 5000
+OPENROUTER_RETRY_MAX_ELAPSED_TIME_MS = 15000
+OPENROUTER_RETRY_JITTER_MS = 300
 
 
 def _load_toml_config(settings_path: str | Path | None, *, require_exists: bool = False) -> AppConfig:
@@ -352,20 +393,18 @@ def _load_env_lookup(env_file: str | None | object) -> dict[str, str]:
 
 
 class Settings:
-    """Фасад конфигурации с прежними публичными именами полей."""
+    """Фасад строгой runtime-конфигурации приложения."""
 
     def __init__(self, _env_file: str | None | object = ".env", **overrides: object) -> None:
         self._env_lookup = _load_env_lookup(_env_file)
         settings_path_override = overrides.pop("settings_path", _UNSET)
         secret_keys = {
-            "api_id",
-            "api_hash",
-            "gemini_api_key",
-            "proxy_url",
+            "openrouter_api_key",
+            "proxy",
             "group_chat_id",
             "group_target",
         }
-        required_secret_keys = {"api_id", "api_hash", "gemini_api_key"}
+        required_secret_keys = {"openrouter_api_key"}
         secret_overrides = {key: overrides.pop(key) for key in list(overrides) if key in secret_keys}
 
         if required_secret_keys - secret_overrides.keys():
@@ -388,6 +427,9 @@ class Settings:
                 settings_path = settings_path_override
                 settings_path_required = settings_path is not None
 
+        self.openrouter_api_key = _required_secret(self.openrouter_api_key)
+        self.proxy = _optional_secret(self.proxy)
+
         app_config = _load_toml_config(settings_path, require_exists=settings_path_required)
         self.settings_path = str(settings_path or DEFAULT_SETTINGS_PATH)
         self._settings_path_required = settings_path_required
@@ -403,18 +445,21 @@ class Settings:
         """Пробрасывает секции TOML в публичные поля Settings."""
         self.mode = DEFAULT_MODE
 
+        self.api_id = config.telegram.api_id
+        self.api_hash = config.telegram.api_hash
+
         self.db_path = DEFAULT_DB_PATH
         self.topics_path = DEFAULT_TOPICS_PATH
         self.prompts_dir = DEFAULT_PROMPTS_DIR
         self.bot_profiles_dir = DEFAULT_BOT_PROFILES_DIR
 
-        self.gemini_model = config.gemini.model
-        self.gemini_fallback_model = config.gemini.fallback_model
-        self.gemini_temperature = config.gemini.temperature
-        self.gemini_max_retries = config.gemini.max_retries
-        self.gemini_retry_backoff_seconds = config.gemini.retry_backoff_seconds
-        self.gemini_retry_jitter_seconds = config.gemini.retry_jitter_seconds
-        self.gemini_request_timeout_seconds = config.gemini.request_timeout_seconds
+        self.openrouter_models = list(config.openrouter.models)
+        self.openrouter_temperature = config.openrouter.temperature
+        self.openrouter_request_timeout_seconds = OPENROUTER_REQUEST_TIMEOUT_SECONDS
+        self.openrouter_retry_initial_interval_ms = OPENROUTER_RETRY_INITIAL_INTERVAL_MS
+        self.openrouter_retry_max_interval_ms = OPENROUTER_RETRY_MAX_INTERVAL_MS
+        self.openrouter_retry_max_elapsed_time_ms = OPENROUTER_RETRY_MAX_ELAPSED_TIME_MS
+        self.openrouter_retry_jitter_ms = OPENROUTER_RETRY_JITTER_MS
 
         self.log_level = config.logging.level
 
@@ -529,10 +574,8 @@ class SettingsReloadWatcher:
         self._last_mtime = current_mtime
         reloaded = Settings(
             _env_file=self.settings._env_file,
-            api_id=self.settings.api_id,
-            api_hash=self.settings.api_hash,
-            gemini_api_key=self.settings.gemini_api_key,
-            proxy_url=self.settings.proxy_url,
+            openrouter_api_key=self.settings.openrouter_api_key,
+            proxy=self.settings.proxy,
             group_chat_id=self.settings.group_chat_id,
             group_target=self.settings.group_target,
             settings_path=self.settings.settings_path,

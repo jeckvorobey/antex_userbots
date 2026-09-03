@@ -38,7 +38,7 @@ def test_orchestrator_selects_candidates_with_one_roster_scan_after_cooldown_res
         manager=SimpleNamespace(),
         topic_selector=SimpleNamespace(),
         prompt_composer=SimpleNamespace(),
-        gemini_client=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
         history=SimpleNamespace(),
         exchange_store=SimpleNamespace(),
     )
@@ -62,7 +62,7 @@ async def test_orchestrator_skips_exchange_when_recent_human_activity_detected()
         manager=SimpleNamespace(),
         topic_selector=SimpleNamespace(),
         prompt_composer=SimpleNamespace(),
-        gemini_client=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
         history=SimpleNamespace(),
         exchange_store=SimpleNamespace(get_due_started_exchange=AsyncMock(return_value=None)),
         group_target="@chat",
@@ -84,7 +84,7 @@ async def test_orchestrator_skips_exchange_outside_active_windows():
         manager=SimpleNamespace(),
         topic_selector=SimpleNamespace(),
         prompt_composer=SimpleNamespace(),
-        gemini_client=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
         history=SimpleNamespace(),
         exchange_store=SimpleNamespace(get_due_started_exchange=AsyncMock(return_value=None)),
         group_target="@chat",
@@ -110,7 +110,7 @@ async def test_orchestrator_skips_new_exchange_when_active_pool_has_fewer_than_t
         manager=SimpleNamespace(active_bot_ids=["anna"]),
         topic_selector=SimpleNamespace(),
         prompt_composer=SimpleNamespace(),
-        gemini_client=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
         history=SimpleNamespace(),
         exchange_store=exchange_store,
         group_target="@chat",
@@ -143,7 +143,7 @@ async def test_orchestrator_avoids_recent_bots_and_last_topics():
         manager=SimpleNamespace(),
         topic_selector=topic_selector,
         prompt_composer=SimpleNamespace(),
-        gemini_client=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
         history=SimpleNamespace(),
         exchange_store=exchange_store,
     )
@@ -173,7 +173,7 @@ async def test_orchestrator_relaxes_recent_bot_filter_when_pool_is_too_small():
         manager=SimpleNamespace(),
         topic_selector=SimpleNamespace(topics=["Тема"]),
         prompt_composer=SimpleNamespace(),
-        gemini_client=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
         history=SimpleNamespace(),
         exchange_store=exchange_store,
     )
@@ -201,7 +201,7 @@ async def test_orchestrator_passes_group_scope_to_recent_bot_ids():
         manager=SimpleNamespace(),
         topic_selector=SimpleNamespace(topics=["Тема"]),
         prompt_composer=SimpleNamespace(),
-        gemini_client=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
         history=SimpleNamespace(),
         exchange_store=exchange_store,
         group_id="danang",
@@ -216,7 +216,7 @@ async def test_orchestrator_passes_group_scope_to_recent_bot_ids():
 @pytest.mark.asyncio
 async def test_orchestrator_regenerates_repeated_question_signature():
     """Проверяет повторную генерацию вопроса при совпадении recent signature."""
-    gemini = SimpleNamespace(start_topic=AsyncMock(side_effect=["Один и тот же вопрос?", "Другой вопрос?"]))
+    ai = SimpleNamespace(start_topic=AsyncMock(side_effect=["Один и тот же вопрос?", "Другой вопрос?"]))
     exchange_store = SimpleNamespace(get_recent_question_signatures=AsyncMock(return_value={"один и тот же вопрос"}))
     orchestrator = SwarmOrchestrator(
         bot_profiles=[
@@ -226,7 +226,7 @@ async def test_orchestrator_regenerates_repeated_question_signature():
         manager=SimpleNamespace(),
         topic_selector=SimpleNamespace(),
         prompt_composer=SimpleNamespace(),
-        gemini_client=gemini,
+        ai_client=ai,
         history=SimpleNamespace(),
         exchange_store=exchange_store,
     )
@@ -234,7 +234,7 @@ async def test_orchestrator_regenerates_repeated_question_signature():
     question = await orchestrator._generate_non_repeating_question(initiator_prompt="prompt", topic="Тема")
 
     assert question == "Другой вопрос?"
-    assert gemini.start_topic.await_count == 2
+    assert ai.start_topic.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -266,7 +266,7 @@ async def test_orchestrator_runs_exchange_and_saves_history():
         manager=_manager_with_clients(initiator_client, responder_client),
         topic_selector=SimpleNamespace(topics=["Где поесть суп?"]),
         prompt_composer=SimpleNamespace(compose=AsyncMock(side_effect=["system-init", "system-reply"])),
-        gemini_client=SimpleNamespace(
+        ai_client=SimpleNamespace(
             start_topic=AsyncMock(return_value="Кто знает место с хорошим супом?"),
             generate_reply=AsyncMock(return_value="Мне нравится Pho 54."),
         ),
@@ -311,7 +311,7 @@ async def test_orchestrator_runs_exchange_and_saves_history():
 
 @pytest.mark.asyncio
 async def test_orchestrator_uses_local_fallback_when_scheduled_llm_disabled():
-    """Проверяет локальный fallback для initiator без вызова Gemini."""
+    """Проверяет локальный fallback для initiator без вызова AI."""
     initiator_client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=501)))
     responder_client = SimpleNamespace(send_message=AsyncMock())
     exchange_store = SimpleNamespace(
@@ -324,7 +324,7 @@ async def test_orchestrator_uses_local_fallback_when_scheduled_llm_disabled():
         mark_exchange_started=AsyncMock(),
         mark_exchange_completed=AsyncMock(),
     )
-    gemini_client = SimpleNamespace(
+    ai_client = SimpleNamespace(
         start_topic=AsyncMock(return_value="Небезопасный вопрос?"),
         generate_reply=AsyncMock(),
         is_output_safe=lambda text: True,
@@ -337,7 +337,7 @@ async def test_orchestrator_uses_local_fallback_when_scheduled_llm_disabled():
         manager=_manager_with_clients(initiator_client, responder_client),
         topic_selector=SimpleNamespace(topics=["Где поесть суп"]),
         prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system-init")),
-        gemini_client=gemini_client,
+        ai_client=ai_client,
         history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
         exchange_store=exchange_store,
         group_target="@chat",
@@ -359,7 +359,7 @@ async def test_orchestrator_uses_local_fallback_when_scheduled_llm_disabled():
     started = await orchestrator.run_once()
 
     assert started is True
-    gemini_client.start_topic.assert_not_awaited()
+    ai_client.start_topic.assert_not_awaited()
     initiator_client.send_message.assert_awaited_once_with("@chat", "Кто может подсказать: где поесть суп?")
 
 
@@ -375,7 +375,7 @@ async def test_orchestrator_replaces_unsafe_responder_output_with_fallback():
         get_session_history=AsyncMock(return_value=[]),
         save_message=AsyncMock(),
     )
-    gemini_client = SimpleNamespace(
+    ai_client = SimpleNamespace(
         generate_reply=AsyncMock(return_value="https://t.me/+secret"),
         is_output_safe=lambda text: False,
     )
@@ -387,7 +387,7 @@ async def test_orchestrator_replaces_unsafe_responder_output_with_fallback():
         manager=_manager_with_clients(initiator_client, responder_client),
         topic_selector=SimpleNamespace(),
         prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system-reply")),
-        gemini_client=gemini_client,
+        ai_client=ai_client,
         history=history,
         exchange_store=exchange_store,
         group_target="@chat",
@@ -437,7 +437,7 @@ async def test_orchestrator_scopes_exchange_to_group_and_uses_real_chat_id():
         manager=_manager_with_clients(initiator_client, responder_client),
         topic_selector=SimpleNamespace(topics=["Где поесть суп?"]),
         prompt_composer=prompt_composer,
-        gemini_client=SimpleNamespace(start_topic=AsyncMock(return_value="Кто знает место с хорошим супом?")),
+        ai_client=SimpleNamespace(start_topic=AsyncMock(return_value="Кто знает место с хорошим супом?")),
         history=history,
         exchange_store=exchange_store,
         group_id="danang",
@@ -509,7 +509,7 @@ async def test_orchestrator_sends_due_responder_and_completes_exchange():
         manager=_manager_with_clients(initiator_client, responder_client),
         topic_selector=SimpleNamespace(topics=["Где поесть суп?"]),
         prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system-reply")),
-        gemini_client=SimpleNamespace(generate_reply=AsyncMock(return_value="Мне нравится Pho 54.")),
+        ai_client=SimpleNamespace(generate_reply=AsyncMock(return_value="Мне нравится Pho 54.")),
         history=history,
         exchange_store=exchange_store,
         group_target="@chat",
@@ -558,7 +558,7 @@ async def test_responder_user_banned_marks_exchange_skipped_without_history_or_r
         manager=manager,
         topic_selector=SimpleNamespace(),
         prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="prompt")),
-        gemini_client=SimpleNamespace(generate_reply=AsyncMock(return_value="Ответ")),
+        ai_client=SimpleNamespace(generate_reply=AsyncMock(return_value="Ответ")),
         history=history,
         exchange_store=exchange_store,
         group_target="@chat",
@@ -576,7 +576,7 @@ async def test_responder_user_banned_marks_exchange_skipped_without_history_or_r
 
 
 @pytest.mark.asyncio
-async def test_persisted_responder_text_skips_second_gemini_call_after_temporary_send_error():
+async def test_persisted_responder_text_skips_second_ai_call_after_temporary_send_error():
     """Retry временной ошибки использует сохранённый draft и не расходует второй LLM-вызов."""
     responder_client = SimpleNamespace(send_message=AsyncMock(side_effect=TimeoutError("network")))
     exchange_store = SimpleNamespace(
@@ -593,18 +593,18 @@ async def test_persisted_responder_text_skips_second_gemini_call_after_temporary
         ),
         mark_exchange_skipped=AsyncMock(),
     )
-    gemini = SimpleNamespace(generate_reply=AsyncMock())
+    ai = SimpleNamespace(generate_reply=AsyncMock())
     orchestrator = SwarmOrchestrator(
         bot_profiles=[SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md"), SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md")],
         manager=SimpleNamespace(get_client=lambda _bot_id: SimpleNamespace(client=responder_client), scheduled_slot=lambda _bot_id: _ScheduledSlot(True)),
-        topic_selector=SimpleNamespace(), prompt_composer=SimpleNamespace(), gemini_client=gemini,
+        topic_selector=SimpleNamespace(), prompt_composer=SimpleNamespace(), ai_client=ai,
         history=SimpleNamespace(), exchange_store=exchange_store, group_target="@chat",
     )
 
     with pytest.raises(TimeoutError, match="network"):
         await orchestrator.run_once()
 
-    gemini.generate_reply.assert_not_awaited()
+    ai.generate_reply.assert_not_awaited()
     exchange_store.mark_exchange_skipped.assert_not_awaited()
 
 
@@ -623,7 +623,7 @@ async def test_initiator_permanent_error_marks_exchange_skipped():
         bot_profiles=[SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md"), SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md")],
         manager=SimpleNamespace(get_client=lambda _bot_id: SimpleNamespace(client=initiator_client), scheduled_slot=lambda _bot_id: _ScheduledSlot(True), disable_bot=AsyncMock()),
         topic_selector=SimpleNamespace(topics=["Тема"]), prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="prompt")),
-        gemini_client=SimpleNamespace(start_topic=AsyncMock(return_value="Вопрос")), history=SimpleNamespace(),
+        ai_client=SimpleNamespace(start_topic=AsyncMock(return_value="Вопрос")), history=SimpleNamespace(),
         exchange_store=exchange_store, group_target="@chat",
     )
     orchestrator._build_exchange_decision = AsyncMock(return_value=SimpleNamespace(
@@ -668,7 +668,7 @@ async def test_responder_permanent_error_immediately_reassigns_turn_to_other_bot
         ],
         manager=manager, topic_selector=SimpleNamespace(),
         prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="prompt")),
-        gemini_client=SimpleNamespace(generate_reply=AsyncMock(return_value="Ответ Джона")),
+        ai_client=SimpleNamespace(generate_reply=AsyncMock(return_value="Ответ Джона")),
         history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
         exchange_store=exchange_store, group_target="@chat",
     )
@@ -682,7 +682,7 @@ async def test_responder_permanent_error_immediately_reassigns_turn_to_other_bot
 
 
 @pytest.mark.asyncio
-async def test_persisted_unavailable_responder_is_reassigned_before_gemini_or_slot():
+async def test_persisted_unavailable_responder_is_reassigned_before_ai_or_slot():
     """Устаревший responder не занимает свой слот и заменяется до генерации ответа."""
     replacement_client = SimpleNamespace(send_message=AsyncMock())
     stale_exchange = {
@@ -714,7 +714,7 @@ async def test_persisted_unavailable_responder_is_reassigned_before_gemini_or_sl
         scheduled_slot=scheduled_slot,
         get_client=lambda _bot_id: SimpleNamespace(client=replacement_client),
     )
-    gemini = SimpleNamespace(generate_reply=AsyncMock(return_value="Ответ Джона"))
+    ai = SimpleNamespace(generate_reply=AsyncMock(return_value="Ответ Джона"))
     orchestrator = SwarmOrchestrator(
         bot_profiles=[
             SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md"),
@@ -723,7 +723,7 @@ async def test_persisted_unavailable_responder_is_reassigned_before_gemini_or_sl
         manager=manager,
         topic_selector=SimpleNamespace(),
         prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="prompt")),
-        gemini_client=gemini,
+        ai_client=ai,
         history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
         exchange_store=exchange_store,
         group_target="@chat",
@@ -734,12 +734,12 @@ async def test_persisted_unavailable_responder_is_reassigned_before_gemini_or_sl
         "exchange-1", stage="responder", replacement_bot_id="john", counterpart_bot_id="anna"
     )
     assert scheduled_slot_calls == ["john"]
-    gemini.generate_reply.assert_awaited_once()
+    ai.generate_reply.assert_awaited_once()
     replacement_client.send_message.assert_awaited_once_with("@chat", "Ответ Джона", reply_to=501)
 
 
 @pytest.mark.asyncio
-async def test_persisted_unavailable_initiator_is_reassigned_before_gemini_or_slot():
+async def test_persisted_unavailable_initiator_is_reassigned_before_ai_or_slot():
     """Устаревший initiator не должен вызывать KeyError и заменяется до генерации вопроса."""
     replacement_client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=501)))
     stale_exchange = {
@@ -767,7 +767,7 @@ async def test_persisted_unavailable_initiator_is_reassigned_before_gemini_or_sl
         scheduled_slot_calls.append(bot_id)
         return _ScheduledSlot(True)
 
-    gemini = SimpleNamespace(start_topic=AsyncMock(return_value="Новый вопрос"))
+    ai = SimpleNamespace(start_topic=AsyncMock(return_value="Новый вопрос"))
     orchestrator = SwarmOrchestrator(
         bot_profiles=[
             SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md"),
@@ -780,7 +780,7 @@ async def test_persisted_unavailable_initiator_is_reassigned_before_gemini_or_sl
         ),
         topic_selector=SimpleNamespace(topics=[]),
         prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="prompt")),
-        gemini_client=gemini,
+        ai_client=ai,
         history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
         exchange_store=exchange_store,
         group_target="@chat",
@@ -795,7 +795,7 @@ async def test_persisted_unavailable_initiator_is_reassigned_before_gemini_or_sl
         "exchange-1", stage="initiator", replacement_bot_id="anna", counterpart_bot_id="john"
     )
     assert scheduled_slot_calls == ["anna"]
-    gemini.start_topic.assert_awaited_once()
+    ai.start_topic.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -818,7 +818,7 @@ async def test_persisted_unavailable_responder_without_replacement_is_skipped():
         manager=SimpleNamespace(active_bot_ids=["anna"], scheduled_slot=AsyncMock()),
         topic_selector=SimpleNamespace(),
         prompt_composer=SimpleNamespace(),
-        gemini_client=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
         history=SimpleNamespace(),
         exchange_store=exchange_store,
         group_target="@chat",
@@ -849,7 +849,7 @@ async def test_orchestrator_creates_only_one_exchange_per_window():
         manager=SimpleNamespace(),
         topic_selector=SimpleNamespace(),
         prompt_composer=SimpleNamespace(),
-        gemini_client=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
         history=SimpleNamespace(),
         exchange_store=exchange_store,
         group_target="@chat",
@@ -871,7 +871,7 @@ async def test_orchestrator_important_service_cadence_uses_utc_calendar_days():
         manager=SimpleNamespace(),
         topic_selector=SimpleNamespace(),
         prompt_composer=SimpleNamespace(),
-        gemini_client=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
         history=SimpleNamespace(),
         exchange_store=SimpleNamespace(),
         now_provider=lambda: datetime(2026, 7, 7, 10, 0, tzinfo=UTC),
@@ -889,7 +889,7 @@ def test_orchestrator_rotates_important_service_scenarios():
         manager=SimpleNamespace(),
         topic_selector=SimpleNamespace(),
         prompt_composer=SimpleNamespace(),
-        gemini_client=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
         history=SimpleNamespace(),
         exchange_store=SimpleNamespace(),
     )
@@ -926,7 +926,7 @@ async def test_orchestrator_important_service_replaces_regular_topic_when_due():
         manager=_manager_with_clients(initiator_client, responder_client),
         topic_selector=SimpleNamespace(topics=["Обычная тема"]),
         prompt_composer=prompt_composer,
-        gemini_client=SimpleNamespace(start_topic=AsyncMock(return_value="Где сейчас нормально поменять безналичные рубли?")),
+        ai_client=SimpleNamespace(start_topic=AsyncMock(return_value="Где сейчас нормально поменять безналичные рубли?")),
         history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
         exchange_store=exchange_store,
         group_id="danang",
@@ -989,7 +989,7 @@ async def test_orchestrator_reselects_topic_when_initiator_recent_history_matche
         manager=_manager_with_clients(initiator_client, responder_client),
         topic_selector=SimpleNamespace(topics=["Старый вопрос?", "Другой вопрос?"]),
         prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system-init")),
-        gemini_client=SimpleNamespace(
+        ai_client=SimpleNamespace(
             start_topic=AsyncMock(side_effect=["Старый вопрос?", "Новый вопрос?"]),
         ),
         history=history,
@@ -1017,9 +1017,9 @@ async def test_orchestrator_reselects_topic_when_initiator_recent_history_matche
     assert history.get_session_history.await_args.kwargs["chat_id"] == -100111
     assert history.get_session_history.await_args.kwargs["bot_id"] == "anna"
     assert history.get_session_history.await_args.kwargs["limit"] == 50
-    assert orchestrator.gemini_client.start_topic.await_count == 2
-    assert orchestrator.gemini_client.start_topic.await_args_list[0].kwargs["topic"] == "Старый вопрос?"
-    assert orchestrator.gemini_client.start_topic.await_args_list[1].kwargs["topic"] == "Другой вопрос?"
+    assert orchestrator.ai_client.start_topic.await_count == 2
+    assert orchestrator.ai_client.start_topic.await_args_list[0].kwargs["topic"] == "Старый вопрос?"
+    assert orchestrator.ai_client.start_topic.await_args_list[1].kwargs["topic"] == "Другой вопрос?"
     assert history.save_message.await_args.kwargs["text"] == "Новый вопрос?"
 
 
@@ -1040,7 +1040,7 @@ async def test_orchestrator_important_service_respects_existing_window_exchange(
         manager=SimpleNamespace(),
         topic_selector=SimpleNamespace(),
         prompt_composer=SimpleNamespace(),
-        gemini_client=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
         history=SimpleNamespace(),
         exchange_store=exchange_store,
         group_target="@chat",
@@ -1069,7 +1069,7 @@ async def test_orchestrator_important_service_respects_human_activity_gate():
         manager=SimpleNamespace(),
         topic_selector=SimpleNamespace(),
         prompt_composer=SimpleNamespace(),
-        gemini_client=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
         history=SimpleNamespace(),
         exchange_store=exchange_store,
         group_target="@chat",
@@ -1113,7 +1113,7 @@ async def test_orchestrator_important_service_reply_context_mentions_required_co
         manager=_manager_with_clients(initiator_client, responder_client),
         topic_selector=SimpleNamespace(),
         prompt_composer=prompt_composer,
-        gemini_client=SimpleNamespace(
+        ai_client=SimpleNamespace(
             generate_reply=AsyncMock(return_value="Я бы через https://t.me/tt_exchenge_bot/antex попробовал.")
         ),
         history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
@@ -1162,7 +1162,7 @@ async def test_orchestrator_resolves_group_target_per_sending_client():
         manager=_manager_with_clients(initiator_client, responder_client),
         topic_selector=SimpleNamespace(topics=["Где поесть суп?"]),
         prompt_composer=SimpleNamespace(compose=AsyncMock(side_effect=["system-init", "system-reply"])),
-        gemini_client=SimpleNamespace(
+        ai_client=SimpleNamespace(
             start_topic=AsyncMock(return_value="Кто знает место с хорошим супом?"),
             generate_reply=AsyncMock(return_value="Мне нравится Pho 54."),
         ),
@@ -1213,7 +1213,7 @@ async def test_orchestrator_skips_when_bot_is_busy():
         ),
         topic_selector=SimpleNamespace(topics=["Тема"]),
         prompt_composer=SimpleNamespace(),
-        gemini_client=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
         history=SimpleNamespace(),
         exchange_store=exchange_store,
         group_target="@chat",
@@ -1242,7 +1242,7 @@ def test_orchestrator_picks_initiator_due_at_inside_remaining_active_window():
         manager=SimpleNamespace(),
         topic_selector=SimpleNamespace(),
         prompt_composer=SimpleNamespace(),
-        gemini_client=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
         history=SimpleNamespace(),
         exchange_store=SimpleNamespace(),
         active_windows_utc=["3-7"],
@@ -1287,7 +1287,7 @@ async def test_orchestrator_uses_second_precision_for_responder_due_time():
         manager=_manager_with_clients(initiator_client, responder_client),
         topic_selector=SimpleNamespace(topics=["Где поесть суп?"]),
         prompt_composer=SimpleNamespace(compose=AsyncMock(side_effect=["system-init", "system-reply"])),
-        gemini_client=SimpleNamespace(
+        ai_client=SimpleNamespace(
             start_topic=AsyncMock(return_value="Кто знает место с хорошим супом?"),
             generate_reply=AsyncMock(return_value="Мне нравится Pho 54."),
         ),
