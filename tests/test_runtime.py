@@ -541,6 +541,80 @@ async def test_run_swarm_mode_reuses_group_orchestrator_between_ticks(monkeypatc
     assert created_orchestrators[0].run_once.await_count == 2
 
 
+async def _build_swarm_tick_with_distinct_clients(monkeypatch, tmp_path):
+    """Собирает scheduler tick с различимыми Telegram-клиентами для runtime-тестов."""
+    import run
+
+    settings = Settings(
+        openrouter_api_key="openrouter-key",
+        group_chat_id=-100111,
+        group_target="@group",
+        db_path=":memory:",
+        settings_path=str(write_openrouter_settings(tmp_path)),
+    )
+    settings.mode = "swarm"
+    settings.swarm_bots = [
+        SimpleNamespace(id="anna", session_string="anna-session", persona_file="anna.md", enabled=True, temperature=0.9, session_env="SESSION_STRING_ANNA"),
+        SimpleNamespace(id="mike", session_string="mike-session", persona_file="mike.md", enabled=True, temperature=0.8, session_env="SESSION_STRING_MIKE"),
+    ]
+    clients = {
+        "anna": FakeTelegramClient("anna", 1, "hash"),
+        "mike": FakeTelegramClient("mike", 2, "hash"),
+    }
+    manager = SimpleNamespace(
+        active_bot_ids=["anna", "mike"],
+        bot_profiles=[
+            SimpleNamespace(id="anna", enabled=True, telegram_user_id=101, persona_file="anna.md"),
+            SimpleNamespace(id="mike", enabled=True, telegram_user_id=202, persona_file="mike.md"),
+        ],
+        start=AsyncMock(),
+        stop=AsyncMock(),
+        supervise_bot=AsyncMock(side_effect=[None, None]),
+        get_client=lambda bot_id: SimpleNamespace(client=clients[bot_id]),
+        swarm_user_ids={101, 202},
+    )
+    runtime = SimpleNamespace(
+        topic_selector=SimpleNamespace(),
+        prompt_composer=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
+        history=SimpleNamespace(),
+        exchange_store=SimpleNamespace(),
+    )
+    scheduler = SimpleNamespace(add_job=Mock())
+    resolve_group_target = AsyncMock(return_value=SimpleNamespace(id=-100111, username="group"))
+
+    monkeypatch.setattr(run, "SwarmManager", lambda **kwargs: manager)
+    monkeypatch.setattr(run, "_register_swarm_handlers", AsyncMock())
+    monkeypatch.setattr(run, "_log_resolved_group", AsyncMock())
+    monkeypatch.setattr(run, "_resolve_group_target", resolve_group_target)
+    monkeypatch.setattr(run, "SwarmOrchestrator", lambda **kwargs: SimpleNamespace(run_once=AsyncMock(return_value=False)))
+
+    await run._run_swarm_mode(settings, runtime, scheduler)
+    resolve_group_target.reset_mock()
+    return scheduler.add_job.call_args.args[0], manager, clients, resolve_group_target
+
+
+@pytest.mark.asyncio
+async def test_scheduler_tick_resolves_groups_through_current_active_client(monkeypatch, tmp_path):
+    """Tick не использует остановленный стартовый клиент после runtime-disable."""
+    tick, manager, clients, resolve_group_target = await _build_swarm_tick_with_distinct_clients(monkeypatch, tmp_path)
+    manager.active_bot_ids[:] = ["mike"]
+
+    await tick()
+
+    assert resolve_group_target.await_args.args[0] is clients["mike"]
+
+
+@pytest.mark.asyncio
+async def test_scheduler_tick_skips_group_resolution_without_active_clients(monkeypatch, tmp_path):
+    """Tick безопасно пропускается при временно пустом active pool."""
+    tick, manager, _clients, resolve_group_target = await _build_swarm_tick_with_distinct_clients(monkeypatch, tmp_path)
+    manager.active_bot_ids.clear()
+
+    assert await tick() is False
+    resolve_group_target.assert_not_awaited()
+
+
 def test_group_orchestrator_cache_rebuilds_on_signature_change_and_prunes():
     """Проверяет пересоздание cache entry при смене подписи и очистку отключённых групп."""
     import run

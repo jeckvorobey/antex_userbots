@@ -275,6 +275,46 @@ async def test_swarm_manager_reconnects_after_client_error():
 
 
 @pytest.mark.asyncio
+async def test_swarm_manager_retries_after_replacement_startup_failure():
+    """Следующий reconnect создаёт новый клиент после временной ошибки replacement."""
+    original_client = SimpleNamespace(
+        start=AsyncMock(),
+        stop=AsyncMock(),
+        get_current_user=AsyncMock(return_value=SimpleNamespace(id=101)),
+        run_until_disconnected=AsyncMock(),
+    )
+    failed_replacement = SimpleNamespace(
+        start=AsyncMock(side_effect=RuntimeError("temporary startup failure")),
+        stop=AsyncMock(),
+        get_current_user=AsyncMock(),
+        run_until_disconnected=AsyncMock(),
+    )
+    recovered_client = SimpleNamespace(
+        start=AsyncMock(),
+        stop=AsyncMock(),
+        get_current_user=AsyncMock(return_value=SimpleNamespace(id=101)),
+        run_until_disconnected=AsyncMock(),
+    )
+    clients = iter((original_client, failed_replacement, recovered_client))
+    profile = SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md")
+    manager = SwarmManager(
+        bot_profiles=[profile],
+        client_factory=lambda _profile: next(clients),
+        reconnect_backoff_seconds=(0.0,),
+    )
+    await manager.start()
+
+    with pytest.raises(RuntimeError, match="temporary startup failure"):
+        await manager._reconnect_bot(profile, manager.runtime_states["anna"], RuntimeError("disconnect"))
+
+    await manager._reconnect_bot(profile, manager.runtime_states["anna"], RuntimeError("retry"))
+
+    assert manager.get_client("anna") is recovered_client
+    assert manager.active_bot_ids == ["anna"]
+    failed_replacement.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_swarm_manager_excludes_bot_from_active_pool_during_reconnect_startup_hook():
     """Новый reconnect-клиент не доступен scheduler до health-check и membership."""
     fake_client = SimpleNamespace(

@@ -896,6 +896,11 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
             )
             logger.info("settings reload: enabled_groups=%s", [group.id for group in current_groups])
 
+        if not manager.active_bot_ids:
+            logger.warning("orchestrator: tick skipped because active bot pool is empty")
+            return False
+        tick_client = manager.get_client(manager.active_bot_ids[0]).client
+
         any_started = False
         _prune_orchestrator_cache(orchestrator_cache, {group.id for group in current_groups})
         groups_for_tick, next_group_start_index = _rotate_groups_for_tick(
@@ -904,7 +909,7 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
         )
         for group in groups_for_tick:
             resolved_group_target = await _resolve_group_target(
-                first_client,
+                tick_client,
                 getattr(group, "group_chat_id", None),
                 getattr(group, "group_target", None),
             )

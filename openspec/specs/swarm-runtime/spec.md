@@ -101,7 +101,7 @@ The system SHALL register an addressed-reply handler for each active bot client.
 - **THEN** handler registration skips that bot id
 
 ### Requirement: Target group membership
-The system SHALL wait a random inclusive 30–60 second delay before each bot's startup membership check, build one reusable dialog index for that bot, resolve or join every enabled configured group during startup, and validate new or changed enabled groups for every active bot after reload before activation.
+The system SHALL wait a random inclusive 30–60 second delay before each bot's startup membership check, build one reusable dialog index for that bot, resolve or join every enabled configured group during startup, validate new or changed enabled groups for every active bot after reload before activation, and resolve groups during scheduler ticks only through a currently active bot client.
 
 #### Scenario: Startup membership delay stays within the configured range
 - **WHEN** an enabled bot reaches either startup membership hook
@@ -126,6 +126,14 @@ The system SHALL wait a random inclusive 30–60 second delay before each bot's 
 #### Scenario: Reloaded group check fails
 - **WHEN** any active bot cannot resolve, join, or write to a new or changed enabled group
 - **THEN** that group remains excluded from routing and scheduling without globally quarantining the bot
+
+#### Scenario: Scheduler resolves through an active client
+- **WHEN** the client originally used during startup has been disabled and another bot remains active
+- **THEN** the next scheduler tick resolves configured groups through the remaining active bot client
+
+#### Scenario: Scheduler has no active client
+- **WHEN** no bot is active when a scheduler tick starts
+- **THEN** the tick returns without resolving a group or raising an exception
 
 #### Scenario: Telegram peer namespaces remain isolated
 - **WHEN** a user dialog and a channel dialog expose the same raw entity id
@@ -212,11 +220,15 @@ The system SHALL rotate the first processed group across scheduler ticks while k
 - **THEN** the next start index is normalized to the new list length without skipping or indexing outside the list
 
 ### Requirement: Client supervision
-The system SHALL keep active bot clients supervised and reconnect after unexpected disconnects or client errors.
+The system SHALL keep active bot clients supervised and continue reconnect attempts after unexpected disconnects, client errors, or transient replacement-client startup failures.
 
 #### Scenario: Client error triggers reconnect
 - **WHEN** `run_until_disconnected` raises an error
-- **THEN** the manager records reconnect state, waits according to backoff, stops the old client, and starts the bot again
+- **THEN** the manager records reconnect state, waits according to backoff, stops the old client when present, and starts the bot again
+
+#### Scenario: Transient replacement startup failure is retried
+- **WHEN** a reconnect replacement client fails to start or complete its health checks
+- **THEN** the failed replacement is cleaned up and a later supervisor attempt creates another replacement without `KeyError`
 
 #### Scenario: Reconnect discovers globally unavailable account
 - **WHEN** the global messaging health-check fails during reconnect

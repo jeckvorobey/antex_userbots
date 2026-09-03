@@ -256,7 +256,9 @@ class SwarmManager:
         if profile.id in self.active_bot_ids:
             self.active_bot_ids.remove(profile.id)
             logger.info("swarm: bot_id=%s временно исключён из active pool до завершения reconnect health-check", profile.id)
-        await self.clients[profile.id].stop()
+        previous_client = self.clients.get(profile.id)
+        if previous_client is not None:
+            await previous_client.stop()
         try:
             await self._start_single_bot(profile)
         except AccountMessagingUnavailableError as unavailable_exc:
