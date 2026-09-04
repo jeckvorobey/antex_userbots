@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from ai.openrouter import OpenRouterClient
+from ai.openrouter_catalog import OPENROUTER_FREE_MODELS_LOG, write_free_models_catalog
 from ai.prompt_loader import ImportantServiceScenario, PromptLoader
 from ai.history import MessageHistory
 from ai.prompt_composer import PromptComposer
@@ -731,10 +732,18 @@ async def _build_runtime_context(settings: object) -> RuntimeContext:
 
         prompt_loader = PromptLoader(settings.prompts_dir)
         important_service_scenarios = await prompt_loader.load_important_service_scenarios()
+        openrouter_api_key = _unwrap_secret(settings.openrouter_api_key)
+        proxy = _unwrap_secret(settings.proxy)
+        await write_free_models_catalog(
+            api_key=openrouter_api_key,
+            output_path=OPENROUTER_FREE_MODELS_LOG,
+            proxy=proxy,
+            timeout_seconds=settings.openrouter_request_timeout_seconds,
+        )
         ai_client = OpenRouterClient(
-            api_key=_unwrap_secret(settings.openrouter_api_key),
+            api_key=openrouter_api_key,
             models=settings.openrouter_models,
-            proxy=_unwrap_secret(settings.proxy),
+            proxy=proxy,
             temperature=settings.openrouter_temperature,
             request_timeout_seconds=settings.openrouter_request_timeout_seconds,
             retry_initial_interval_ms=settings.openrouter_retry_initial_interval_ms,

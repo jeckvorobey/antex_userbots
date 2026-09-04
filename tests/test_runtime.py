@@ -272,12 +272,20 @@ async def test_build_runtime_context_wires_and_closes_openrouter(monkeypatch, tm
 
     captured = {}
     fake_ai_client = SimpleNamespace(close=AsyncMock())
+    write_catalog = AsyncMock(
+        return_value={
+            "status": "ok",
+            "models_count": 2,
+            "output_path": "logs/openrouter_free_models.json",
+        }
+    )
 
     def build_ai_client(**kwargs):
         captured.update(kwargs)
         return fake_ai_client
 
     monkeypatch.setattr(run, "OpenRouterClient", build_ai_client)
+    monkeypatch.setattr(run, "write_free_models_catalog", write_catalog, raising=False)
     settings = SimpleNamespace(
         db_path=":memory:",
         prompts_dir="ai/prompts",
@@ -299,6 +307,12 @@ async def test_build_runtime_context_wires_and_closes_openrouter(monkeypatch, tm
 
     runtime = await run._build_runtime_context(settings)
 
+    write_catalog.assert_awaited_once_with(
+        api_key="test-key",
+        output_path="logs/openrouter_free_models.json",
+        proxy="http://user:pass@127.0.0.1:8080",
+        timeout_seconds=45.0,
+    )
     assert runtime.ai_client is fake_ai_client
     assert captured == {
         "api_key": "test-key",

@@ -171,7 +171,9 @@ temperature = 0.8
 - `[telegram].api_id` и `[telegram].api_hash` обязательны; переменные окружения `API_ID` и `API_HASH` не читаются;
 - `[openrouter].models` обязателен и содержит минимум две уникальные непустые модели в порядке primary -> fallback; конкретные slugs выбирает оператор;
 - `temperature` в `[openrouter]` необязательна и не отправляется в OpenRouter, если отсутствует;
-- каждый запрос использует Chat Completions с `zdr=true`, `data_collection="deny"`, `allow_fallbacks=true`, `require_parameters=true` и server-side пределом `max_completion_tokens=256`;
+- при старте runtime пишет отдельный diagnostic-файл `logs/openrouter_free_models.json`: в нём перечислены бесплатные text-output модели OpenRouter, отсортированные best-first по `intelligence-high-to-low`, их `connection_code` slugs и готовая строка `toml_models_line` для ручного копирования в `[openrouter].models`;
+- файл `logs/openrouter_free_models.json` не меняет рабочий список моделей автоматически и не содержит `OPENROUTER_API_KEY`;
+- каждый запрос использует Chat Completions с `zdr=false`, `allow_fallbacks=true` и server-side пределом `max_completion_tokens=256`;
 - credential-bearing URL маскируются до отправки провайдеру, а в Telegram-ответах разрешена только служебная ссылка `https://t.me/tt_exchenge_bot/antex`;
 - `OPENROUTER_API_KEY` и `PROXY` хранятся в runtime-конфигурации как маскируемые секреты и раскрываются только при создании OpenRouter/Telethon клиентов;
 - timeout равен 45 секундам, а SDK retry ограничен 15 секундами для connection/timeout, 408, 429, 5xx, 524 и 529;
