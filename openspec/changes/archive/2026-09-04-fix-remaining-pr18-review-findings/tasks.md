@@ -30,7 +30,7 @@
 
 - [x] 6.1 Обновить README и синхронизировать все delta specs.
 - [x] 6.2 Выполнить targeted/full tests, wheel smoke, dependency audit и strict OpenSpec validation.
-- [ ] 6.3 Архивировать change, commit/push, проверить PR comments/checks и повторить Codex Review.
+- [x] 6.3 Архивировать change, commit/push, проверить PR comments/checks и повторить Codex Review.
 
 ## 7. Follow-up review findings
 
