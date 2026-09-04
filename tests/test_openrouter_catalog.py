@@ -25,7 +25,7 @@ async def test_write_free_models_catalog_filters_sorts_and_writes_connection_cod
                         "created": 123,
                         "context_length": 1048576,
                         "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
-                        "pricing": {"prompt": "0", "completion": "0", "request": "0"},
+                        "pricing": {"prompt": "0", "completion": "0"},
                         "supported_parameters": ["temperature", "max_tokens"],
                         "top_provider": {"context_length": 1048576, "max_completion_tokens": 256000},
                     },
@@ -49,7 +49,7 @@ async def test_write_free_models_catalog_filters_sorts_and_writes_connection_cod
                         "created": 456,
                         "context_length": 262144,
                         "architecture": {"input_modalities": ["text", "image"], "output_modalities": ["text"]},
-                        "pricing": {"prompt": "0", "completion": "0", "request": "0"},
+                        "pricing": {"prompt": "0", "completion": "0"},
                         "supported_parameters": ["temperature"],
                         "top_provider": {"context_length": 262144, "max_completion_tokens": 8192},
                     },
@@ -86,6 +86,7 @@ async def test_write_free_models_catalog_filters_sorts_and_writes_connection_cod
         'models = ["z-ai/glm-5.2:free", "google/gemma-4-31b-it:free"]'
     )
     assert [item["connection_code"] for item in payload["models"]] == payload["connection_codes"]
+    assert payload["models"][0]["pricing"]["request"] == "0"
     assert "secret-key" not in output_path.read_text(encoding="utf-8")
 
 

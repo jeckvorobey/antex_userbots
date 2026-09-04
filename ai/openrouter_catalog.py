@@ -143,7 +143,7 @@ def _normalize_model(model: dict[str, Any]) -> dict[str, Any]:
         "pricing": {
             "prompt": str(pricing.get("prompt", "unknown")),
             "completion": str(pricing.get("completion", "unknown")),
-            "request": str(pricing.get("request", "unknown")),
+            "request": str(pricing.get("request", "0")),
         },
         "created": model.get("created"),
     }
@@ -161,7 +161,11 @@ def _is_free_text_model(model: dict[str, Any]) -> bool:
     pricing = model.get("pricing")
     if not isinstance(pricing, dict):
         return False
-    return all(_is_zero_price(pricing.get(key)) for key in ("prompt", "completion", "request"))
+    return (
+        _is_zero_price(pricing.get("prompt"))
+        and _is_zero_price(pricing.get("completion"))
+        and _is_zero_price(pricing.get("request", "0"))
+    )
 
 
 def _is_zero_price(value: Any) -> bool:
