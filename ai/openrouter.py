@@ -94,7 +94,9 @@ class OpenRouterClient(TextGenerationClient):
             "models": self.models,
             "provider": {
                 "zdr": False,
+                "data_collection": "deny",
                 "allow_fallbacks": True,
+                "require_parameters": True,
             },
             "stream": False,
             "max_completion_tokens": MAX_COMPLETION_TOKENS,

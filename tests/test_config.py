@@ -108,6 +108,30 @@ def test_load_settings_or_exit_logs_validation_error(monkeypatch, caplog, tmp_pa
         assert any("Ошибка конфигурации" in message for message in messages)
 
 
+def test_load_settings_or_exit_masks_malformed_api_hash(monkeypatch, caplog, tmp_path):
+    """Проверяет, что TOML validation error не логирует значение api_hash."""
+    secret_value = "raw_api_hash_should_not_be_logged"
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(exist_ok=True)
+    (config_dir / "settings.toml").write_text(
+        f'[telegram]\napi_id = 12345678\napi_hash = ["{secret_value}"]\n\n'
+        '[openrouter]\nmodels = ["test/primary", "test/fallback"]\n',
+        encoding="utf-8",
+    )
+
+    with patch.dict(os.environ, BASE_ENV, clear=True):
+        from core.config import get_settings, load_settings_or_exit
+
+        monkeypatch.chdir(tmp_path)
+        get_settings.cache_clear()
+        with caplog.at_level(logging.CRITICAL):
+            with pytest.raises(SystemExit, match="1"):
+                load_settings_or_exit()
+
+    assert secret_value not in caplog.text
+    assert "input_value" not in caplog.text
+
+
 def test_settings_has_db_path():
     """Проверяет наличие поля пути к базе данных."""
     with patch.dict(os.environ, BASE_ENV, clear=True):
