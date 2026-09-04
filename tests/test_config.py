@@ -26,6 +26,13 @@ def isolate_cwd(tmp_path, monkeypatch):
     )
 
 
+def test_swarm_orchestrator_uses_60_second_default_tick():
+    """Проверяет default cadence при отсутствии TOML override."""
+    from core.config import SwarmOrchestratorConfig
+
+    assert SwarmOrchestratorConfig().tick_seconds == 60
+
+
 def test_settings_loads_telegram_credentials_from_toml():
     """Проверяет загрузку Telegram credentials из TOML."""
     with patch.dict(os.environ, BASE_ENV, clear=True):

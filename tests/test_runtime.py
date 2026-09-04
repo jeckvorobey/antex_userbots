@@ -385,6 +385,32 @@ async def test_main_runs_swarm_mode(monkeypatch, tmp_path):
     runtime_context.close.assert_awaited_once()
 
 
+def test_run_cli_treats_keyboard_interrupt_as_graceful_shutdown(monkeypatch):
+    """Ctrl+C после async cleanup не печатает traceback из launcher."""
+    import run
+
+    main_result = object()
+    monkeypatch.setattr(run, "main", Mock(return_value=main_result))
+    asyncio_run = Mock(side_effect=KeyboardInterrupt)
+    monkeypatch.setattr(run.asyncio, "run", asyncio_run)
+
+    run._run_cli()
+
+    asyncio_run.assert_called_once_with(main_result)
+
+
+def test_run_cli_propagates_runtime_errors(monkeypatch):
+    """Launcher не маскирует ошибки приложения, не связанные с Ctrl+C."""
+    import run
+
+    main_result = object()
+    monkeypatch.setattr(run, "main", Mock(return_value=main_result))
+    monkeypatch.setattr(run.asyncio, "run", Mock(side_effect=RuntimeError("boom")))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        run._run_cli()
+
+
 @pytest.mark.asyncio
 async def test_register_swarm_handlers_registers_handler_per_bot(monkeypatch):
     """Проверяет регистрацию addressed handlers для каждого активного бота."""
@@ -448,7 +474,7 @@ async def test_run_swarm_mode_starts_manager_registers_scheduler_and_supervises(
     )
     settings.mode = "swarm"
     settings.proxy = SecretStr("http://user:pass@127.0.0.1:8080")
-    settings.swarm_tick_seconds = 30
+    settings.swarm_tick_seconds = 60
     settings.swarm_bots = [
         SimpleNamespace(id="anna", session_string="anna-session", persona_file="anna.md", enabled=True, temperature=0.9, session_env="SESSION_STRING_ANNA"),
         SimpleNamespace(id="mike", session_string="mike-session", persona_file="mike.md", enabled=True, temperature=0.8, session_env="SESSION_STRING_MIKE"),
@@ -504,6 +530,7 @@ async def test_run_swarm_mode_starts_manager_registers_scheduler_and_supervises(
         {-100123456},
     )
     scheduler.add_job.assert_called_once()
+    assert scheduler.add_job.call_args.kwargs["seconds"] == 60
     runtime.exchange_store.backfill_legacy_group_scope.assert_awaited_once_with(
         group_id="legacy",
         group_chat_id=-100123456,

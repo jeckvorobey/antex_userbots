@@ -271,7 +271,7 @@ class GroupRuntimeConfig(_StrictModel):
 class SwarmOrchestratorConfig(_StrictModel):
     """Параметры центрального orchestrator."""
 
-    tick_seconds: int = Field(default=30, ge=1)
+    tick_seconds: int = Field(default=60, ge=1)
     silence_timeout_minutes: int = Field(default=60, ge=0)
     skip_if_recent_human_activity: bool = True
 

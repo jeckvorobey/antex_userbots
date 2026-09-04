@@ -27,6 +27,17 @@ The system SHALL initialize one shared SQLite connection and one shared provider
 - **WHEN** settings do not provide `PROXY`
 - **THEN** runtime constructs Telethon and OpenRouter without proxy configuration
 
+### Requirement: Graceful operator shutdown
+The system SHALL treat an operator interrupt at the process entry point as a successful graceful shutdown after asynchronous runtime cleanup completes.
+
+#### Scenario: Ctrl+C stops without traceback
+- **WHEN** the operator sends an interrupt while the swarm is running
+- **THEN** supervisor tasks are cancelled, owned runtime resources are closed, and the process exits without printing a `CancelledError` or `KeyboardInterrupt` traceback
+
+#### Scenario: Runtime failures remain visible
+- **WHEN** the application exits because of an exception other than an operator interrupt
+- **THEN** the exception propagates from the process entry point
+
 ### Requirement: Enabled bot startup
 The system SHALL start only enabled swarm bot profiles, collect their Telegram user ids, and clean up any client that fails before active-pool registration completes.
 
@@ -201,6 +212,17 @@ The system SHALL reuse per-group scheduled orchestrators across scheduler ticks 
 #### Scenario: Disabled group cache is pruned
 - **WHEN** a reload removes or disables a group
 - **THEN** the scheduler cache removes that group's orchestrator and stops ticking it
+
+### Requirement: Scheduler tick cadence
+The system SHALL use 60 seconds as the default orchestrator scheduler tick interval and SHALL allow an explicit TOML value to override that default.
+
+#### Scenario: Default scheduler interval
+- **WHEN** configuration does not specify `swarm.orchestrator.tick_seconds`
+- **THEN** the scheduler registers the orchestrator job with a 60-second interval
+
+#### Scenario: Explicit scheduler interval
+- **WHEN** configuration specifies a valid `swarm.orchestrator.tick_seconds`
+- **THEN** the scheduler registers the orchestrator job with that configured interval
 
 ### Requirement: Fair sequential group ticks
 The system SHALL rotate the first processed group across scheduler ticks while keeping group execution sequential.

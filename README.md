@@ -138,7 +138,7 @@ active_windows_utc = ["14-16"]
 responder_delay_minutes = [5, 12]
 
 [swarm.orchestrator]
-tick_seconds = 30
+tick_seconds = 60
 silence_timeout_minutes = 60
 skip_if_recent_human_activity = true
 

@@ -1058,5 +1058,13 @@ async def main() -> None:
         logger.info("Swarm userbot остановлен")
 
 
+def _run_cli() -> None:
+    """Запускает приложение и завершает Ctrl+C без пользовательского traceback."""
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    _run_cli()

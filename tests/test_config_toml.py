@@ -633,7 +633,7 @@ def test_settings_loads_swarm_mode_and_bots(tmp_path):
         max_turns_per_exchange = 2
 
         [swarm.orchestrator]
-        tick_seconds = 30
+        tick_seconds = 60
         silence_timeout_minutes = 60
         skip_if_recent_human_activity = true
 
@@ -671,7 +671,7 @@ def test_settings_loads_swarm_mode_and_bots(tmp_path):
     assert settings.swarm_initiator_offset_minutes == (0, 30)
     assert settings.swarm_responder_delay_minutes == (3, 10)
     assert settings.swarm_max_turns_per_exchange == 2
-    assert settings.swarm_tick_seconds == 30
+    assert settings.swarm_tick_seconds == 60
     assert settings.swarm_silence_timeout_minutes == 60
     assert settings.swarm_skip_if_recent_human_activity is True
     assert settings.swarm_bot_ids == ["anna", "mike"]
