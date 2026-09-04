@@ -45,6 +45,17 @@ def test_generation_client_redacts_credential_bearing_urls():
     assert "<redacted_credential_url>" in sanitized
 
 
+def test_generation_client_redacts_credentials_from_socks_uri():
+    """Короткие credentials в поддерживаемом SOCKS URI не уходят провайдеру."""
+    client = FakeGenerationClient()
+
+    sanitized = client.sanitize_for_prompt("proxy socks5://alice:pass123@10.0.0.1:1080")
+
+    assert "alice" not in sanitized
+    assert "pass123" not in sanitized
+    assert "<redacted_credential_url>" in sanitized
+
+
 def test_generation_client_rejects_unsafe_output():
     """Проверяет общий safety-гейт перед публикацией."""
     client = FakeGenerationClient(max_output_chars=20, max_mentions_per_message=1)
@@ -64,6 +75,8 @@ def test_generation_client_rejects_unsafe_output():
         "Посмотри https://evil.example/phishing",
         "[полезная ссылка](https://evil.example/phishing)",
         "Открой HTTP://evil.example/path",
+        "Вступай через tg://join?invite=AbC123xyz",
+        "Посмотри www.evil.example/path",
     ],
 )
 def test_generation_client_rejects_unapproved_output_urls(text):

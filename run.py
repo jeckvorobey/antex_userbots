@@ -883,7 +883,7 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
         group.group_chat_id for group in current_groups if isinstance(getattr(group, "group_chat_id", None), int)
     }
     first_client = manager.get_client(manager.active_bot_ids[0]).client
-    for group in current_groups:
+    for group_index, group in enumerate(current_groups):
         resolved_group_target = await _resolve_group_target(
             first_client,
             getattr(group, "group_chat_id", None),
@@ -895,6 +895,13 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
         )
         if resolved_event_chat_id is not None:
             enabled_group_chat_ids.add(resolved_event_chat_id)
+        if group_index == 0:
+            backfill_legacy_scope = getattr(runtime.exchange_store, "backfill_legacy_group_scope", None)
+            if callable(backfill_legacy_scope):
+                await backfill_legacy_scope(
+                    group_id=str(group.id),
+                    group_chat_id=resolved_event_chat_id,
+                )
         await _log_resolved_group(first_client, group.group_chat_id, group.group_target)
     await _register_swarm_handlers(manager, runtime, lambda: current_settings, enabled_group_chat_ids)
 

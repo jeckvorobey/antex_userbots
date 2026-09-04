@@ -64,7 +64,7 @@ def _optional_secret(v: object) -> SecretStr | None:
         return None
     if not isinstance(normalized, str):
         raise PydanticCustomError("invalid_secret_value", "Секрет должен быть строкой")
-    if urlparse(normalized).scheme.lower() not in {"http", "https", "socks5", "socks5h"}:
+    if urlparse(normalized).scheme.lower() not in {"http", "socks5"}:
         raise PydanticCustomError("invalid_proxy_scheme", "Unsupported proxy scheme")
     return SecretStr(normalized)
 
@@ -283,7 +283,7 @@ class SwarmSecurityConfig(_StrictModel):
     addressed_reply_rate_limit_count: int = Field(default=3, ge=1)
     addressed_reply_rate_limit_window_seconds: int = Field(default=60, ge=1)
     addressed_reply_max_pending_per_bot: int = Field(default=3, ge=1)
-    max_output_chars: int = Field(default=400, ge=1)
+    max_output_chars: int = Field(default=400, ge=95)
     max_mentions_per_message: int = Field(default=2, ge=0)
     history_retention_days: int = Field(default=30, ge=0)
 
@@ -576,7 +576,6 @@ class SettingsReloadWatcher:
         current_mtime = self._read_mtime(self.settings.settings_path)
         if current_mtime == self._last_mtime:
             return None
-        self._last_mtime = current_mtime
         reloaded = Settings(
             _env_file=self.settings._env_file,
             openrouter_api_key=self.settings.openrouter_api_key,
@@ -585,6 +584,7 @@ class SettingsReloadWatcher:
             group_target=self.settings._group_target_fallback,
             settings_path=self.settings.settings_path,
         )
+        self._last_mtime = current_mtime
         self.settings = reloaded
         return reloaded
 

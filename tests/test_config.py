@@ -136,7 +136,7 @@ def test_settings_reads_proxy():
         assert s.proxy.get_secret_value() == "http://user:pass@127.0.0.1:8080"
 
 
-@pytest.mark.parametrize("scheme", ["http", "https", "socks5", "socks5h"])
+@pytest.mark.parametrize("scheme", ["http", "socks5"])
 def test_settings_accepts_proxy_schemes_supported_by_both_clients(scheme):
     """Общий proxy принимает только транспортно совместимые рабочие схемы."""
     env = {**BASE_ENV, "PROXY": f"{scheme}://127.0.0.1:8080"}
@@ -149,9 +149,10 @@ def test_settings_accepts_proxy_schemes_supported_by_both_clients(scheme):
     assert settings.proxy.get_secret_value() == f"{scheme}://127.0.0.1:8080"
 
 
-def test_settings_rejects_socks4_shared_proxy():
-    """SOCKS4 отклоняется до создания несовместимого HTTPX transport."""
-    env = {**BASE_ENV, "PROXY": "socks4://127.0.0.1:8080"}
+@pytest.mark.parametrize("scheme", ["https", "socks4", "socks5h"])
+def test_settings_rejects_proxy_scheme_unsupported_by_either_client(scheme):
+    """Общая схема отклоняется, если хотя бы один transport её не поддерживает."""
+    env = {**BASE_ENV, "PROXY": f"{scheme}://127.0.0.1:8080"}
     with patch.dict(os.environ, env, clear=True):
         from core.config import Settings
 

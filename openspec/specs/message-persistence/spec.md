@@ -293,3 +293,10 @@ The concrete exchange store SHALL persist a terminal skipped state when no eligi
 #### Scenario: Exchange cannot be reassigned
 - **WHEN** runtime marks an exchange skipped with a safe reason
 - **THEN** the row becomes terminal and is not retried as pending
+
+### Requirement: Legacy exchange rows receive current group scope
+The system SHALL assign pre-group-schema exchanges to the deterministic legacy group before group-scoped runtime queries begin.
+
+#### Scenario: Existing started exchange has null group fields
+- **WHEN** a single-group installation upgrades and resolves its current group
+- **THEN** legacy rows receive that group id and chat id so the started responder turn remains resumable

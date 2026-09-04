@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from core.config import Settings, SettingsReloadWatcher
+from core.config import Settings, SettingsReloadWatcher, SwarmSecurityConfig
 
 
 BASE_SECRETS = {
@@ -490,6 +490,28 @@ def test_settings_reload_watcher_returns_new_settings_on_mtime_change(tmp_path):
     assert reloaded.proxy is not None
     assert reloaded.proxy.get_secret_value() == "http://user:pass@127.0.0.1:8080"
     assert [group.id for group in reloaded.groups] == ["danang", "batumi"]
+
+
+def test_settings_reload_retries_same_signature_after_invalid_partial_write(tmp_path, monkeypatch):
+    """Неуспешный parse не помечает файловую сигнатуру как применённую."""
+    settings_path = write_settings(tmp_path, "")
+    settings = Settings(**BASE_SECRETS, settings_path=str(settings_path), _env_file=None)
+    watcher = SettingsReloadWatcher(settings)
+    changed_signature = (watcher._last_mtime or 0) + 1
+    monkeypatch.setattr(watcher, "_read_mtime", lambda _path: changed_signature)
+    settings_path.write_text("[telegram", encoding="utf-8")
+
+    with pytest.raises(tomllib.TOMLDecodeError):
+        watcher.poll()
+
+    write_settings(tmp_path, "")
+    assert watcher.poll() is not None
+
+
+def test_security_config_rejects_output_cap_shorter_than_mandatory_fallback():
+    """Runtime не принимает cap, который обязательный safe fallback нарушит."""
+    with pytest.raises(ValueError, match="greater than or equal"):
+        SwarmSecurityConfig(max_output_chars=94)
 
 
 def test_settings_reload_does_not_restore_removed_toml_group_as_legacy(tmp_path):

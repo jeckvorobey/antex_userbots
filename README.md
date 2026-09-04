@@ -166,6 +166,7 @@ temperature = 0.8
 - `OPENROUTER_API_KEY` и `PROXY` хранятся в runtime-конфигурации как маскируемые секреты и раскрываются только при создании OpenRouter/Telethon клиентов;
 - timeout равен 45 секундам, а SDK retry ограничен 15 секундами для connection/timeout, 408, 429, 5xx, 524 и 529;
 - необязательный `PROXY` из `.env` применяется одновременно к Telethon и OpenRouter; без него оба соединения прямые;
+- общий `PROXY` принимает только пересечение поддерживаемых transport-схем: `http://` и `socks5://`;
 - группы задаются через `[[groups]]`; старый `[target]` в TOML больше не поддерживается;
 - если все явно настроенные `[[groups]]` имеют `enabled = false`, routing и scheduled exchanges не запускаются через legacy fallback;
 - старые секции `[app]`, `[storage]` и `[prompts]` больше не входят в публичный TOML-контракт;
@@ -176,6 +177,7 @@ temperature = 0.8
 - каждый `persona_file` должен реально существовать;
 - для каждого `session_env` должна быть переменная в `.env`;
 - реальные файлы `ai/prompts/**/*.md` и `ai/prompts/important_service.toml` являются частью этого production-инстанса и хранятся в git;
+- `swarm.security.max_output_chars` должен быть не меньше `95`, чтобы обязательные локальные fallback-сообщения всегда помещались в лимит;
 - `topics.md` содержит общие topic-intents, а не готовые вопросы под конкретный город.
 
 ### 4. Подготовить промты

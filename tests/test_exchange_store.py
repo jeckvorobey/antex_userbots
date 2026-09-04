@@ -251,6 +251,13 @@ async def test_exchange_store_migrates_legacy_table_idempotently(tmp_path):
         )
         """
     )
+    connection.execute(
+        """INSERT INTO scheduled_exchanges (
+               exchange_id, initiator_bot_id, responder_bot_id, pair_key,
+               window_key, topic, topic_key, status
+           ) VALUES ('legacy-started', 'anna', 'mike', 'anna->mike',
+                     'legacy-window', 'Тема', 'тема', 'started')"""
+    )
     connection.commit()
     connection.close()
 
@@ -259,11 +266,16 @@ async def test_exchange_store_migrates_legacy_table_idempotently(tmp_path):
     store = ExchangeStore(database)
     await store.init_db()
     await store.init_db()
+    await store.backfill_legacy_group_scope(group_id="legacy", group_chat_id=-100111)
     try:
         db = database.connection
         async with db.execute("PRAGMA table_info(scheduled_exchanges)") as cursor:
             rows = await cursor.fetchall()
         columns = [row[1] for row in rows]
+        async with db.execute(
+            "SELECT group_id, group_chat_id FROM scheduled_exchanges WHERE exchange_id = 'legacy-started'"
+        ) as cursor:
+            legacy_scope = tuple(await cursor.fetchone())
     finally:
         await database.close()
 
@@ -273,6 +285,7 @@ async def test_exchange_store_migrates_legacy_table_idempotently(tmp_path):
     assert "important_scenario" in columns
     assert "responder_message_id" in columns
     assert "last_activity_at" in columns
+    assert legacy_scope == ("legacy", -100111)
 
 
 async def test_exchange_store_creates_indexes_idempotently(exchange_store):

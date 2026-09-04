@@ -9,10 +9,15 @@ from typing import Any
 
 TELEGRAM_INVITE_RE = re.compile(r"https?://t\.me/(?:\+|joinchat/)\S+", re.IGNORECASE)
 CREDENTIAL_URL_RE = re.compile(
-    r"https?://[^\s/@]+(?::[^\s/@]*)?@[^\s<>\[\]{}()]+",
+    r"[a-z][a-z0-9+.-]*://[^\s/@]+(?::[^\s/@]*)?@[^\s<>\[\]{}()]+",
     re.IGNORECASE,
 )
 HTTP_URL_RE = re.compile(r"https?://[^\s<>\[\]{}()]+", re.IGNORECASE)
+URI_RE = re.compile(r"[a-z][a-z0-9+.-]*://[^\s<>\[\]{}()]+", re.IGNORECASE)
+SCHEMELESS_DOMAIN_RE = re.compile(
+    r"(?<![\w@])(?:www\.)?[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z]{2,})(?:/[^\s<>\[\]{}()]*)?",
+    re.IGNORECASE,
+)
 SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(api[_ -]?key|token|secret|session[_ -]?string|api[_ -]?hash)\b\s*[:=]\s*\S+"
 )
@@ -88,6 +93,11 @@ class TextGenerationClient(ABC):
         if TELEGRAM_INVITE_RE.search(normalized):
             return False
         if SECRET_ASSIGNMENT_RE.search(normalized) or LONG_SECRET_RE.search(normalized):
+            return False
+        without_allowed_urls = normalized
+        for allowed_url in ALLOWED_OUTPUT_URLS:
+            without_allowed_urls = without_allowed_urls.replace(allowed_url, "")
+        if URI_RE.search(without_allowed_urls) or SCHEMELESS_DOMAIN_RE.search(without_allowed_urls):
             return False
         for match in HTTP_URL_RE.finditer(normalized):
             url = match.group(0).rstrip(URL_TRAILING_PUNCTUATION)

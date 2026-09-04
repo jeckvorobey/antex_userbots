@@ -31,3 +31,11 @@
 - [x] 6.1 Обновить README и синхронизировать все delta specs.
 - [x] 6.2 Выполнить targeted/full tests, wheel smoke, dependency audit и strict OpenSpec validation.
 - [ ] 6.3 Архивировать change, commit/push, проверить PR comments/checks и повторить Codex Review.
+
+## 7. Follow-up review findings
+
+- [x] 7.1 Добавить RED-тесты generic credential URI redaction и non-HTTP/scheme-less output links; расширить safety patterns.
+- [x] 7.2 Добавить RED-тест общего proxy intersection и синхронизировать Settings с Telethon conversion.
+- [x] 7.3 Добавить RED-тест retry после невалидного reload и обновлять mtime только после успешной загрузки.
+- [x] 7.4 Добавить RED-тест минимального output cap и запретить значения короче обязательного fallback.
+- [x] 7.5 Добавить RED-тест миграции legacy exchange scope и выполнить backfill после resolve первой группы.

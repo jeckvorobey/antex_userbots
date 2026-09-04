@@ -151,6 +151,19 @@ class ExchangeStore:
         )
         return {str(row[0]) for row in rows}
 
+    async def backfill_legacy_group_scope(self, *, group_id: str, group_chat_id: int | None) -> None:
+        """Привязывает записи старой single-group schema к текущей legacy-группе."""
+        await self.database.execute(
+            "backfill_legacy_group_scope",
+            """
+            UPDATE scheduled_exchanges
+            SET group_id = ?, group_chat_id = ?
+            WHERE group_id IS NULL AND group_chat_id IS NULL
+            """,
+            (group_id, group_chat_id),
+        )
+        logger.info("Legacy exchange scope восстановлен: group_id=%s group_chat_id=%s", group_id, group_chat_id)
+
     async def create_exchange(
         self,
         *,

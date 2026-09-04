@@ -473,7 +473,7 @@ async def test_run_swarm_mode_starts_manager_registers_scheduler_and_supervises(
         prompt_composer=SimpleNamespace(),
         ai_client=SimpleNamespace(),
         history=SimpleNamespace(),
-        exchange_store=SimpleNamespace(),
+        exchange_store=SimpleNamespace(backfill_legacy_group_scope=AsyncMock()),
     )
     scheduler = SimpleNamespace(add_job=Mock())
 
@@ -504,6 +504,10 @@ async def test_run_swarm_mode_starts_manager_registers_scheduler_and_supervises(
         {-100123456},
     )
     scheduler.add_job.assert_called_once()
+    runtime.exchange_store.backfill_legacy_group_scope.assert_awaited_once_with(
+        group_id="legacy",
+        group_chat_id=-100123456,
+    )
     manager.stop.assert_awaited_once()
 
 
