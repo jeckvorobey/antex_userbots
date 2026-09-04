@@ -17,6 +17,13 @@ models = ["provider/primary-model", "provider/fallback-model"]
 [logging]
 # Необязательный override уровня логирования.
 level = "INFO"
+# По умолчанию логи ошибок идут в logs/swarm.log
+# (переопределяется при необходимости через file).
+# file = "logs/swarm.log"
+# Необязательные настройки ротации файловых логов:
+# file_level = "ERROR"
+# file_max_bytes = 10485760
+# file_backup_count = 5
 
 [swarm.schedule]
 # UTC-окна, в которые разрешены плановые обмены между ботами.

@@ -24,7 +24,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 COPY . .
 
 RUN useradd --create-home --uid 10001 appuser \
-    && mkdir -p /data /app/data \
+    && mkdir -p /data /app/data /app/logs \
     && chown -R appuser:appuser /app /data
 
 USER appuser

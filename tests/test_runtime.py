@@ -903,8 +903,8 @@ async def test_run_swarm_mode_requires_two_active_bots_after_start(monkeypatch, 
 
 
 @pytest.mark.asyncio
-async def test_run_swarm_mode_excludes_durably_quarantined_bot(monkeypatch, tmp_path):
-    """Durable quarantine не позволяет автоматически запустить аккаунт повторно."""
+async def test_run_swarm_mode_rechecks_durably_quarantined_bot_at_startup(monkeypatch, tmp_path):
+    """Долговременная quarantine проверяется на старте, но не блокирует автозапуск."""
     import run
 
     settings = Settings(
@@ -921,7 +921,6 @@ async def test_run_swarm_mode_excludes_durably_quarantined_bot(monkeypatch, tmp_
     runtime = SimpleNamespace(
         exchange_store=SimpleNamespace(
             reset_startup_availability=AsyncMock(),
-            get_quarantined_bot_ids=AsyncMock(return_value={"anna"}),
         )
     )
     scheduler = SimpleNamespace(add_job=Mock())
@@ -931,12 +930,11 @@ async def test_run_swarm_mode_excludes_durably_quarantined_bot(monkeypatch, tmp_
     monkeypatch.setattr(run, "_resolve_group_target", AsyncMock(return_value=SimpleNamespace(id=1)))
     monkeypatch.setattr(run, "_log_resolved_group", AsyncMock())
 
-    with pytest.raises(ValueError, match="at least two enabled bots"):
-        await run._run_swarm_mode(settings, runtime, scheduler)
+    await run._run_swarm_mode(settings, runtime, scheduler)
 
     runtime.exchange_store.reset_startup_availability.assert_awaited_once()
-    runtime.exchange_store.get_quarantined_bot_ids.assert_awaited_once()
-    manager.start.assert_not_awaited()
+    manager.start.assert_awaited_once()
+    manager.stop.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1214,6 +1212,7 @@ async def test_multi_group_membership_logs_bot_write_permission(monkeypatch, cap
         "default_banned_rights.send_messages=False is_admin=False" in record.getMessage()
         for record in caplog.records
     )
+    assert any("попал в block по группе group_id=first" in record.getMessage() for record in caplog.records)
 
 
 @pytest.mark.asyncio

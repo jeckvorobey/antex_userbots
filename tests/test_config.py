@@ -243,6 +243,16 @@ def test_settings_log_level_defaults_to_info():
         assert s.log_level == "INFO"
 
 
+def test_settings_log_file_defaults_to_logs_folder():
+    """Проверяет, что путь лог-файла по умолчанию лежит в logs."""
+    with patch.dict(os.environ, BASE_ENV, clear=True):
+        from core.config import Settings
+
+        s = Settings(_env_file=None)
+
+        assert s.log_file == "logs/swarm.log"
+
+
 def test_settings_reads_openrouter_models_and_optional_temperature():
     """Проверяет порядок моделей и необязательную температуру OpenRouter."""
     import tempfile

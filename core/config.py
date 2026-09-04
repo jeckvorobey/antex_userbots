@@ -139,6 +139,10 @@ class LoggingConfig(_StrictModel):
     """Параметры логирования."""
 
     level: str = "INFO"
+    file: OptionalStr = "logs/swarm.log"
+    file_level: str = "ERROR"
+    file_max_bytes: int = Field(default=10_485_760, ge=1)
+    file_backup_count: int = Field(default=5, ge=0)
 
 
 class SwarmBotConfig(_StrictModel):
@@ -469,6 +473,10 @@ class Settings:
         self.openrouter_retry_jitter_ms = OPENROUTER_RETRY_JITTER_MS
 
         self.log_level = config.logging.level
+        self.log_file = config.logging.file
+        self.log_file_level = config.logging.file_level
+        self.log_file_max_bytes = config.logging.file_max_bytes
+        self.log_file_backup_count = config.logging.file_backup_count
 
         self.swarm_schedule_active_windows_utc = list(config.swarm.schedule.active_windows_utc)
         self.swarm_initiator_offset_minutes = config.swarm.schedule.initiator_offset_minutes

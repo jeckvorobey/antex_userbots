@@ -445,6 +445,14 @@ async def _log_bot_write_permission(
         default_send_messages_banned,
         is_admin,
     )
+    if not can_write:
+        logger.error(
+            "swarm: bot_id=%s попал в block по группе group_id=%s: can_write=False participant_banned=%s default_banned=%s",
+            bot_id,
+            group_id,
+            participant_send_messages_banned,
+            default_send_messages_banned,
+        )
     return can_write
 
 
@@ -838,14 +846,6 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
     reset_startup_availability = getattr(runtime.exchange_store, "reset_startup_availability", None)
     if callable(reset_startup_availability):
         await reset_startup_availability()
-    get_quarantined_bot_ids = getattr(runtime.exchange_store, "get_quarantined_bot_ids", None)
-    configured_bot_ids = {profile.id for profile in bot_profiles}
-    quarantined_bot_ids = (
-        await get_quarantined_bot_ids(configured_bot_ids) if callable(get_quarantined_bot_ids) else set()
-    )
-    if quarantined_bot_ids:
-        bot_profiles = [profile for profile in bot_profiles if profile.id not in quarantined_bot_ids]
-        logger.warning("swarm: durable quarantine excluded bots count=%s", len(quarantined_bot_ids))
     if sum(profile.enabled for profile in bot_profiles) < 2:
         raise ValueError("Swarm mode requires at least two enabled bots")
     current_settings = settings
@@ -1037,7 +1037,13 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
 async def main() -> None:
     """Инициализирует и запускает swarm userbot."""
     settings = load_settings_or_exit()
-    setup_logging(settings.log_level)
+    setup_logging(
+        settings.log_level,
+        log_file=settings.log_file,
+        file_level=settings.log_file_level,
+        file_max_bytes=settings.log_file_max_bytes,
+        file_backup_count=settings.log_file_backup_count,
+    )
     logger.info("Запуск swarm userbot")
     if settings.mode != "swarm":
         raise ValueError("Поддерживается только mode=swarm")
