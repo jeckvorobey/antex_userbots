@@ -2,6 +2,7 @@
 
 import logging
 import random
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -87,6 +88,7 @@ class TopicSelector:
         """
         self.topics_path = topics_path
         self.topics: list[str] = []
+        self.topic_keys: dict[str, str] = {}
 
     async def load(self) -> None:
         """
@@ -106,7 +108,12 @@ class TopicSelector:
         self.topics = [
             line for line in lines if line and not line.startswith("#") and line != "---"
         ]
+        self.topic_keys = {topic: self._normalize_topic_key(topic) for topic in self.topics}
         logger.info("Темы разговора загружены: %s", len(self.topics))
+
+    def topic_key(self, topic: str) -> str:
+        """Возвращает cached normalized key для topic intent."""
+        return self.topic_keys.get(topic) or self._normalize_topic_key(topic)
 
     async def pick_random(self) -> str:
         """
@@ -124,3 +131,10 @@ class TopicSelector:
         topic = random.choice(self.topics)
         logger.info("Выбрана тема разговора: %s", topic)
         return topic
+
+    @staticmethod
+    def _normalize_topic_key(value: str) -> str:
+        """Нормализует topic intent тем же способом, что exchange anti-repeat."""
+        normalized = re.sub(r"\s+", " ", value.strip().lower())
+        normalized = re.sub(r"[^\w\s]+", "", normalized)
+        return normalized.strip()

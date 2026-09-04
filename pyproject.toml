@@ -9,10 +9,15 @@ requires-python = ">=3.11"
 dependencies = [
     "telethon>=1.36",
     "python-socks[asyncio]>=2.5.3",
-    "google-genai>=1.11",
+    "cryptography>=50.0.0",
+    "idna>=3.15",
+    "pyasn1>=0.6.4",
+    "urllib3>=2.7.0",
     "apscheduler>=3.10",
     "aiosqlite>=0.20",
-    "pydantic-settings>=2.5",
+    "pydantic-settings>=2.14.2",
+    "openrouter>=1.1.122,<2",
+    "httpx[socks]>=0.28,<1",
 ]
 
 [project.optional-dependencies]
@@ -23,7 +28,13 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["ai*", "userbot*", "core*"]
+include = ["ai*", "userbot*", "core*", "storage*"]
+
+[tool.setuptools]
+py-modules = ["run"]
+
+[tool.setuptools.package-data]
+ai = ["prompts/*.md", "prompts/*.toml", "prompts/bots/*.md"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

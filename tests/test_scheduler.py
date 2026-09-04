@@ -81,6 +81,23 @@ async def test_topic_selector_ignores_comment_lines():
         os.unlink(tmp_path)
 
 
+async def test_topic_selector_caches_topic_keys():
+    """Проверяет cached normalized key для topic intents."""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".md", delete=False, encoding="utf-8"
+    ) as f:
+        f.write("  Где   обменять USDT?!  \n")
+        tmp_path = f.name
+
+    try:
+        selector = TopicSelector(topics_path=tmp_path)
+        await selector.load()
+        assert selector.topic_key("Где   обменять USDT?!") == "где обменять usdt"
+        assert selector.topic_keys == {"Где   обменять USDT?!": "где обменять usdt"}
+    finally:
+        os.unlink(tmp_path)
+
+
 def test_is_within_windows_utc_matches_simple_window():
     """Проверяет попадание времени в одно из UTC-окон."""
     assert is_within_windows_utc(["10-12", "16-18"], datetime(2026, 4, 10, 11, 0, tzinfo=UTC)) is True

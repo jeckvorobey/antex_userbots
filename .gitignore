@@ -71,6 +71,7 @@ bin/
 
 # Misc generated files
 .codex
+.worktrees/
 *.zip
 *.tar
 *.tar.gz
@@ -82,7 +83,8 @@ tg_user_info/*
 Nachang_group_2026-04-14/
 PLAN.md
 config/settings.toml
+config/settings.prod.toml
+config/settings.test.toml
 
-# Runtime prompt files are instance-local. Keep only example templates in git.
-ai/prompts/**/*.md
-!ai/prompts/**/*.example.md
+data/*
+# Prompt files are part of this single production instance.

@@ -1,18 +1,16 @@
 """Тесты TOML-конфигурации приложения."""
 
 from pathlib import Path
+import tomllib
 from unittest.mock import patch
 
 import pytest
 
-from core.config import Settings
+from core.config import Settings, SettingsReloadWatcher, SwarmSecurityConfig
 
 
 BASE_SECRETS = {
-    "api_id": 12345678,
-    "api_hash": "test_api_hash_abc",
-    "gemini_api_key": "test_gemini_key_xyz",
-    "session_string": "test-session-string",
+    "openrouter_api_key": "test_openrouter_key_xyz",
     "group_chat_id": -100123,
     "group_target": "@group",
 }
@@ -21,97 +19,121 @@ BASE_SECRETS = {
 def write_settings(tmp_path: Path, content: str) -> Path:
     """Создаёт временный settings.toml для теста."""
     path = tmp_path / "settings.toml"
-    path.write_text(content.strip(), encoding="utf-8")
+    normalized = content.strip()
+    if "[telegram]" not in normalized:
+        normalized = '[telegram]\napi_id = 12345678\napi_hash = "test_api_hash_abc"\n\n' + normalized
+    if "[openrouter]" not in normalized and "[gemini]" not in normalized:
+        normalized = '[openrouter]\nmodels = ["test/primary", "test/fallback"]\n\n' + normalized
+    path.write_text(normalized, encoding="utf-8")
     return path
 
 
-def test_settings_loads_non_secret_values_from_toml(tmp_path):
-    """Проверяет загрузку несекретных параметров из TOML."""
+def write_default_settings(tmp_path: Path, content: str) -> Path:
+    """Создаёт встроенный config/settings.toml для проверки default path."""
+    path = tmp_path / "config" / "settings.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    normalized = content.strip()
+    if "[telegram]" not in normalized:
+        normalized = '[telegram]\napi_id = 12345678\napi_hash = "test_api_hash_abc"\n\n' + normalized
+    if "[openrouter]" not in normalized and "[gemini]" not in normalized:
+        normalized = '[openrouter]\nmodels = ["test/primary", "test/fallback"]\n\n' + normalized
+    path.write_text(normalized, encoding="utf-8")
+    return path
+
+
+def test_settings_loads_non_secret_values_from_minimal_toml(tmp_path):
+    """Проверяет загрузку минимального TOML-контракта и кодовых defaults."""
     settings_path = write_settings(
         tmp_path,
         """
-        [app]
-        mode = "swarm"
+        [[groups]]
+        id = "danang"
+        city = "Da Nang"
+        group_chat_id = -100111
 
-        [storage]
-        db_path = ":memory:"
-
-        [prompts]
-        base_dir = "custom/prompts"
-        topics_path = "custom/topics.md"
-        bot_profiles_dir = "custom/bots"
-
-        [paths]
-        reply_rules_path = "custom/rules.md"
-
-        [gemini]
-        model = "gemini-test"
-        fallback_model = "gemini-lite"
-        temperature = 1.2
-        max_retries = 4
-        retry_backoff_seconds = 2.0
-        retry_jitter_seconds = 0.4
-        request_timeout_seconds = 12.5
-
-        [telegram]
-        whitelist_user_ids = [111, 222]
-
-        [logging]
-        level = "DEBUG"
+        [[swarm.bots]]
+        id = "anna"
+        session_env = "SESSION_STRING_ANNA"
+        persona_file = "anna.md"
         """,
     )
 
-    settings = Settings(**BASE_SECRETS, settings_path=str(settings_path))
+    with patch.dict("os.environ", {"SESSION_STRING_ANNA": "anna-session"}, clear=False):
+        settings = Settings(
+            **BASE_SECRETS,
+            settings_path=str(settings_path),
+        )
 
     assert settings.mode == "swarm"
-    assert settings.db_path == ":memory:"
-    assert settings.topics_path == "custom/topics.md"
-    assert settings.reply_rules_path == "custom/rules.md"
-    assert settings.prompts_dir == "custom/prompts"
-    assert settings.bot_profiles_dir == "custom/bots"
-    assert settings.gemini_model == "gemini-test"
-    assert settings.gemini_fallback_model == "gemini-lite"
-    assert settings.gemini_temperature == 1.2
-    assert settings.gemini_max_retries == 4
+    assert settings.db_path == "data/history.db"
+    assert Path(settings.topics_path).as_posix().endswith("/ai/prompts/topics.md")
+    assert Path(settings.prompts_dir).as_posix().endswith("/ai/prompts")
+    assert Path(settings.bot_profiles_dir).as_posix().endswith("/ai/prompts/bots")
+    assert settings.openrouter_models == ["test/primary", "test/fallback"]
+    assert settings.openrouter_temperature is None
+    assert settings.api_id == 12345678
+    assert settings.api_hash == "test_api_hash_abc"
+    assert settings.openrouter_request_timeout_seconds == 45.0
     assert settings.group_chat_id == -100123
     assert settings.group_target == "@group"
-    assert settings.whitelist_user_ids == ""
-    assert settings.log_level == "DEBUG"
+    assert settings.log_level == "INFO"
 
 
-def test_settings_with_secret_overrides_ignores_local_toml_without_settings_path(tmp_path, monkeypatch):
-    """Проверяет изоляцию тестовых overrides от локального settings.toml."""
-    write_settings(
+def test_settings_uses_builtin_default_settings_path(tmp_path, monkeypatch):
+    """Проверяет built-in default path config/settings.toml без SETTINGS_PATH."""
+    write_default_settings(
         tmp_path,
         """
-        [gemini]
-        model = "gemini-local-toml"
+        [openrouter]
+        models = ["test/default", "test/fallback"]
+
+        [[groups]]
+        id = "danang"
+        city = "Da Nang"
+        group_chat_id = -100111
+
+        [[swarm.bots]]
+        id = "anna"
+        session_env = "SESSION_STRING_ANNA"
+        persona_file = "anna.md"
         """,
     )
     monkeypatch.chdir(tmp_path)
 
-    settings = Settings(**BASE_SECRETS)
+    env = {
+        "OPENROUTER_API_KEY": "test_key",
+        "SESSION_STRING_ANNA": "anna-session",
+    }
 
-    assert settings.gemini_model == "gemini-2.5-flash"
+    with patch.dict("os.environ", env, clear=True):
+        settings = Settings(_env_file=None)
+
+    assert settings.settings_path == "config/settings.toml"
+    assert settings.openrouter_models == ["test/default", "test/fallback"]
 
 
 def test_settings_path_can_come_from_env(tmp_path):
-    """Проверяет, что SETTINGS_PATH выбирает TOML-файл."""
+    """Проверяет, что env override SETTINGS_PATH всё ещё поддерживается."""
     settings_path = write_settings(
         tmp_path,
         """
-        [app]
-        mode = "swarm"
+        [openrouter]
+        models = ["test/local", "test/fallback"]
 
-        [gemini]
-        model = "gemini-from-env"
+        [[groups]]
+        id = "danang"
+        city = "Da Nang"
+        group_chat_id = -100111
+
+        [[swarm.bots]]
+        id = "anna"
+        session_env = "SESSION_STRING_ANNA"
+        persona_file = "anna.md"
         """,
     )
     env = {
-        "API_ID": "12345678",
-        "API_HASH": "test_hash",
-        "GEMINI_API_KEY": "test_key",
-        "SESSION_STRING": "test-session-string",
+        "OPENROUTER_API_KEY": "test_key",
+        "SESSION_STRING_ANNA": "anna-session",
         "SETTINGS_PATH": str(settings_path),
     }
 
@@ -119,7 +141,96 @@ def test_settings_path_can_come_from_env(tmp_path):
         settings = Settings(_env_file=None)
 
     assert settings.mode == "swarm"
-    assert settings.gemini_model == "gemini-from-env"
+    assert settings.openrouter_models == ["test/local", "test/fallback"]
+
+
+@pytest.mark.parametrize(
+    "models",
+    [
+        '["only/one"]',
+        '["one/model", " one/model "]',
+        '["one/model", "   "]',
+    ],
+)
+def test_settings_rejects_invalid_openrouter_model_lists(tmp_path, models):
+    """Проверяет минимум, уникальность и непустые slug моделей."""
+    settings_path = write_settings(
+        tmp_path,
+        f"""
+        [openrouter]
+        models = {models}
+        """,
+    )
+
+    with pytest.raises(Exception):
+        Settings(**BASE_SECRETS, settings_path=str(settings_path))
+
+
+def test_settings_rejects_missing_openrouter_section(tmp_path):
+    """Проверяет обязательность операторского списка моделей."""
+    settings_path = tmp_path / "settings.toml"
+    settings_path.write_text(
+        '[telegram]\napi_id = 12345678\napi_hash = "test_api_hash_abc"\n\n'
+        '[logging]\nlevel = "INFO"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(Exception):
+        Settings(**BASE_SECRETS, settings_path=str(settings_path))
+
+
+@pytest.mark.parametrize(
+    "telegram_toml",
+    [
+        "",
+        '[telegram]\napi_hash = "test_api_hash_abc"',
+        "[telegram]\napi_id = 12345678",
+    ],
+)
+def test_settings_requires_telegram_credentials_in_toml(tmp_path, telegram_toml):
+    """Проверяет обязательность обоих Telegram credentials в TOML."""
+    settings_path = tmp_path / "settings.toml"
+    settings_path.write_text(
+        f'{telegram_toml}\n\n[openrouter]\nmodels = ["test/primary", "test/fallback"]\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(Exception, match="telegram|api_id|api_hash"):
+        Settings(**BASE_SECRETS, settings_path=str(settings_path))
+
+
+@pytest.mark.parametrize(
+    "telegram_toml",
+    [
+        '[telegram]\napi_id = 0\napi_hash = "test_api_hash_abc"',
+        '[telegram]\napi_id = -1\napi_hash = "test_api_hash_abc"',
+        '[telegram]\napi_id = 12345678\napi_hash = "   "',
+    ],
+)
+def test_settings_rejects_invalid_telegram_credentials(tmp_path, telegram_toml):
+    """Проверяет положительный api_id и непустой api_hash."""
+    settings_path = tmp_path / "settings.toml"
+    settings_path.write_text(
+        f'{telegram_toml}\n\n[openrouter]\nmodels = ["test/primary", "test/fallback"]\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(Exception, match="api_id|api_hash"):
+        Settings(**BASE_SECRETS, settings_path=str(settings_path))
+
+
+def test_settings_rejects_legacy_gemini_section(tmp_path):
+    """Проверяет удаление TOML-контракта Gemini."""
+    settings_path = write_settings(
+        tmp_path,
+        """
+        [gemini]
+        model = "legacy/model"
+        """,
+    )
+
+    with pytest.raises(Exception, match="gemini"):
+        Settings(**BASE_SECRETS, settings_path=str(settings_path))
 
 
 def test_settings_rejects_group_target_in_toml(tmp_path):
@@ -137,14 +248,11 @@ def test_settings_rejects_group_target_in_toml(tmp_path):
         Settings(**BASE_SECRETS, settings_path=str(settings_path))
 
 
-def test_settings_reads_target_section_from_toml(tmp_path):
-    """Проверяет чтение целевой группы из секции [target]."""
+def test_settings_rejects_target_section_from_toml(tmp_path):
+    """Проверяет, что [target] больше не входит в публичный TOML-контракт."""
     settings_path = write_settings(
         tmp_path,
         """
-        [app]
-        mode = "swarm"
-
         [target]
         group_chat_id = -100987654321
         group_target = "@swarm_group"
@@ -162,20 +270,285 @@ def test_settings_reads_target_section_from_toml(tmp_path):
     )
 
     env = {
-        "API_ID": "12345678",
-        "API_HASH": "test_hash",
-        "GEMINI_API_KEY": "test_key",
-        "SESSION_STRING": "legacy-session",
+        "OPENROUTER_API_KEY": "test_key",
         "SESSION_STRING_ANNA": "anna-session",
         "SESSION_STRING_MIKE": "mike-session",
         "SETTINGS_PATH": str(settings_path),
     }
 
     with patch.dict("os.environ", env, clear=True):
+        with pytest.raises(Exception, match="target"):
+            Settings(_env_file=None)
+
+
+def test_settings_reads_multi_group_config_and_schedule_overrides(tmp_path):
+    """Проверяет загрузку нескольких групп и наследование расписания."""
+    settings_path = write_settings(
+        tmp_path,
+        """
+        [swarm.schedule]
+        active_windows_utc = ["10-12"]
+        initiator_offset_minutes = [1, 2]
+        responder_delay_minutes = [3, 4]
+        max_turns_per_exchange = 2
+
+        [[groups]]
+        id = "danang"
+        city = "Da Nang"
+        enabled = true
+        group_chat_id = -100111
+        group_target = "@danang_chat"
+
+        [[groups]]
+        id = "batumi"
+        city = "Batumi"
+        enabled = false
+        group_chat_id = -100222
+
+        [groups.schedule]
+        active_windows_utc = ["14-16"]
+        responder_delay_minutes = [8, 9]
+
+        [[swarm.bots]]
+        id = "anna"
+        session_env = "SESSION_STRING_ANNA"
+        persona_file = "anna.md"
+        """,
+    )
+
+    env = {
+        "OPENROUTER_API_KEY": "test_key",
+        "SESSION_STRING_ANNA": "anna-session",
+        "SETTINGS_PATH": str(settings_path),
+    }
+
+    with patch.dict("os.environ", env, clear=True):
         settings = Settings(_env_file=None)
 
-    assert settings.group_chat_id == -100987654321
-    assert settings.group_target == "@swarm_group"
+    assert [group.id for group in settings.groups] == ["danang", "batumi"]
+    assert [group.id for group in settings.enabled_groups] == ["danang"]
+    assert settings.groups[0].active_windows_utc == ["10-12"]
+    assert settings.groups[0].responder_delay_minutes == (3, 4)
+    assert settings.groups[1].active_windows_utc == ["14-16"]
+    assert settings.groups[1].initiator_offset_minutes == (1, 2)
+    assert settings.groups[1].responder_delay_minutes == (8, 9)
+
+
+def test_settings_reads_swarm_security_section(tmp_path):
+    """Проверяет загрузку security-настроек swarm из TOML."""
+    settings_path = write_settings(
+        tmp_path,
+        """
+        [swarm.security]
+        allow_external_llm_for_replies = false
+        allow_external_llm_for_scheduled = false
+        addressed_reply_rate_limit_count = 2
+        addressed_reply_rate_limit_window_seconds = 45
+        addressed_reply_max_pending_per_bot = 4
+        max_output_chars = 280
+        max_mentions_per_message = 1
+        history_retention_days = 7
+
+        [[groups]]
+        id = "danang"
+        city = "Da Nang"
+        group_chat_id = -100111
+
+        [[swarm.bots]]
+        id = "anna"
+        session_env = "SESSION_STRING_ANNA"
+        persona_file = "anna.md"
+        """,
+    )
+
+    with patch.dict("os.environ", {"SESSION_STRING_ANNA": "anna-session"}, clear=False):
+        settings = Settings(
+            **BASE_SECRETS,
+            settings_path=str(settings_path),
+        )
+
+    assert settings.swarm_allow_external_llm_for_replies is False
+    assert settings.swarm_allow_external_llm_for_scheduled is False
+    assert settings.swarm_addressed_reply_rate_limit_count == 2
+    assert settings.swarm_addressed_reply_rate_limit_window_seconds == 45
+    assert settings.swarm_addressed_reply_max_pending_per_bot == 4
+    assert settings.swarm_max_output_chars == 280
+    assert settings.swarm_max_mentions_per_message == 1
+    assert settings.swarm_history_retention_days == 7
+
+
+def test_settings_rejects_duplicate_group_ids(tmp_path):
+    """Проверяет запрет дублирующихся group.id."""
+    settings_path = write_settings(
+        tmp_path,
+        """
+        [[groups]]
+        id = "danang"
+        city = "Da Nang"
+        group_chat_id = -100111
+
+        [[groups]]
+        id = "DANANG"
+        city = "Da Nang 2"
+        group_target = "@danang2"
+
+        [[swarm.bots]]
+        id = "anna"
+        session_env = "SESSION_STRING_ANNA"
+        persona_file = "anna.md"
+        """,
+    )
+
+    env = {
+        "OPENROUTER_API_KEY": "test_key",
+        "SESSION_STRING_ANNA": "anna-session",
+        "SETTINGS_PATH": str(settings_path),
+    }
+
+    with patch.dict("os.environ", env, clear=True):
+        with pytest.raises(Exception, match="group id"):
+            Settings(_env_file=None)
+
+
+def test_settings_rejects_group_without_target(tmp_path):
+    """Проверяет, что группа без id чата и target невалидна."""
+    settings_path = write_settings(
+        tmp_path,
+        """
+        [[groups]]
+        id = "danang"
+        city = "Da Nang"
+
+        [[swarm.bots]]
+        id = "anna"
+        session_env = "SESSION_STRING_ANNA"
+        persona_file = "anna.md"
+        """,
+    )
+
+    env = {
+        "OPENROUTER_API_KEY": "test_key",
+        "SESSION_STRING_ANNA": "anna-session",
+        "SETTINGS_PATH": str(settings_path),
+    }
+
+    with patch.dict("os.environ", env, clear=True):
+        with pytest.raises(Exception, match="group_chat_id|group_target"):
+            Settings(_env_file=None)
+
+
+def test_settings_reload_watcher_returns_new_settings_on_mtime_change(tmp_path):
+    """Проверяет non-mutating reload по mtime settings.toml."""
+    settings_path = write_settings(
+        tmp_path,
+        """
+        [[groups]]
+        id = "danang"
+        city = "Da Nang"
+        group_chat_id = -100111
+        """,
+    )
+    env = {
+        "OPENROUTER_API_KEY": "test_key",
+        "PROXY": "http://user:pass@127.0.0.1:8080",
+        "SETTINGS_PATH": str(settings_path),
+    }
+
+    with patch.dict("os.environ", env, clear=True):
+        settings = Settings(_env_file=None)
+        watcher = SettingsReloadWatcher(settings)
+        assert watcher.poll() is None
+        settings_path.write_text(
+            """
+            [telegram]
+            api_id = 87654321
+            api_hash = "updated_api_hash"
+
+            [openrouter]
+            models = ["test/new-primary", "test/new-fallback"]
+
+            [[groups]]
+            id = "danang"
+            city = "Da Nang"
+            group_chat_id = -100111
+
+            [[groups]]
+            id = "batumi"
+            city = "Batumi"
+            group_chat_id = -100222
+            """.strip(),
+            encoding="utf-8",
+        )
+        reloaded = watcher.poll()
+
+    assert reloaded is not None
+    assert reloaded is not settings
+    assert reloaded.openrouter_api_key.get_secret_value() == "test_key"
+    assert reloaded.api_id == 87654321
+    assert reloaded.api_hash == "updated_api_hash"
+    assert reloaded.openrouter_models == ["test/new-primary", "test/new-fallback"]
+    assert reloaded.proxy is not None
+    assert reloaded.proxy.get_secret_value() == "http://user:pass@127.0.0.1:8080"
+    assert [group.id for group in reloaded.groups] == ["danang", "batumi"]
+
+
+def test_settings_reload_retries_same_signature_after_invalid_partial_write(tmp_path, monkeypatch):
+    """Неуспешный parse не помечает файловую сигнатуру как применённую."""
+    settings_path = write_settings(tmp_path, "")
+    settings = Settings(**BASE_SECRETS, settings_path=str(settings_path), _env_file=None)
+    watcher = SettingsReloadWatcher(settings)
+    changed_signature = (watcher._last_mtime or 0) + 1
+    monkeypatch.setattr(watcher, "_read_mtime", lambda _path: changed_signature)
+    settings_path.write_text("[telegram", encoding="utf-8")
+
+    with pytest.raises(tomllib.TOMLDecodeError):
+        watcher.poll()
+
+    write_settings(tmp_path, "")
+    assert watcher.poll() is not None
+
+
+def test_security_config_rejects_output_cap_shorter_than_mandatory_fallback():
+    """Runtime не принимает cap, который обязательный safe fallback нарушит."""
+    with pytest.raises(ValueError, match="greater than or equal"):
+        SwarmSecurityConfig(max_output_chars=94)
+
+
+def test_settings_reload_does_not_restore_removed_toml_group_as_legacy(tmp_path):
+    """Удалённая из TOML группа не возвращается через derived fallback-поля."""
+    settings_path = write_settings(
+        tmp_path,
+        """
+        [[groups]]
+        id = "danang"
+        city = "Da Nang"
+        group_chat_id = -100111
+        """,
+    )
+    env = {
+        "OPENROUTER_API_KEY": "test_key",
+        "SETTINGS_PATH": str(settings_path),
+    }
+
+    with patch.dict("os.environ", env, clear=True):
+        settings = Settings(_env_file=None)
+        watcher = SettingsReloadWatcher(settings)
+        settings_path.write_text(
+            """
+            [telegram]
+            api_id = 87654321
+            api_hash = "updated_api_hash"
+
+            [openrouter]
+            models = ["test/new-primary", "test/new-fallback"]
+            """.strip(),
+            encoding="utf-8",
+        )
+        reloaded = watcher.poll()
+
+    assert reloaded is not None
+    assert reloaded.groups == []
+    assert reloaded.enabled_groups == []
 
 
 def test_settings_rejects_missing_explicit_settings_path(tmp_path):
@@ -190,10 +563,7 @@ def test_settings_rejects_missing_settings_path_from_env(tmp_path):
     """Проверяет ошибку при отсутствующем SETTINGS_PATH из окружения."""
     missing_path = tmp_path / "missing-settings.toml"
     env = {
-        "API_ID": "12345678",
-        "API_HASH": "test_hash",
-        "GEMINI_API_KEY": "test_key",
-        "SESSION_STRING": "test-session-string",
+        "OPENROUTER_API_KEY": "test_key",
         "SETTINGS_PATH": str(missing_path),
     }
 
@@ -209,10 +579,7 @@ def test_settings_rejects_missing_settings_path_from_env_file(tmp_path):
     env_path.write_text(
         "\n".join(
             [
-                "API_ID=12345678",
-                "API_HASH=test_hash",
-                "GEMINI_API_KEY=test_key",
-                "SESSION_STRING=test-session-string",
+                "OPENROUTER_API_KEY=test_key",
                 f"SETTINGS_PATH={missing_path}",
             ],
         ),
@@ -229,9 +596,6 @@ def test_settings_reads_swarm_sessions_from_env_file(tmp_path):
     settings_path = write_settings(
         tmp_path,
         """
-        [app]
-        mode = "swarm"
-
         [[swarm.bots]]
         id = "sofia"
         session_env = "SESSION_STRING_SOFIA"
@@ -242,9 +606,7 @@ def test_settings_reads_swarm_sessions_from_env_file(tmp_path):
     env_path.write_text(
         "\n".join(
             [
-                "API_ID=12345678",
-                "API_HASH=test_hash",
-                "GEMINI_API_KEY=test_key",
+                "OPENROUTER_API_KEY=test_key",
                 "SESSION_STRING_SOFIA=sofia-session",
                 f"SETTINGS_PATH={settings_path}",
             ],
@@ -264,29 +626,11 @@ def test_settings_loads_swarm_mode_and_bots(tmp_path):
     settings_path = write_settings(
         tmp_path,
         """
-        [app]
-        mode = "swarm"
-
-        [storage]
-        db_path = ":memory:"
-
-        [prompts]
-        base_dir = "custom/prompts"
-        topics_path = "custom/topics.md"
-        bot_profiles_dir = "custom/bots"
-
-        [swarm]
-        enabled = true
-        max_parallel_bots = 12
-        ignore_messages_from_swarm = true
-        reply_only_to_addressed_bot = true
-
         [swarm.schedule]
         active_windows_utc = ["10-11", "16-18"]
         initiator_offset_minutes = [0, 30]
         responder_delay_minutes = [3, 10]
         max_turns_per_exchange = 2
-        pair_cooldown_slots = 1
 
         [swarm.orchestrator]
         tick_seconds = 30
@@ -310,10 +654,7 @@ def test_settings_loads_swarm_mode_and_bots(tmp_path):
     )
 
     env = {
-        "API_ID": "12345678",
-        "API_HASH": "test_hash",
-        "GEMINI_API_KEY": "test_key",
-        "SESSION_STRING": "legacy-session",
+        "OPENROUTER_API_KEY": "test_key",
         "SESSION_STRING_ANNA": "anna-session",
         "SESSION_STRING_MIKE": "mike-session",
         "SETTINGS_PATH": str(settings_path),
@@ -323,25 +664,19 @@ def test_settings_loads_swarm_mode_and_bots(tmp_path):
         settings = Settings(_env_file=None)
 
     assert settings.mode == "swarm"
-    assert settings.db_path == ":memory:"
-    assert settings.prompts_dir == "custom/prompts"
-    assert settings.topics_path == "custom/topics.md"
-    assert settings.swarm_enabled is True
-    assert settings.swarm_max_parallel_bots == 12
-    assert settings.swarm_ignore_messages_from_swarm is True
-    assert settings.swarm_reply_only_to_addressed_bot is True
+    assert settings.db_path == "data/history.db"
+    assert Path(settings.prompts_dir).as_posix().endswith("/ai/prompts")
+    assert Path(settings.topics_path).as_posix().endswith("/ai/prompts/topics.md")
     assert settings.swarm_schedule_active_windows_utc == ["10-11", "16-18"]
     assert settings.swarm_initiator_offset_minutes == (0, 30)
     assert settings.swarm_responder_delay_minutes == (3, 10)
     assert settings.swarm_max_turns_per_exchange == 2
-    assert settings.swarm_pair_cooldown_slots == 1
     assert settings.swarm_tick_seconds == 30
     assert settings.swarm_silence_timeout_minutes == 60
     assert settings.swarm_skip_if_recent_human_activity is True
     assert settings.swarm_bot_ids == ["anna", "mike"]
     assert settings.swarm_bots[0].session_string == "anna-session"
     assert settings.swarm_bots[1].session_string == "mike-session"
-    assert settings.whitelist_user_ids == ""
 
 
 @pytest.mark.parametrize(
@@ -353,9 +688,6 @@ def test_settings_rejects_invalid_active_windows(tmp_path, window_value: str):
     settings_path = write_settings(
         tmp_path,
         f"""
-        [app]
-        mode = "swarm"
-
         [swarm.schedule]
         active_windows_utc = {window_value}
 
@@ -367,9 +699,7 @@ def test_settings_rejects_invalid_active_windows(tmp_path, window_value: str):
     )
 
     env = {
-        "API_ID": "12345678",
-        "API_HASH": "test_hash",
-        "GEMINI_API_KEY": "test_key",
+        "OPENROUTER_API_KEY": "test_key",
         "SESSION_STRING_ANNA": "anna-session",
         "SETTINGS_PATH": str(settings_path),
     }
@@ -385,9 +715,6 @@ def test_settings_rejects_invalid_minute_ranges(tmp_path, value: str):
     settings_path = write_settings(
         tmp_path,
         f"""
-        [app]
-        mode = "swarm"
-
         [swarm.schedule]
         responder_delay_minutes = {value}
 
@@ -399,9 +726,7 @@ def test_settings_rejects_invalid_minute_ranges(tmp_path, value: str):
     )
 
     env = {
-        "API_ID": "12345678",
-        "API_HASH": "test_hash",
-        "GEMINI_API_KEY": "test_key",
+        "OPENROUTER_API_KEY": "test_key",
         "SESSION_STRING_ANNA": "anna-session",
         "SETTINGS_PATH": str(settings_path),
     }
@@ -416,9 +741,6 @@ def test_settings_rejects_duplicate_swarm_bot_ids(tmp_path):
     settings_path = write_settings(
         tmp_path,
         """
-        [app]
-        mode = "swarm"
-
         [[swarm.bots]]
         id = "anna"
         session_env = "SESSION_STRING_ANNA"
@@ -432,10 +754,7 @@ def test_settings_rejects_duplicate_swarm_bot_ids(tmp_path):
     )
 
     env = {
-        "API_ID": "12345678",
-        "API_HASH": "test_hash",
-        "GEMINI_API_KEY": "test_key",
-        "SESSION_STRING": "legacy-session",
+        "OPENROUTER_API_KEY": "test_key",
         "SESSION_STRING_ANNA": "anna-session",
         "SESSION_STRING_ANNA_2": "anna-session-2",
         "SETTINGS_PATH": str(settings_path),
@@ -451,9 +770,6 @@ def test_settings_rejects_missing_swarm_session_env(tmp_path):
     settings_path = write_settings(
         tmp_path,
         """
-        [app]
-        mode = "swarm"
-
         [[swarm.bots]]
         id = "anna"
         session_env = "SESSION_STRING_ANNA"
@@ -462,10 +778,7 @@ def test_settings_rejects_missing_swarm_session_env(tmp_path):
     )
 
     env = {
-        "API_ID": "12345678",
-        "API_HASH": "test_hash",
-        "GEMINI_API_KEY": "test_key",
-        "SESSION_STRING": "legacy-session",
+        "OPENROUTER_API_KEY": "test_key",
         "SETTINGS_PATH": str(settings_path),
     }
 
@@ -474,16 +787,36 @@ def test_settings_rejects_missing_swarm_session_env(tmp_path):
             Settings(_env_file=None)
 
 
-def test_settings_ignores_whitelist_in_swarm_mode(tmp_path):
-    """Проверяет, что whitelist_user_ids отключается в swarm-режиме."""
+@pytest.mark.parametrize(
+    ("toml_fragment", "key_name"),
+    [
+        ("[app]\nmode = \"swarm\"", "app"),
+        ("[storage]\ndb_path = \":memory:\"", "storage"),
+        ("[prompts]\nbase_dir = \"custom/prompts\"", "prompts"),
+        ("[paths]\nreply_" + "rules_path = \"custom/rules.md\"", "paths"),
+        (
+            '[telegram]\napi_id = 12345678\napi_hash = "test_api_hash_abc"\nwhite'
+            + "list_user_ids = [111, 222]",
+            "white" + "list_user_ids",
+        ),
+        ("[swarm]\nenabled = true", "enabled"),
+        ("[swarm]\nmax_parallel_bots = 12", "max_parallel_bots"),
+        ("[swarm]\nignore_messages_from_swarm = true", "ignore_messages_from_swarm"),
+        ("[swarm]\nreply_only_to_addressed_bot = true", "reply_only_to_addressed_bot"),
+        ("[swarm.schedule]\npair_" + "cooldown_slots = 1", "pair_" + "cooldown_slots"),
+    ],
+)
+def test_settings_rejects_removed_toml_keys(tmp_path, toml_fragment: str, key_name: str):
+    """Проверяет строгий отказ от удалённых legacy TOML-ключей."""
     settings_path = write_settings(
         tmp_path,
-        """
-        [app]
-        mode = "swarm"
+        f"""
+        {toml_fragment}
 
-        [telegram]
-        whitelist_user_ids = [111, 222]
+        [[groups]]
+        id = "danang"
+        city = "Da Nang"
+        group_chat_id = -100111
 
         [[swarm.bots]]
         id = "anna"
@@ -493,16 +826,121 @@ def test_settings_ignores_whitelist_in_swarm_mode(tmp_path):
     )
 
     env = {
-        "API_ID": "12345678",
-        "API_HASH": "test_hash",
-        "GEMINI_API_KEY": "test_key",
-        "SESSION_STRING": "legacy-session",
+        "OPENROUTER_API_KEY": "test_key",
         "SESSION_STRING_ANNA": "anna-session",
         "SETTINGS_PATH": str(settings_path),
     }
 
     with patch.dict("os.environ", env, clear=True):
-        settings = Settings(_env_file=None)
+        with pytest.raises(Exception, match=key_name):
+            Settings(_env_file=None)
 
-    assert settings.mode == "swarm"
-    assert settings.whitelist_user_ids == ""
+
+@pytest.mark.parametrize("persona_file", ["../secret.md", "/tmp/secret.md"])
+def test_settings_rejects_persona_file_outside_profiles_dir(tmp_path, persona_file: str):
+    """Проверяет запрет path traversal в persona_file."""
+    settings_path = write_settings(
+        tmp_path,
+        f"""
+        [[swarm.bots]]
+        id = "anna"
+        session_env = "SESSION_STRING_ANNA"
+        persona_file = "{persona_file}"
+        """,
+    )
+
+    env = {
+        "OPENROUTER_API_KEY": "test_key",
+        "SESSION_STRING_ANNA": "anna-session",
+        "SETTINGS_PATH": str(settings_path),
+    }
+
+    with patch.dict("os.environ", env, clear=True):
+        with pytest.raises(Exception, match="persona_file"):
+            Settings(_env_file=None)
+
+
+def _env_file_keys(path: Path) -> set[str]:
+    """Возвращает только имена переменных из env-файла без чтения значений."""
+    keys: set[str] = set()
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _value = line.split("=", maxsplit=1)
+        keys.add(key.strip())
+    return keys
+
+
+def _require_local_prod_files() -> tuple[Path, Path]:
+    """Возвращает локальные prod-файлы или пропускает тест в чистом checkout."""
+    settings_path = Path("config/settings.prod.toml")
+    env_path = Path(".env.prod")
+    if not settings_path.exists() or not env_path.exists():
+        pytest.skip("Локальные prod-файлы отсутствуют в этом checkout")
+    return settings_path, env_path
+
+
+def test_prod_settings_toml_is_valid_and_matches_env_sessions():
+    """Проверяет prod TOML и соответствие session_env ключам .env.prod без вывода секретов."""
+    settings_path, env_path = _require_local_prod_files()
+    settings_data = tomllib.loads(settings_path.read_text(encoding="utf-8"))
+    prod_env_keys = _env_file_keys(env_path)
+    configured_session_keys = [
+        bot["session_env"]
+        for bot in settings_data["swarm"]["bots"]
+    ]
+    prod_session_keys = {
+        key
+        for key in prod_env_keys
+        if key.startswith("SESSION_STRING_")
+    }
+    telegram = settings_data.get("telegram", {})
+
+    assert configured_session_keys
+    assert len(configured_session_keys) == len(set(configured_session_keys))
+    assert set(configured_session_keys) == prod_session_keys
+    assert isinstance(telegram.get("api_id"), int) and telegram["api_id"] > 0
+    assert isinstance(telegram.get("api_hash"), str) and telegram["api_hash"].strip()
+    assert "API_ID" not in prod_env_keys
+    assert "API_HASH" not in prod_env_keys
+
+
+def test_prod_settings_load_with_declared_session_keys():
+    """Проверяет, что production TOML проходит строгую Settings-валидацию."""
+    settings_path, _env_path = _require_local_prod_files()
+    settings_data = tomllib.loads(settings_path.read_text(encoding="utf-8"))
+    if "openrouter" not in settings_data:
+        pytest.skip("Локальный production config ещё не мигрирован оператором на OpenRouter")
+    env = {
+        bot["session_env"]: "test-session"
+        for bot in settings_data["swarm"]["bots"]
+    }
+
+    with patch.dict("os.environ", env, clear=False):
+        settings = Settings(
+            **BASE_SECRETS,
+            settings_path=str(settings_path),
+        )
+
+    assert settings.swarm_bot_ids == [bot["id"] for bot in settings_data["swarm"]["bots"]]
+    assert [bot.persona_file for bot in settings.swarm_bots] == [
+        bot["persona_file"]
+        for bot in settings_data["swarm"]["bots"]
+    ]
+
+
+def test_prod_settings_persona_files_exist():
+    """Проверяет, что каждый production bot ссылается на существующий persona-файл."""
+    settings_path, _env_path = _require_local_prod_files()
+    settings_data = tomllib.loads(settings_path.read_text(encoding="utf-8"))
+    persona_dir = Path("ai/prompts/bots")
+
+    persona_files = [
+        bot["persona_file"]
+        for bot in settings_data["swarm"]["bots"]
+    ]
+
+    assert persona_files
+    for persona_file in persona_files:
+        assert (persona_dir / persona_file).exists(), f"Нет persona-файла: {persona_file}"

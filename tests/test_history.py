@@ -6,17 +6,20 @@ import pytest
 import pytest_asyncio
 
 from ai.history import MessageHistory
+from storage.sqlite_database import SQLiteDatabase
 
 
 @pytest_asyncio.fixture
 async def history():
     """Создаёт экземпляр истории с in-memory базой данных."""
-    h = MessageHistory(db_path=":memory:")
+    database = SQLiteDatabase(":memory:")
+    await database.open()
+    h = MessageHistory(database)
     await h.init_db()
     try:
         yield h
     finally:
-        await h.close()
+        await database.close()
 
 
 async def test_save_and_get_message(history):
@@ -73,14 +76,16 @@ async def test_empty_history_returns_empty_list(history):
 async def test_init_db_creates_parent_directory(tmp_path):
     """Проверяет создание директории для файловой SQLite базы."""
     db_path = tmp_path / "data" / "history.db"
-    history = MessageHistory(db_path=str(db_path))
+    database = SQLiteDatabase(str(db_path))
+    await database.open()
+    history = MessageHistory(database)
 
     try:
         await history.init_db()
 
         assert db_path.exists()
     finally:
-        await history.close()
+        await database.close()
 
 
 async def test_get_session_history_returns_messages_for_chat(history):
@@ -124,7 +129,7 @@ async def test_get_session_history_isolates_different_chats(history):
 
 async def test_get_session_history_filters_by_session_start(history):
     """Проверяет, что session_start исключает сообщения до начала сессии."""
-    conn = await history._get_connection()
+    conn = history.database.connection
     await conn.execute(
         "INSERT INTO messages (user_id, chat_id, role, text, created_at) VALUES (?, ?, ?, ?, ?)",
         (1, -100555, "user", "Старое", "2020-01-01 00:00:00"),
@@ -144,7 +149,7 @@ async def test_get_session_history_filters_by_session_start(history):
 
 async def test_get_session_history_filters_timezone_aware_session_start(history):
     """Проверяет фильтрацию истории сессии при timezone-aware времени старта."""
-    conn = await history._get_connection()
+    conn = history.database.connection
     await conn.executemany(
         "INSERT INTO messages (user_id, chat_id, role, text, created_at) VALUES (?, ?, ?, ?, ?)",
         [
@@ -161,6 +166,47 @@ async def test_get_session_history_filters_timezone_aware_session_start(history)
     assert [item["text"] for item in messages] == ["После старта"]
 
 
+async def test_get_session_history_since_orders_by_timestamp_then_id(history):
+    """Проверяет хронологический порядок независимо от порядка вставки."""
+    connection = history.database.connection
+    await connection.executemany(
+        "INSERT INTO messages (user_id, chat_id, role, text, created_at) VALUES (?, ?, ?, ?, ?)",
+        [
+            (1, -100555, "assistant", "Позже", "2026-04-14 09:00:00"),
+            (1, -100555, "user", "Раньше", "2026-04-14 08:00:00"),
+            (1, -100555, "assistant", "В то же время", "2026-04-14 09:00:00"),
+        ],
+    )
+    await connection.commit()
+
+    messages = await history.get_session_history(
+        chat_id=-100555,
+        session_start=datetime(2026, 4, 14, 7, 0, tzinfo=UTC),
+    )
+
+    assert [item["text"] for item in messages] == ["Раньше", "Позже", "В то же время"]
+
+
+async def test_session_history_since_query_uses_created_at_index_range(history):
+    """Проверяет диапазонный поиск по составному индексу created_at."""
+    rows = await history.database.fetch_all(
+        "explain_session_history_since",
+        """
+        EXPLAIN QUERY PLAN
+        SELECT role, text, bot_id, exchange_id, message_origin, reply_to_message_id
+        FROM messages
+        WHERE chat_id = ? AND bot_id = ? AND created_at >= ?
+        ORDER BY created_at ASC, id ASC
+        LIMIT ?
+        """,
+        (-100555, "anna", "2026-04-14 07:00:00", 50),
+    )
+
+    plan = " ".join(str(row[3]) for row in rows)
+    assert "idx_messages_chat_bot_created_at" in plan
+    assert "created_at>?" in plan
+
+
 async def test_get_session_history_returns_empty_for_none_chat_id(history):
     """Проверяет, что get_session_history с chat_id=None возвращает пустой список."""
     await history.save_message(user_id=1, role="user", text="Что-то", chat_id=-100555)
@@ -171,6 +217,24 @@ async def test_get_session_history_returns_empty_for_none_chat_id(history):
 async def test_init_db_is_idempotent(history):
     """Проверяет, что повторный вызов init_db не вызывает ошибку (включая миграцию)."""
     await history.init_db()  # вызов второй раз не должен упасть
+
+
+async def test_init_db_creates_history_indexes_idempotently(history):
+    """Проверяет создание индексов для горячих history-запросов."""
+    await history.init_db()
+    connection = history.database.connection
+    async with connection.execute("PRAGMA index_list(messages)") as cursor:
+        rows = await cursor.fetchall()
+
+    index_names = {row[1] for row in rows}
+
+    assert {
+        "idx_messages_user_id_id",
+        "idx_messages_chat_id_id",
+        "idx_messages_chat_bot_id",
+        "idx_messages_chat_created_at",
+        "idx_messages_chat_bot_created_at",
+    }.issubset(index_names)
 
 
 async def test_save_message_persists_swarm_metadata(history):
@@ -222,3 +286,35 @@ async def test_get_session_history_can_filter_by_bot_id(history):
     messages = await history.get_session_history(chat_id=-100555, bot_id="anna")
 
     assert [item["text"] for item in messages] == ["Ответ Анны"]
+
+
+async def test_history_prune_older_than_deletes_only_old_messages(history):
+    """Проверяет retention-очистку только для старых записей."""
+    connection = history.database.connection
+    old_created_at = (datetime.now(UTC) - timedelta(days=40)).strftime("%Y-%m-%d %H:%M:%S")
+    new_created_at = (datetime.now(UTC) - timedelta(days=5)).strftime("%Y-%m-%d %H:%M:%S")
+    await connection.executemany(
+        "INSERT INTO messages (user_id, chat_id, role, text, created_at) VALUES (?, ?, ?, ?, ?)",
+        [
+            (1, -100555, "user", "Старое", old_created_at),
+            (1, -100555, "user", "Новое", new_created_at),
+        ],
+    )
+    await connection.commit()
+
+    deleted = await history.prune_older_than(retention_days=30)
+    messages = await history.get_session_history(chat_id=-100555)
+
+    assert deleted == 1
+    assert [item["text"] for item in messages] == ["Новое"]
+
+
+async def test_history_prune_skips_when_retention_disabled(history):
+    """Проверяет отсутствие очистки при retention_days=0."""
+    await history.save_message(user_id=1, role="user", text="Оставить", chat_id=-100555)
+
+    deleted = await history.prune_older_than(retention_days=0)
+    messages = await history.get_session_history(chat_id=-100555)
+
+    assert deleted == 0
+    assert [item["text"] for item in messages] == ["Оставить"]

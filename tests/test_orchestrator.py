@@ -5,9 +5,35 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from telethon.errors import ChatWriteForbiddenError, UserBannedInChannelError
 
+from ai.prompt_loader import ImportantServiceScenario
 from core.runtime_models import SwarmBotProfile
-from userbot.orchestrator import SwarmOrchestrator
+from userbot.orchestrator import SAFE_SCHEDULED_REPLY_FALLBACK_TEXT, SwarmOrchestrator
+
+
+IMPORTANT_SERVICE_SCENARIOS = (
+    ImportantServiceScenario(
+        key="exchange_rub",
+        question_intent="Где можно обменять безналичные рубли?",
+        answer_intent="Посоветуй сервис для обмена рублей.",
+    ),
+    ImportantServiceScenario(
+        key="booking_airbnb",
+        question_intent="Как оплатить Airbnb?",
+        answer_intent="Посоветуй сервис для оплаты Airbnb.",
+    ),
+    ImportantServiceScenario(
+        key="exchange_usdt",
+        question_intent="Где обменять USDT?",
+        answer_intent="Посоветуй сервис для обмена USDT.",
+    ),
+    ImportantServiceScenario(
+        key="booking_booking",
+        question_intent="Как оплатить Booking?",
+        answer_intent="Посоветуй сервис для оплаты Booking.",
+    ),
+)
 
 
 def _manager_with_clients(initiator_client, responder_client):
@@ -15,6 +41,40 @@ def _manager_with_clients(initiator_client, responder_client):
         get_client=lambda bot_id: SimpleNamespace(client=initiator_client if bot_id == "anna" else responder_client),
         scheduled_slot=lambda _bot_id: _ScheduledSlot(True),
     )
+
+
+def test_orchestrator_selects_candidates_with_one_roster_scan_after_cooldown_resolution():
+    """Проверяет линейный доступ к roster при ослаблении cooldown."""
+
+    class CountingProfile:
+        def __init__(self, bot_id: str) -> None:
+            self._bot_id = bot_id
+            self.enabled = True
+            self.id_reads = 0
+
+        @property
+        def id(self) -> str:
+            self.id_reads += 1
+            return self._bot_id
+
+    profiles = [CountingProfile(bot_id) for bot_id in ("anna", "mike", "john", "kate")]
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=profiles,
+        manager=SimpleNamespace(),
+        topic_selector=SimpleNamespace(),
+        prompt_composer=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
+        history=SimpleNamespace(),
+        exchange_store=SimpleNamespace(),
+        important_service_scenarios=IMPORTANT_SERVICE_SCENARIOS,
+    )
+    for profile in profiles:
+        profile.id_reads = 0
+
+    candidates = orchestrator._pick_bot_candidates(["anna", "mike", "john", "kate"])
+
+    assert [profile.id for profile in candidates] == ["john", "kate"]
+    assert sum(profile.id_reads for profile in profiles) <= 14
 
 
 @pytest.mark.asyncio
@@ -28,7 +88,7 @@ async def test_orchestrator_skips_exchange_when_recent_human_activity_detected()
         manager=SimpleNamespace(),
         topic_selector=SimpleNamespace(),
         prompt_composer=SimpleNamespace(),
-        gemini_client=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
         history=SimpleNamespace(),
         exchange_store=SimpleNamespace(get_due_started_exchange=AsyncMock(return_value=None)),
         group_target="@chat",
@@ -50,7 +110,7 @@ async def test_orchestrator_skips_exchange_outside_active_windows():
         manager=SimpleNamespace(),
         topic_selector=SimpleNamespace(),
         prompt_composer=SimpleNamespace(),
-        gemini_client=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
         history=SimpleNamespace(),
         exchange_store=SimpleNamespace(get_due_started_exchange=AsyncMock(return_value=None)),
         group_target="@chat",
@@ -62,12 +122,38 @@ async def test_orchestrator_skips_exchange_outside_active_windows():
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_avoids_recent_pairs_and_topics():
-    """Проверяет anti-repeat по persisted парам и темам."""
+async def test_orchestrator_skips_new_exchange_when_active_pool_has_fewer_than_two_bots():
+    """После quarantine новый exchange не должен приводить к ValueError выбора пары."""
     exchange_store = SimpleNamespace(
         get_due_started_exchange=AsyncMock(return_value=None),
-        get_recent_pairs=AsyncMock(return_value=[("anna", "mike")]),
-        get_recent_topic_keys=AsyncMock(return_value={"где есть суп"}),
+        get_exchange_by_window_key=AsyncMock(return_value=None),
+    )
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md"),
+            SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md"),
+        ],
+        manager=SimpleNamespace(active_bot_ids=["anna"]),
+        topic_selector=SimpleNamespace(),
+        prompt_composer=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
+        history=SimpleNamespace(),
+        exchange_store=exchange_store,
+        group_target="@chat",
+        active_windows_utc=["19-20"],
+        now_provider=lambda: datetime(2026, 4, 20, 19, 10, tzinfo=UTC),
+    )
+
+    assert await orchestrator.run_once() is False
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_avoids_recent_bots_and_last_topics():
+    """Проверяет anti-repeat по последним 4 ботам и последним темам."""
+    exchange_store = SimpleNamespace(
+        get_due_started_exchange=AsyncMock(return_value=None),
+        get_recent_bot_ids=AsyncMock(return_value=["anna", "mike", "john", "kate"]),
+        get_recent_topic_keys_by_limit=AsyncMock(return_value={"где есть суп"}),
         get_recent_questions=AsyncMock(return_value=[]),
     )
     topic_selector = SimpleNamespace(topics=["Где есть суп", "Куда сходить вечером"])
@@ -76,25 +162,87 @@ async def test_orchestrator_avoids_recent_pairs_and_topics():
             SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
             SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md", telegram_user_id=202),
             SwarmBotProfile(id="john", session_string="john", persona_file="john.md", telegram_user_id=303),
+            SwarmBotProfile(id="kate", session_string="kate", persona_file="kate.md", telegram_user_id=404),
+            SwarmBotProfile(id="lena", session_string="lena", persona_file="lena.md", telegram_user_id=505),
+            SwarmBotProfile(id="max", session_string="max", persona_file="max.md", telegram_user_id=606),
         ],
         manager=SimpleNamespace(),
         topic_selector=topic_selector,
         prompt_composer=SimpleNamespace(),
-        gemini_client=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
         history=SimpleNamespace(),
         exchange_store=exchange_store,
     )
 
     decision = await orchestrator._build_exchange_decision()
 
-    assert (decision.initiator.id, decision.responder.id) != ("anna", "mike")
+    assert {decision.initiator.id, decision.responder.id} == {"lena", "max"}
     assert decision.topic == "Куда сходить вечером"
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_relaxes_recent_bot_filter_when_pool_is_too_small():
+    """Проверяет fallback, если после исключения последних 4 ботов не хватает пары."""
+    exchange_store = SimpleNamespace(
+        get_due_started_exchange=AsyncMock(return_value=None),
+        get_recent_bot_ids=AsyncMock(return_value=["anna", "mike", "john", "kate"]),
+        get_recent_topic_keys_by_limit=AsyncMock(return_value=set()),
+        get_recent_questions=AsyncMock(return_value=[]),
+    )
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+            SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md", telegram_user_id=202),
+            SwarmBotProfile(id="john", session_string="john", persona_file="john.md", telegram_user_id=303),
+            SwarmBotProfile(id="kate", session_string="kate", persona_file="kate.md", telegram_user_id=404),
+        ],
+        manager=SimpleNamespace(),
+        topic_selector=SimpleNamespace(topics=["Тема"]),
+        prompt_composer=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
+        history=SimpleNamespace(),
+        exchange_store=exchange_store,
+    )
+
+    decision = await orchestrator._build_exchange_decision()
+
+    assert decision.initiator.id != decision.responder.id
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_passes_group_scope_to_recent_bot_ids():
+    """Проверяет что group_id и group_chat_id передаются в get_recent_bot_ids."""
+    get_recent_bot_ids = AsyncMock(return_value=[])
+    exchange_store = SimpleNamespace(
+        get_due_started_exchange=AsyncMock(return_value=None),
+        get_recent_bot_ids=get_recent_bot_ids,
+        get_recent_topic_keys_by_limit=AsyncMock(return_value=set()),
+        get_recent_questions=AsyncMock(return_value=[]),
+    )
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+            SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md", telegram_user_id=202),
+        ],
+        manager=SimpleNamespace(),
+        topic_selector=SimpleNamespace(topics=["Тема"]),
+        prompt_composer=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
+        history=SimpleNamespace(),
+        exchange_store=exchange_store,
+        group_id="danang",
+        group_chat_id=-100111,
+    )
+
+    await orchestrator._build_exchange_decision()
+
+    get_recent_bot_ids.assert_awaited_once_with(4, group_id="danang", group_chat_id=-100111)
 
 
 @pytest.mark.asyncio
 async def test_orchestrator_regenerates_repeated_question_signature():
     """Проверяет повторную генерацию вопроса при совпадении recent signature."""
-    gemini = SimpleNamespace(start_topic=AsyncMock(side_effect=["Один и тот же вопрос?", "Другой вопрос?"]))
+    ai = SimpleNamespace(start_topic=AsyncMock(side_effect=["Один и тот же вопрос?", "Другой вопрос?"]))
     exchange_store = SimpleNamespace(get_recent_question_signatures=AsyncMock(return_value={"один и тот же вопрос"}))
     orchestrator = SwarmOrchestrator(
         bot_profiles=[
@@ -104,7 +252,7 @@ async def test_orchestrator_regenerates_repeated_question_signature():
         manager=SimpleNamespace(),
         topic_selector=SimpleNamespace(),
         prompt_composer=SimpleNamespace(),
-        gemini_client=gemini,
+        ai_client=ai,
         history=SimpleNamespace(),
         exchange_store=exchange_store,
     )
@@ -112,7 +260,7 @@ async def test_orchestrator_regenerates_repeated_question_signature():
     question = await orchestrator._generate_non_repeating_question(initiator_prompt="prompt", topic="Тема")
 
     assert question == "Другой вопрос?"
-    assert gemini.start_topic.await_count == 2
+    assert ai.start_topic.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -123,14 +271,13 @@ async def test_orchestrator_runs_exchange_and_saves_history():
     exchange_store = SimpleNamespace(
         get_due_started_exchange=AsyncMock(return_value=None),
         get_exchange_by_window_key=AsyncMock(return_value=None),
-        get_recent_pairs=AsyncMock(return_value=[]),
-        get_recent_topic_keys=AsyncMock(return_value=set()),
+        get_recent_bot_ids=AsyncMock(return_value=[]),
+        get_recent_topic_keys_by_limit=AsyncMock(return_value=set()),
         get_recent_questions=AsyncMock(return_value=[]),
         get_recent_question_signatures=AsyncMock(return_value=set()),
         create_exchange=AsyncMock(return_value="exchange-1"),
         mark_exchange_started=AsyncMock(),
         mark_exchange_completed=AsyncMock(),
-        mark_exchange_skipped=AsyncMock(),
     )
     history = SimpleNamespace(
         get_session_history=AsyncMock(return_value=[]),
@@ -145,7 +292,7 @@ async def test_orchestrator_runs_exchange_and_saves_history():
         manager=_manager_with_clients(initiator_client, responder_client),
         topic_selector=SimpleNamespace(topics=["Где поесть суп?"]),
         prompt_composer=SimpleNamespace(compose=AsyncMock(side_effect=["system-init", "system-reply"])),
-        gemini_client=SimpleNamespace(
+        ai_client=SimpleNamespace(
             start_topic=AsyncMock(return_value="Кто знает место с хорошим супом?"),
             generate_reply=AsyncMock(return_value="Мне нравится Pho 54."),
         ),
@@ -189,6 +336,335 @@ async def test_orchestrator_runs_exchange_and_saves_history():
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_uses_local_fallback_when_scheduled_llm_disabled():
+    """Проверяет локальный fallback для initiator без вызова AI."""
+    initiator_client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=501)))
+    responder_client = SimpleNamespace(send_message=AsyncMock())
+    exchange_store = SimpleNamespace(
+        get_due_started_exchange=AsyncMock(return_value=None),
+        get_exchange_by_window_key=AsyncMock(return_value=None),
+        get_recent_bot_ids=AsyncMock(return_value=[]),
+        get_recent_topic_keys_by_limit=AsyncMock(return_value=set()),
+        get_recent_questions=AsyncMock(return_value=[]),
+        create_exchange=AsyncMock(return_value="exchange-1"),
+        mark_exchange_started=AsyncMock(),
+        mark_exchange_completed=AsyncMock(),
+    )
+    ai_client = SimpleNamespace(
+        start_topic=AsyncMock(return_value="Небезопасный вопрос?"),
+        generate_reply=AsyncMock(),
+        is_output_safe=lambda text: True,
+    )
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+            SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md", telegram_user_id=202),
+        ],
+        manager=_manager_with_clients(initiator_client, responder_client),
+        topic_selector=SimpleNamespace(topics=["Где поесть суп"]),
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system-init")),
+        ai_client=ai_client,
+        history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
+        exchange_store=exchange_store,
+        group_target="@chat",
+        allow_external_llm_for_scheduled=False,
+        active_windows_utc=["19-20"],
+        now_provider=lambda: datetime(2026, 4, 20, 19, 5, tzinfo=UTC),
+        randint_provider=lambda start, end: start,
+        important_service_scenarios=IMPORTANT_SERVICE_SCENARIOS,
+    )
+    orchestrator._build_exchange_decision = AsyncMock(
+        return_value=SimpleNamespace(
+            initiator=orchestrator.bot_profiles[0],
+            responder=orchestrator.bot_profiles[1],
+            topic="Где поесть суп",
+            topic_key="где поесть суп",
+            recent_questions=[],
+        )
+    )
+
+    started = await orchestrator.run_once()
+
+    assert started is True
+    ai_client.start_topic.assert_not_awaited()
+    initiator_client.send_message.assert_awaited_once_with("@chat", "Кто может подсказать: где поесть суп?")
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_replaces_unsafe_responder_output_with_fallback():
+    """Проверяет safety-gate для scheduled responder."""
+    initiator_client = SimpleNamespace(send_message=AsyncMock())
+    responder_client = SimpleNamespace(send_message=AsyncMock())
+    exchange_store = SimpleNamespace(
+        mark_exchange_completed=AsyncMock(),
+    )
+    history = SimpleNamespace(
+        get_session_history=AsyncMock(return_value=[]),
+        save_message=AsyncMock(),
+    )
+    ai_client = SimpleNamespace(
+        generate_reply=AsyncMock(return_value="https://t.me/+secret"),
+        is_output_safe=lambda text: False,
+    )
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+            SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md", telegram_user_id=202),
+        ],
+        manager=_manager_with_clients(initiator_client, responder_client),
+        topic_selector=SimpleNamespace(),
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system-reply")),
+        ai_client=ai_client,
+        history=history,
+        exchange_store=exchange_store,
+        group_target="@chat",
+    )
+
+    started = await orchestrator._run_due_responder_exchange(
+        exchange={
+            "exchange_id": "exchange-1",
+            "initiator_bot_id": "anna",
+            "responder_bot_id": "mike",
+            "topic": "Где поесть суп",
+            "question_text": "Кто знает место с хорошим супом?",
+            "initiator_message_id": 501,
+        }
+    )
+
+    assert started is True
+    responder_client.send_message.assert_awaited_once_with("@chat", SAFE_SCHEDULED_REPLY_FALLBACK_TEXT, reply_to=501)
+    history.save_message.assert_awaited_once()
+    assert history.save_message.await_args.kwargs["text"] == SAFE_SCHEDULED_REPLY_FALLBACK_TEXT
+
+
+@pytest.mark.parametrize(
+    ("allow_external_llm", "output_is_safe"),
+    [(False, True), (True, False)],
+    ids=["llm-disabled", "unsafe-output"],
+)
+@pytest.mark.asyncio
+async def test_important_service_responder_fallback_keeps_approved_contact(
+    allow_external_llm: bool,
+    output_is_safe: bool,
+):
+    """Important-service fallback сохраняет обязательную разрешённую ссылку."""
+    responder_client = SimpleNamespace(send_message=AsyncMock())
+    exchange_store = SimpleNamespace(
+        mark_responder_generated=AsyncMock(),
+        mark_exchange_completed=AsyncMock(),
+    )
+    ai_client = SimpleNamespace(
+        generate_reply=AsyncMock(return_value="https://t.me/+unsafe"),
+        is_output_safe=lambda _text: output_is_safe,
+    )
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+            SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md", telegram_user_id=202),
+        ],
+        manager=_manager_with_clients(SimpleNamespace(send_message=AsyncMock()), responder_client),
+        topic_selector=SimpleNamespace(),
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system-reply")),
+        ai_client=ai_client,
+        history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
+        exchange_store=exchange_store,
+        group_target="@chat",
+        allow_external_llm_for_scheduled=allow_external_llm,
+    )
+    exchange = {
+        "exchange_id": "exchange-important",
+        "initiator_bot_id": "anna",
+        "responder_bot_id": "mike",
+        "topic": "Обмен рублей",
+        "question_text": "Где обменять рубли?",
+        "initiator_message_id": 501,
+        "exchange_kind": "important_service",
+        "important_scenario": "exchange_rub",
+    }
+
+    assert await orchestrator._run_due_responder_exchange(exchange=exchange) is True
+
+    responder_text = responder_client.send_message.await_args.args[1]
+    assert "https://t.me/tt_exchenge_bot/antex" in responder_text
+    assert "https://t.me/+unsafe" not in responder_text
+    if allow_external_llm:
+        ai_client.generate_reply.assert_awaited_once()
+    else:
+        ai_client.generate_reply.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_important_service_safe_responder_without_contact_uses_contract_fallback():
+    """Даже safe AI-ответ заменяется, если в нём нет обязательного контакта."""
+    responder_client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=902)))
+    exchange_store = SimpleNamespace(mark_responder_generated=AsyncMock(), mark_exchange_completed=AsyncMock())
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md"),
+            SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md"),
+        ],
+        manager=_manager_with_clients(SimpleNamespace(send_message=AsyncMock()), responder_client),
+        topic_selector=SimpleNamespace(),
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system")),
+        ai_client=SimpleNamespace(
+            generate_reply=AsyncMock(return_value="Попробуй знакомый обменник."),
+            is_output_safe=lambda _text: True,
+        ),
+        history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
+        exchange_store=exchange_store,
+        group_target="@chat",
+    )
+    exchange = {
+        "exchange_id": "important",
+        "initiator_bot_id": "anna",
+        "responder_bot_id": "mike",
+        "topic": "Обмен",
+        "question_text": "Где обменять?",
+        "initiator_message_id": 1,
+        "exchange_kind": "important_service",
+        "important_scenario": "exchange_rub",
+    }
+
+    assert await orchestrator._run_due_responder_exchange(exchange=exchange) is True
+
+    assert "https://t.me/tt_exchenge_bot/antex" in responder_client.send_message.await_args.args[1]
+    exchange_store.mark_exchange_completed.assert_awaited_once_with(
+        "important", responder_message_id=902
+    )
+
+
+@pytest.mark.asyncio
+async def test_important_service_initiator_must_not_publish_required_contact():
+    """Ссылка important-service разрешена только в ответе responder-а."""
+    initiator_client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=501)))
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md"),
+            SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md"),
+        ],
+        manager=_manager_with_clients(initiator_client, SimpleNamespace(send_message=AsyncMock())),
+        topic_selector=SimpleNamespace(),
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system")),
+        ai_client=SimpleNamespace(
+            start_topic=AsyncMock(return_value="Пишите в https://t.me/tt_exchenge_bot/antex"),
+            is_output_safe=lambda _text: True,
+        ),
+        history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
+        exchange_store=SimpleNamespace(
+            get_recent_questions=AsyncMock(return_value=[]),
+            get_recent_question_signatures=AsyncMock(return_value=set()),
+            mark_initiator_generated=AsyncMock(),
+            mark_exchange_started=AsyncMock(),
+            mark_exchange_completed=AsyncMock(),
+        ),
+        group_target="@chat",
+        max_turns_per_exchange=1,
+        now_provider=lambda: datetime(2026, 7, 8, 10, 0, tzinfo=UTC),
+        randint_provider=lambda start, end: start,
+    )
+
+    assert await orchestrator._run_due_planned_exchange(
+        exchange={
+            "exchange_id": "important",
+            "initiator_bot_id": "anna",
+            "responder_bot_id": "mike",
+            "topic": "Где обменять рубли?",
+            "exchange_kind": "important_service",
+            "important_scenario": "exchange_rub",
+        },
+        now=datetime(2026, 7, 8, 10, 0, tzinfo=UTC),
+    ) is True
+
+    assert "https://t.me/tt_exchenge_bot/antex" not in initiator_client.send_message.await_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_important_service_is_not_selected_for_one_turn_group():
+    """Important-service не планируется там, где responder никогда не отправляется."""
+    latest = AsyncMock(return_value=None)
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[],
+        manager=SimpleNamespace(),
+        topic_selector=SimpleNamespace(),
+        prompt_composer=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
+        history=SimpleNamespace(),
+        exchange_store=SimpleNamespace(get_latest_important_service_exchange=latest),
+        max_turns_per_exchange=1,
+    )
+
+    assert await orchestrator._build_important_service_decision_if_due(datetime.now(UTC)) is None
+    latest.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_scopes_exchange_to_group_and_uses_real_chat_id():
+    """Проверяет group scope для scheduled exchange."""
+    initiator_client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=501)))
+    responder_client = SimpleNamespace(send_message=AsyncMock())
+    exchange_store = SimpleNamespace(
+        get_due_started_exchange=AsyncMock(return_value=None),
+        get_exchange_by_window_key=AsyncMock(return_value=None),
+        get_recent_bot_ids=AsyncMock(return_value=[]),
+        get_recent_topic_keys_by_limit=AsyncMock(return_value=set()),
+        get_recent_questions=AsyncMock(return_value=[]),
+        get_recent_question_signatures=AsyncMock(return_value=set()),
+        create_exchange=AsyncMock(return_value="exchange-1"),
+        mark_exchange_started=AsyncMock(),
+        mark_exchange_completed=AsyncMock(),
+    )
+    history = SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock())
+    prompt_composer = SimpleNamespace(compose=AsyncMock(return_value="system-init"))
+
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+            SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md", telegram_user_id=202),
+        ],
+        manager=_manager_with_clients(initiator_client, responder_client),
+        topic_selector=SimpleNamespace(topics=["Где поесть суп?"]),
+        prompt_composer=prompt_composer,
+        ai_client=SimpleNamespace(start_topic=AsyncMock(return_value="Кто знает место с хорошим супом?")),
+        history=history,
+        exchange_store=exchange_store,
+        group_id="danang",
+        group_city="Da Nang",
+        group_target="@danang",
+        group_chat_id=-100111,
+        active_windows_utc=["19-20"],
+        now_provider=lambda: datetime(2026, 4, 20, 19, 5, tzinfo=UTC),
+        randint_provider=lambda start, end: start,
+    )
+    orchestrator._build_exchange_decision = AsyncMock(
+        return_value=SimpleNamespace(
+            initiator=orchestrator.bot_profiles[0],
+            responder=orchestrator.bot_profiles[1],
+            topic="Где поесть суп?",
+            topic_key="где поесть суп",
+            recent_questions=[],
+        )
+    )
+
+    assert await orchestrator.run_once() is True
+
+    exchange_store.get_due_started_exchange.assert_awaited_once_with(
+        now=datetime(2026, 4, 20, 19, 5, tzinfo=UTC),
+        group_id="danang",
+        group_chat_id=-100111,
+    )
+    exchange_store.get_exchange_by_window_key.assert_awaited_once_with(
+        "2026-04-20T19:19-20",
+        group_id="danang",
+        group_chat_id=-100111,
+    )
+    exchange_store.create_exchange.assert_awaited_once()
+    assert exchange_store.create_exchange.await_args.kwargs["group_id"] == "danang"
+    assert exchange_store.create_exchange.await_args.kwargs["group_chat_id"] == -100111
+    assert history.save_message.await_args.kwargs["chat_id"] == -100111
+    assert "город: Da Nang" in prompt_composer.compose.await_args.kwargs["exchange_context"]
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_sends_due_responder_and_completes_exchange():
     """Проверяет, что ответчик отвечает только после наступления due времени."""
     initiator_client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=501)))
@@ -220,7 +696,7 @@ async def test_orchestrator_sends_due_responder_and_completes_exchange():
         manager=_manager_with_clients(initiator_client, responder_client),
         topic_selector=SimpleNamespace(topics=["Где поесть суп?"]),
         prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system-reply")),
-        gemini_client=SimpleNamespace(generate_reply=AsyncMock(return_value="Мне нравится Pho 54.")),
+        ai_client=SimpleNamespace(generate_reply=AsyncMock(return_value="Мне нравится Pho 54.")),
         history=history,
         exchange_store=exchange_store,
         group_target="@chat",
@@ -234,6 +710,345 @@ async def test_orchestrator_sends_due_responder_and_completes_exchange():
     exchange_store.mark_exchange_completed.assert_awaited_once_with("exchange-1")
     assert history.save_message.await_count == 1
     assert history.save_message.await_args.kwargs["message_origin"] == "scheduled_responder"
+
+
+@pytest.mark.asyncio
+async def test_responder_user_banned_marks_exchange_skipped_without_history_or_raise():
+    """Постоянный запрет responder не валит tick и не сохраняет неотправленный ответ."""
+    responder_client = SimpleNamespace(send_message=AsyncMock(side_effect=UserBannedInChannelError(None)))
+    exchange_store = SimpleNamespace(
+        get_due_started_exchange=AsyncMock(
+            return_value={
+                "exchange_id": "exchange-1",
+                "initiator_bot_id": "anna",
+                "responder_bot_id": "mike",
+                "topic": "Тема",
+                "question_text": "Вопрос",
+                "initiator_message_id": 501,
+            }
+        ),
+        mark_responder_generated=AsyncMock(),
+        mark_exchange_skipped=AsyncMock(),
+        quarantine_bot=AsyncMock(),
+    )
+    history = SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock())
+    manager = SimpleNamespace(
+        get_client=lambda _bot_id: SimpleNamespace(client=responder_client),
+        scheduled_slot=lambda _bot_id: _ScheduledSlot(True),
+        disable_bot=AsyncMock(),
+    )
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md"),
+            SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md"),
+        ],
+        manager=manager,
+        topic_selector=SimpleNamespace(),
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="prompt")),
+        ai_client=SimpleNamespace(generate_reply=AsyncMock(return_value="Ответ")),
+        history=history,
+        exchange_store=exchange_store,
+        group_target="@chat",
+    )
+
+    assert await orchestrator.run_once() is True
+    exchange_store.mark_exchange_skipped.assert_awaited_once_with(
+        "exchange-1", "telegram_responder_send_forbidden:UserBannedInChannelError"
+    )
+    manager.disable_bot.assert_awaited_once()
+    exchange_store.quarantine_bot.assert_awaited_once_with(
+        group_key="@chat", bot_id="mike", reason="telegram_responder_send_forbidden:UserBannedInChannelError"
+    )
+    history.save_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_permanent_send_quarantine_failure_disables_bot_before_propagating():
+    """Ошибка SQLite quarantine не оставляет Telegram-ограниченного бота активным."""
+    persistence_error = RuntimeError("quarantine unavailable")
+    exchange_store = SimpleNamespace(quarantine_bot=AsyncMock(side_effect=persistence_error))
+    manager = SimpleNamespace(disable_bot=AsyncMock())
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md"),
+            SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md"),
+        ],
+        manager=manager,
+        topic_selector=SimpleNamespace(),
+        prompt_composer=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
+        history=SimpleNamespace(),
+        exchange_store=exchange_store,
+        group_target="@chat",
+    )
+
+    with pytest.raises(RuntimeError, match="quarantine unavailable"):
+        await orchestrator._handle_permanent_send_error(
+            exchange_id="exchange-1",
+            bot_id="mike",
+            counterpart_bot_id="anna",
+            stage="responder",
+            exc=UserBannedInChannelError(None),
+        )
+
+    assert "mike" in orchestrator.disabled_bot_ids
+    manager.disable_bot.assert_awaited_once_with(
+        "mike",
+        reason="telegram_responder_send_forbidden:UserBannedInChannelError",
+    )
+
+
+@pytest.mark.asyncio
+async def test_persisted_responder_text_skips_second_ai_call_after_temporary_send_error():
+    """Retry временной ошибки использует сохранённый draft и не расходует второй LLM-вызов."""
+    responder_client = SimpleNamespace(send_message=AsyncMock(side_effect=TimeoutError("network")))
+    exchange_store = SimpleNamespace(
+        get_due_started_exchange=AsyncMock(
+            return_value={
+                "exchange_id": "exchange-1",
+                "initiator_bot_id": "anna",
+                "responder_bot_id": "mike",
+                "topic": "Тема",
+                "question_text": "Вопрос",
+                "responder_text": "Сохранённый ответ",
+                "initiator_message_id": 501,
+            }
+        ),
+        mark_exchange_skipped=AsyncMock(),
+    )
+    ai = SimpleNamespace(generate_reply=AsyncMock())
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md"), SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md")],
+        manager=SimpleNamespace(get_client=lambda _bot_id: SimpleNamespace(client=responder_client), scheduled_slot=lambda _bot_id: _ScheduledSlot(True)),
+        topic_selector=SimpleNamespace(), prompt_composer=SimpleNamespace(), ai_client=ai,
+        history=SimpleNamespace(), exchange_store=exchange_store, group_target="@chat",
+    )
+
+    with pytest.raises(TimeoutError, match="network"):
+        await orchestrator.run_once()
+
+    ai.generate_reply.assert_not_awaited()
+    exchange_store.mark_exchange_skipped.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_initiator_permanent_error_marks_exchange_skipped():
+    """Постоянный запрет initiator переводит planned exchange в skipped."""
+    initiator_client = SimpleNamespace(send_message=AsyncMock(side_effect=ChatWriteForbiddenError(None)))
+    exchange_store = SimpleNamespace(
+        get_due_started_exchange=AsyncMock(return_value=None),
+        get_exchange_by_window_key=AsyncMock(return_value=None),
+        get_recent_pairs=AsyncMock(return_value=[]), get_recent_topic_keys=AsyncMock(return_value=set()),
+        get_recent_questions=AsyncMock(return_value=[]), get_recent_question_signatures=AsyncMock(return_value=set()),
+        create_exchange=AsyncMock(return_value="exchange-1"), mark_initiator_generated=AsyncMock(), mark_exchange_skipped=AsyncMock(),
+    )
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md"), SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md")],
+        manager=SimpleNamespace(get_client=lambda _bot_id: SimpleNamespace(client=initiator_client), scheduled_slot=lambda _bot_id: _ScheduledSlot(True), disable_bot=AsyncMock()),
+        topic_selector=SimpleNamespace(topics=["Тема"]), prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="prompt")),
+        ai_client=SimpleNamespace(start_topic=AsyncMock(return_value="Вопрос")), history=SimpleNamespace(),
+        exchange_store=exchange_store, group_target="@chat",
+    )
+    orchestrator._build_exchange_decision = AsyncMock(return_value=SimpleNamespace(
+        initiator=orchestrator.bot_profiles[0], responder=orchestrator.bot_profiles[1], topic="Тема", topic_key="тема", recent_questions=[]
+    ))
+
+    assert await orchestrator.run_once() is True
+    exchange_store.mark_exchange_skipped.assert_awaited_once_with(
+        "exchange-1", "telegram_initiator_send_forbidden:ChatWriteForbiddenError"
+    )
+
+
+@pytest.mark.asyncio
+async def test_responder_permanent_error_immediately_reassigns_turn_to_other_bot():
+    """После permanent error тот же responder-turn немедленно отправляет третья персона."""
+    failed_client = SimpleNamespace(send_message=AsyncMock(side_effect=UserBannedInChannelError(None)))
+    replacement_client = SimpleNamespace(send_message=AsyncMock())
+    reassigned_exchange = {
+        "exchange_id": "exchange-1",
+        "initiator_bot_id": "anna",
+        "responder_bot_id": "john",
+        "topic": "Тема",
+        "question_text": "Вопрос",
+        "initiator_message_id": 501,
+        "responder_text": None,
+    }
+    exchange_store = SimpleNamespace(
+        get_due_started_exchange=AsyncMock(return_value={**reassigned_exchange, "responder_bot_id": "mike"}),
+        mark_responder_generated=AsyncMock(), mark_exchange_completed=AsyncMock(), mark_exchange_skipped=AsyncMock(),
+        reassign_after_permanent_send_error=AsyncMock(), get_exchange=AsyncMock(return_value=reassigned_exchange),
+    )
+    manager = SimpleNamespace(
+        active_bot_ids=["anna", "mike", "john"],
+        get_client=lambda bot_id: SimpleNamespace(client=failed_client if bot_id == "mike" else replacement_client),
+        scheduled_slot=lambda _bot_id: _ScheduledSlot(True), disable_bot=AsyncMock(),
+    )
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md"),
+            SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md"),
+            SwarmBotProfile(id="john", session_string="john", persona_file="john.md"),
+        ],
+        manager=manager, topic_selector=SimpleNamespace(),
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="prompt")),
+        ai_client=SimpleNamespace(generate_reply=AsyncMock(return_value="Ответ Джона")),
+        history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
+        exchange_store=exchange_store, group_target="@chat",
+    )
+
+    assert await orchestrator.run_once() is True
+    exchange_store.reassign_after_permanent_send_error.assert_awaited_once_with(
+        "exchange-1", stage="responder", replacement_bot_id="john", counterpart_bot_id="anna"
+    )
+    replacement_client.send_message.assert_awaited_once_with("@chat", "Ответ Джона", reply_to=501)
+    exchange_store.mark_exchange_completed.assert_awaited_once_with("exchange-1")
+
+
+@pytest.mark.asyncio
+async def test_persisted_unavailable_responder_is_reassigned_before_ai_or_slot():
+    """Устаревший responder не занимает свой слот и заменяется до генерации ответа."""
+    replacement_client = SimpleNamespace(send_message=AsyncMock())
+    stale_exchange = {
+        "exchange_id": "exchange-1",
+        "initiator_bot_id": "anna",
+        "responder_bot_id": "missing",
+        "topic": "Тема",
+        "question_text": "Вопрос",
+        "initiator_message_id": 501,
+        "responder_text": None,
+    }
+    reassigned_exchange = {**stale_exchange, "responder_bot_id": "john"}
+    exchange_store = SimpleNamespace(
+        get_due_started_exchange=AsyncMock(return_value=stale_exchange),
+        reassign_after_permanent_send_error=AsyncMock(),
+        get_exchange=AsyncMock(return_value=reassigned_exchange),
+        mark_responder_generated=AsyncMock(),
+        mark_exchange_completed=AsyncMock(),
+        mark_exchange_skipped=AsyncMock(),
+    )
+    scheduled_slot_calls: list[str] = []
+
+    def scheduled_slot(bot_id: str):
+        scheduled_slot_calls.append(bot_id)
+        return _ScheduledSlot(True)
+
+    manager = SimpleNamespace(
+        active_bot_ids=["anna", "john"],
+        scheduled_slot=scheduled_slot,
+        get_client=lambda _bot_id: SimpleNamespace(client=replacement_client),
+    )
+    ai = SimpleNamespace(generate_reply=AsyncMock(return_value="Ответ Джона"))
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md"),
+            SwarmBotProfile(id="john", session_string="john", persona_file="john.md"),
+        ],
+        manager=manager,
+        topic_selector=SimpleNamespace(),
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="prompt")),
+        ai_client=ai,
+        history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
+        exchange_store=exchange_store,
+        group_target="@chat",
+    )
+
+    assert await orchestrator.run_once() is True
+    exchange_store.reassign_after_permanent_send_error.assert_awaited_once_with(
+        "exchange-1", stage="responder", replacement_bot_id="john", counterpart_bot_id="anna"
+    )
+    assert scheduled_slot_calls == ["john"]
+    ai.generate_reply.assert_awaited_once()
+    replacement_client.send_message.assert_awaited_once_with("@chat", "Ответ Джона", reply_to=501)
+
+
+@pytest.mark.asyncio
+async def test_persisted_unavailable_initiator_is_reassigned_before_ai_or_slot():
+    """Устаревший initiator не должен вызывать KeyError и заменяется до генерации вопроса."""
+    replacement_client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=501)))
+    stale_exchange = {
+        "exchange_id": "exchange-1",
+        "initiator_bot_id": "missing",
+        "responder_bot_id": "john",
+        "topic": "Тема",
+        "initiator_scheduled_at": datetime(2026, 4, 20, 19, 0, tzinfo=UTC),
+    }
+    reassigned_exchange = {**stale_exchange, "initiator_bot_id": "anna"}
+    exchange_store = SimpleNamespace(
+        reassign_after_permanent_send_error=AsyncMock(),
+            get_exchange=AsyncMock(return_value=reassigned_exchange),
+            get_recent_questions=AsyncMock(return_value=[]),
+            get_recent_questions_by_bot=AsyncMock(return_value=[]),
+            get_recent_question_signatures=AsyncMock(return_value=set()),
+        mark_initiator_generated=AsyncMock(),
+        mark_exchange_started=AsyncMock(),
+        mark_exchange_completed=AsyncMock(),
+        mark_exchange_skipped=AsyncMock(),
+    )
+    scheduled_slot_calls: list[str] = []
+
+    def scheduled_slot(bot_id: str):
+        scheduled_slot_calls.append(bot_id)
+        return _ScheduledSlot(True)
+
+    ai = SimpleNamespace(start_topic=AsyncMock(return_value="Новый вопрос"))
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md"),
+            SwarmBotProfile(id="john", session_string="john", persona_file="john.md"),
+        ],
+        manager=SimpleNamespace(
+            active_bot_ids=["anna", "john"],
+            scheduled_slot=scheduled_slot,
+            get_client=lambda _bot_id: SimpleNamespace(client=replacement_client),
+        ),
+        topic_selector=SimpleNamespace(topics=[]),
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="prompt")),
+        ai_client=ai,
+        history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
+        exchange_store=exchange_store,
+        group_target="@chat",
+        max_turns_per_exchange=1,
+    )
+
+    assert await orchestrator._run_due_planned_exchange(
+        exchange=stale_exchange,
+        now=datetime(2026, 4, 20, 19, 1, tzinfo=UTC),
+    ) is True
+    exchange_store.reassign_after_permanent_send_error.assert_awaited_once_with(
+        "exchange-1", stage="initiator", replacement_bot_id="anna", counterpart_bot_id="john"
+    )
+    assert scheduled_slot_calls == ["anna"]
+    ai.start_topic.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_persisted_unavailable_responder_without_replacement_is_skipped():
+    """Устаревший responder без замены не зацикливает due exchange."""
+    exchange_store = SimpleNamespace(
+        get_due_started_exchange=AsyncMock(
+            return_value={
+                "exchange_id": "exchange-1",
+                "initiator_bot_id": "anna",
+                "responder_bot_id": "missing",
+                "topic": "Тема",
+                "question_text": "Вопрос",
+            }
+        ),
+        mark_exchange_skipped=AsyncMock(),
+    )
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md")],
+        manager=SimpleNamespace(active_bot_ids=["anna"], scheduled_slot=AsyncMock()),
+        topic_selector=SimpleNamespace(),
+        prompt_composer=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
+        history=SimpleNamespace(),
+        exchange_store=exchange_store,
+        group_target="@chat",
+    )
+
+    assert await orchestrator.run_once() is True
+    exchange_store.mark_exchange_skipped.assert_awaited_once_with("exchange-1", "scheduled_responder_bot_unavailable")
 
 
 @pytest.mark.asyncio
@@ -257,7 +1072,7 @@ async def test_orchestrator_creates_only_one_exchange_per_window():
         manager=SimpleNamespace(),
         topic_selector=SimpleNamespace(),
         prompt_composer=SimpleNamespace(),
-        gemini_client=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
         history=SimpleNamespace(),
         exchange_store=exchange_store,
         group_target="@chat",
@@ -272,6 +1087,276 @@ async def test_orchestrator_creates_only_one_exchange_per_window():
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_important_service_cadence_uses_utc_calendar_days():
+    """Проверяет, что важный вопрос после 5 июля снова доступен только 8 июля."""
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[],
+        manager=SimpleNamespace(),
+        topic_selector=SimpleNamespace(),
+        prompt_composer=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
+        history=SimpleNamespace(),
+        exchange_store=SimpleNamespace(),
+        now_provider=lambda: datetime(2026, 7, 7, 10, 0, tzinfo=UTC),
+    )
+    latest = {"started_at": "2026-07-05 18:00:00", "created_at": "2026-07-05 18:00:00"}
+
+    assert orchestrator._important_service_is_due(latest, datetime(2026, 7, 7, 10, 0, tzinfo=UTC)) is False
+    assert orchestrator._important_service_is_due(latest, datetime(2026, 7, 8, 10, 0, tzinfo=UTC)) is True
+
+
+def test_orchestrator_rotates_important_service_scenarios():
+    """Проверяет фиксированную очередь important-service сценариев."""
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[],
+        manager=SimpleNamespace(),
+        topic_selector=SimpleNamespace(),
+        prompt_composer=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
+        history=SimpleNamespace(),
+        exchange_store=SimpleNamespace(),
+        important_service_scenarios=IMPORTANT_SERVICE_SCENARIOS,
+    )
+
+    assert orchestrator._next_important_service_scenario(None).key == "exchange_rub"
+    assert orchestrator._next_important_service_scenario("exchange_rub").key == "booking_airbnb"
+    assert orchestrator._next_important_service_scenario("booking_airbnb").key == "exchange_usdt"
+    assert orchestrator._next_important_service_scenario("exchange_usdt").key == "booking_booking"
+    assert orchestrator._next_important_service_scenario("booking_booking").key == "exchange_rub"
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_important_service_replaces_regular_topic_when_due():
+    """Проверяет, что due important-service exchange подменяет обычную тему окна."""
+    initiator_client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=701)))
+    responder_client = SimpleNamespace(send_message=AsyncMock())
+    exchange_store = SimpleNamespace(
+        get_due_started_exchange=AsyncMock(return_value=None),
+        get_exchange_by_window_key=AsyncMock(return_value=None),
+        get_latest_important_service_exchange=AsyncMock(return_value=None),
+        get_recent_bot_ids=AsyncMock(return_value=[]),
+        get_recent_questions=AsyncMock(return_value=[]),
+        get_recent_question_signatures=AsyncMock(return_value=set()),
+        create_exchange=AsyncMock(return_value="exchange-important"),
+        mark_exchange_started=AsyncMock(),
+        mark_exchange_completed=AsyncMock(),
+    )
+    prompt_composer = SimpleNamespace(compose=AsyncMock(return_value="system-init"))
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+            SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md", telegram_user_id=202),
+        ],
+        manager=_manager_with_clients(initiator_client, responder_client),
+        topic_selector=SimpleNamespace(topics=["Обычная тема"]),
+        prompt_composer=prompt_composer,
+        ai_client=SimpleNamespace(start_topic=AsyncMock(return_value="Где сейчас нормально поменять безналичные рубли?")),
+        history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
+        exchange_store=exchange_store,
+        group_id="danang",
+        group_city="Da Nang",
+        group_target="@danang",
+        group_chat_id=-100111,
+        active_windows_utc=["10-11"],
+        now_provider=lambda: datetime(2026, 7, 8, 10, 15, tzinfo=UTC),
+        randint_provider=lambda start, end: start,
+        important_service_scenarios=IMPORTANT_SERVICE_SCENARIOS,
+    )
+
+    assert await orchestrator.run_once() is True
+
+    exchange_store.get_latest_important_service_exchange.assert_awaited_once_with(
+        group_id="danang",
+        group_chat_id=-100111,
+    )
+    exchange_store.create_exchange.assert_awaited_once()
+    assert exchange_store.create_exchange.await_args.kwargs["exchange_kind"] == "important_service"
+    assert exchange_store.create_exchange.await_args.kwargs["important_scenario"] == "exchange_rub"
+    assert "important_service_question" in prompt_composer.compose.await_args.kwargs["exchange_context"]
+    assert "required_contact_for_answer" not in prompt_composer.compose.await_args.kwargs["exchange_context"]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_reselects_topic_when_initiator_recent_history_matches(monkeypatch):
+    """Проверяет, что bot-history заставляет выбрать другой topic из остатка пула."""
+    initiator_client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=801)))
+    responder_client = SimpleNamespace(send_message=AsyncMock())
+    exchange_store = SimpleNamespace(
+        get_due_started_exchange=AsyncMock(return_value=None),
+        get_exchange_by_window_key=AsyncMock(return_value=None),
+        get_recent_bot_ids=AsyncMock(return_value=[]),
+        get_recent_topic_keys_by_limit=AsyncMock(return_value=set()),
+        get_recent_questions=AsyncMock(return_value=[]),
+        get_recent_question_signatures=AsyncMock(return_value=set()),
+        create_exchange=AsyncMock(return_value="exchange-2"),
+        mark_exchange_started=AsyncMock(),
+        mark_exchange_completed=AsyncMock(),
+    )
+    history = SimpleNamespace(
+        get_session_history=AsyncMock(
+            return_value=[
+                {
+                    "role": "assistant",
+                    "text": "Старый вопрос?",
+                    "message_origin": "scheduled_initiator",
+                }
+            ]
+        ),
+        save_message=AsyncMock(),
+    )
+    monkeypatch.setattr("userbot.orchestrator.random.choice", lambda seq: seq[-1])
+
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+            SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md", telegram_user_id=202),
+        ],
+        manager=_manager_with_clients(initiator_client, responder_client),
+        topic_selector=SimpleNamespace(topics=["Старый вопрос?", "Другой вопрос?"]),
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system-init")),
+        ai_client=SimpleNamespace(
+            start_topic=AsyncMock(side_effect=["Старый вопрос?", "Новый вопрос?"]),
+        ),
+        history=history,
+        exchange_store=exchange_store,
+        group_id="danang",
+        group_city="Da Nang",
+        group_target="@danang",
+        group_chat_id=-100111,
+        active_windows_utc=["19-20"],
+        now_provider=lambda: datetime(2026, 4, 20, 19, 5, tzinfo=UTC),
+        randint_provider=lambda start, end: start,
+    )
+    orchestrator._build_exchange_decision = AsyncMock(
+        return_value=SimpleNamespace(
+            initiator=orchestrator.bot_profiles[0],
+            responder=orchestrator.bot_profiles[1],
+            topic="Старый вопрос?",
+            topic_key="старый вопрос",
+            recent_questions=[],
+        )
+    )
+
+    assert await orchestrator.run_once() is True
+
+    assert history.get_session_history.await_args.kwargs["chat_id"] == -100111
+    assert history.get_session_history.await_args.kwargs["bot_id"] == "anna"
+    assert history.get_session_history.await_args.kwargs["limit"] == 50
+    assert orchestrator.ai_client.start_topic.await_count == 2
+    assert orchestrator.ai_client.start_topic.await_args_list[0].kwargs["topic"] == "Старый вопрос?"
+    assert orchestrator.ai_client.start_topic.await_args_list[1].kwargs["topic"] == "Другой вопрос?"
+    assert history.save_message.await_args.kwargs["text"] == "Новый вопрос?"
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_important_service_respects_existing_window_exchange():
+    """Проверяет, что important-service не создаёт второй exchange в занятом окне."""
+    exchange_store = SimpleNamespace(
+        get_due_started_exchange=AsyncMock(return_value=None),
+        get_exchange_by_window_key=AsyncMock(return_value={"exchange_id": "regular", "status": "completed"}),
+        get_latest_important_service_exchange=AsyncMock(return_value=None),
+        create_exchange=AsyncMock(),
+    )
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+            SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md", telegram_user_id=202),
+        ],
+        manager=SimpleNamespace(),
+        topic_selector=SimpleNamespace(),
+        prompt_composer=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
+        history=SimpleNamespace(),
+        exchange_store=exchange_store,
+        group_target="@chat",
+        active_windows_utc=["10-11"],
+        now_provider=lambda: datetime(2026, 7, 8, 10, 15, tzinfo=UTC),
+    )
+
+    assert await orchestrator.run_once() is False
+    exchange_store.get_latest_important_service_exchange.assert_not_called()
+    exchange_store.create_exchange.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_important_service_respects_human_activity_gate():
+    """Проверяет, что important-service использует общий human-activity gate."""
+    exchange_store = SimpleNamespace(
+        get_due_started_exchange=AsyncMock(return_value=None),
+        get_latest_important_service_exchange=AsyncMock(return_value=None),
+        create_exchange=AsyncMock(),
+    )
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+            SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md", telegram_user_id=202),
+        ],
+        manager=SimpleNamespace(),
+        topic_selector=SimpleNamespace(),
+        prompt_composer=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
+        history=SimpleNamespace(),
+        exchange_store=exchange_store,
+        group_target="@chat",
+        active_windows_utc=["10-11"],
+        now_provider=lambda: datetime(2026, 7, 8, 10, 15, tzinfo=UTC),
+        skip_if_recent_human_activity=True,
+        human_activity_checker=lambda: True,
+    )
+
+    assert await orchestrator.run_once() is False
+    exchange_store.get_latest_important_service_exchange.assert_not_called()
+    exchange_store.create_exchange.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_important_service_reply_context_mentions_required_contact():
+    """Проверяет prompt-context ответа для important-service exchange."""
+    initiator_client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=501)))
+    responder_client = SimpleNamespace(send_message=AsyncMock())
+    exchange_store = SimpleNamespace(
+        get_due_started_exchange=AsyncMock(
+            return_value={
+                "exchange_id": "exchange-important",
+                "initiator_bot_id": "anna",
+                "responder_bot_id": "mike",
+                "topic": IMPORTANT_SERVICE_SCENARIOS[0].question_intent,
+                "question_text": "Где можно обменять безналичные рубли?",
+                "initiator_message_id": 501,
+                "exchange_kind": "important_service",
+                "important_scenario": "exchange_rub",
+            }
+        ),
+        mark_exchange_completed=AsyncMock(),
+    )
+    prompt_composer = SimpleNamespace(compose=AsyncMock(return_value="system-reply"))
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+            SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md", telegram_user_id=202),
+        ],
+        manager=_manager_with_clients(initiator_client, responder_client),
+        topic_selector=SimpleNamespace(),
+        prompt_composer=prompt_composer,
+        ai_client=SimpleNamespace(
+            generate_reply=AsyncMock(return_value="Я бы через https://t.me/tt_exchenge_bot/antex попробовал.")
+        ),
+        history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
+        exchange_store=exchange_store,
+        group_target="@chat",
+        now_provider=lambda: datetime(2026, 7, 8, 10, 20, tzinfo=UTC),
+    )
+
+    assert await orchestrator.run_once() is True
+
+    context = prompt_composer.compose.await_args.kwargs["exchange_context"]
+    assert "important_service_answer" in context
+    assert "exchange_rub" in context
+    assert "Пример стиля" not in context
+    assert "Не копируй пример" not in context
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_resolves_group_target_per_sending_client():
     """Проверяет отдельный резолв entity группы для отправителя вопроса."""
     initiator_client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=501)))
@@ -279,14 +1364,13 @@ async def test_orchestrator_resolves_group_target_per_sending_client():
     exchange_store = SimpleNamespace(
         get_due_started_exchange=AsyncMock(return_value=None),
         get_exchange_by_window_key=AsyncMock(return_value=None),
-        get_recent_pairs=AsyncMock(return_value=[]),
-        get_recent_topic_keys=AsyncMock(return_value=set()),
+        get_recent_bot_ids=AsyncMock(return_value=[]),
+        get_recent_topic_keys_by_limit=AsyncMock(return_value=set()),
         get_recent_questions=AsyncMock(return_value=[]),
         get_recent_question_signatures=AsyncMock(return_value=set()),
         create_exchange=AsyncMock(return_value="exchange-1"),
         mark_exchange_started=AsyncMock(),
         mark_exchange_completed=AsyncMock(),
-        mark_exchange_skipped=AsyncMock(),
     )
     history = SimpleNamespace(
         get_session_history=AsyncMock(return_value=[]),
@@ -303,7 +1387,7 @@ async def test_orchestrator_resolves_group_target_per_sending_client():
         manager=_manager_with_clients(initiator_client, responder_client),
         topic_selector=SimpleNamespace(topics=["Где поесть суп?"]),
         prompt_composer=SimpleNamespace(compose=AsyncMock(side_effect=["system-init", "system-reply"])),
-        gemini_client=SimpleNamespace(
+        ai_client=SimpleNamespace(
             start_topic=AsyncMock(return_value="Кто знает место с хорошим супом?"),
             generate_reply=AsyncMock(return_value="Мне нравится Pho 54."),
         ),
@@ -337,12 +1421,11 @@ async def test_orchestrator_skips_when_bot_is_busy():
     exchange_store = SimpleNamespace(
         get_due_started_exchange=AsyncMock(return_value=None),
         get_exchange_by_window_key=AsyncMock(return_value=None),
-        get_recent_pairs=AsyncMock(return_value=[]),
-        get_recent_topic_keys=AsyncMock(return_value=set()),
+        get_recent_bot_ids=AsyncMock(return_value=[]),
+        get_recent_topic_keys_by_limit=AsyncMock(return_value=set()),
         get_recent_questions=AsyncMock(return_value=[]),
         get_recent_question_signatures=AsyncMock(return_value=set()),
         create_exchange=AsyncMock(return_value="exchange-1"),
-        mark_exchange_skipped=AsyncMock(),
     )
     orchestrator = SwarmOrchestrator(
         bot_profiles=[
@@ -355,7 +1438,7 @@ async def test_orchestrator_skips_when_bot_is_busy():
         ),
         topic_selector=SimpleNamespace(topics=["Тема"]),
         prompt_composer=SimpleNamespace(),
-        gemini_client=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
         history=SimpleNamespace(),
         exchange_store=exchange_store,
         group_target="@chat",
@@ -374,7 +1457,7 @@ async def test_orchestrator_skips_when_bot_is_busy():
     )
 
     assert await orchestrator.run_once() is False
-    exchange_store.mark_exchange_skipped.assert_not_called()
+    exchange_store.create_exchange.assert_awaited_once()
 
 
 def test_orchestrator_picks_initiator_due_at_inside_remaining_active_window():
@@ -384,7 +1467,7 @@ def test_orchestrator_picks_initiator_due_at_inside_remaining_active_window():
         manager=SimpleNamespace(),
         topic_selector=SimpleNamespace(),
         prompt_composer=SimpleNamespace(),
-        gemini_client=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
         history=SimpleNamespace(),
         exchange_store=SimpleNamespace(),
         active_windows_utc=["3-7"],
@@ -408,14 +1491,13 @@ async def test_orchestrator_uses_second_precision_for_responder_due_time():
     exchange_store = SimpleNamespace(
         get_due_started_exchange=AsyncMock(return_value=None),
         get_exchange_by_window_key=AsyncMock(return_value=None),
-        get_recent_pairs=AsyncMock(return_value=[]),
-        get_recent_topic_keys=AsyncMock(return_value=set()),
+        get_recent_bot_ids=AsyncMock(return_value=[]),
+        get_recent_topic_keys_by_limit=AsyncMock(return_value=set()),
         get_recent_questions=AsyncMock(return_value=[]),
         get_recent_question_signatures=AsyncMock(return_value=set()),
         create_exchange=AsyncMock(return_value="exchange-1"),
         mark_exchange_started=AsyncMock(),
         mark_exchange_completed=AsyncMock(),
-        mark_exchange_skipped=AsyncMock(),
     )
     history = SimpleNamespace(
         get_session_history=AsyncMock(return_value=[]),
@@ -430,7 +1512,7 @@ async def test_orchestrator_uses_second_precision_for_responder_due_time():
         manager=_manager_with_clients(initiator_client, responder_client),
         topic_selector=SimpleNamespace(topics=["Где поесть суп?"]),
         prompt_composer=SimpleNamespace(compose=AsyncMock(side_effect=["system-init", "system-reply"])),
-        gemini_client=SimpleNamespace(
+        ai_client=SimpleNamespace(
             start_topic=AsyncMock(return_value="Кто знает место с хорошим супом?"),
             generate_reply=AsyncMock(return_value="Мне нравится Pho 54."),
         ),

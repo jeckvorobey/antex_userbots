@@ -1,11 +1,12 @@
 """Модуль хранения истории диалогов в SQLite через aiosqlite."""
 
 import logging
-from datetime import UTC, datetime
-from pathlib import Path
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import aiosqlite
+
+from storage.sqlite_database import SQLiteDatabase
 
 
 logger = logging.getLogger(__name__)
@@ -22,42 +23,44 @@ def _to_utc_sqlite_timestamp(value: datetime) -> str:
 class MessageHistory:
     """Хранит историю сообщений каждого пользователя в SQLite базе данных."""
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, database: SQLiteDatabase) -> None:
         """
         Инициализирует хранилище истории.
 
         Args:
-            db_path: Путь к файлу SQLite или ':memory:' для in-memory базы данных.
+            database: Общее открытое SQLite-подключение runtime.
         """
-        self.db_path = db_path
-        self._connection: aiosqlite.Connection | None = None
+        self.database = database
 
     async def init_db(self) -> None:
         """Создаёт таблицу messages в базе данных, если она не существует."""
         logger.info("Инициализация базы истории сообщений")
-        connection = await self._get_connection()
-        await connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                chat_id INTEGER,
-                bot_id TEXT,
-                exchange_id TEXT,
-                message_origin TEXT,
-                reply_to_message_id INTEGER,
-                role TEXT NOT NULL,
-                text TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        async def initialize(connection: aiosqlite.Connection) -> None:
+            await connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    chat_id INTEGER,
+                    bot_id TEXT,
+                    exchange_id TEXT,
+                    message_origin TEXT,
+                    reply_to_message_id INTEGER,
+                    role TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
             )
-            """
-        )
-        await connection.commit()
-        await self._ensure_column(connection, "chat_id", "INTEGER")
-        await self._ensure_column(connection, "bot_id", "TEXT")
-        await self._ensure_column(connection, "exchange_id", "TEXT")
-        await self._ensure_column(connection, "message_origin", "TEXT")
-        await self._ensure_column(connection, "reply_to_message_id", "INTEGER")
+            await self._ensure_column(connection, "chat_id", "INTEGER")
+            await self._ensure_column(connection, "bot_id", "TEXT")
+            await self._ensure_column(connection, "exchange_id", "TEXT")
+            await self._ensure_column(connection, "message_origin", "TEXT")
+            await self._ensure_column(connection, "reply_to_message_id", "INTEGER")
+            await self._ensure_column(connection, "created_at", "TIMESTAMP")
+            await self._ensure_indexes(connection)
+
+        await self.database.write("init_message_history", initialize)
         logger.info("Таблица истории сообщений готова")
 
     async def save_message(
@@ -86,36 +89,23 @@ class MessageHistory:
             role,
             len(text),
         )
-        connection = await self._get_connection()
         created_at = _to_utc_sqlite_timestamp(datetime.now(UTC))
-        await connection.execute(
-            """
-            INSERT INTO messages (
-                user_id,
-                chat_id,
-                bot_id,
-                exchange_id,
-                message_origin,
-                reply_to_message_id,
-                role,
-                text,
-                created_at
+        async def save(connection: aiosqlite.Connection) -> None:
+            await connection.execute(
+                """
+                INSERT INTO messages (
+                    user_id, chat_id, bot_id, exchange_id, message_origin,
+                    reply_to_message_id, role, text, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id, chat_id, bot_id, exchange_id, message_origin,
+                    reply_to_message_id, role, text, created_at,
+                ),
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                user_id,
-                chat_id,
-                bot_id,
-                exchange_id,
-                message_origin,
-                reply_to_message_id,
-                role,
-                text,
-                created_at,
-            ),
-        )
-        await connection.commit()
+
+        await self.database.write("save_message", save)
         logger.info("Сообщение сохранено в историю для user_id=%s", user_id)
 
     async def get_history(
@@ -132,8 +122,8 @@ class MessageHistory:
             Список словарей с ключами 'role' и 'text', упорядоченных по времени.
         """
         logger.info("Загрузка истории сообщений для user_id=%s с limit=%s", user_id, limit)
-        connection = await self._get_connection()
-        async with connection.execute(
+        rows = await self.database.fetch_all(
+            "get_user_history",
             """
             SELECT role, text
             FROM (
@@ -146,8 +136,7 @@ class MessageHistory:
             ORDER BY id ASC
             """,
             (user_id, limit),
-        ) as cursor:
-            rows = await cursor.fetchall()
+        )
         messages = [{"role": row[0], "text": row[1]} for row in rows]
         logger.info("Загружена история сообщений для user_id=%s: %s записей", user_id, len(messages))
         return messages
@@ -179,8 +168,6 @@ class MessageHistory:
             session_start,
             limit,
         )
-        connection = await self._get_connection()
-
         params: list[Any] = [chat_id]
         where_parts = ["chat_id = ?"]
         if bot_id is not None:
@@ -191,20 +178,21 @@ class MessageHistory:
             session_start_str = _to_utc_sqlite_timestamp(session_start)
             params.append(session_start_str)
             params.append(limit)
-            async with connection.execute(
+            rows = await self.database.fetch_all(
+                "get_session_history_since",
                 f"""
                 SELECT role, text, bot_id, exchange_id, message_origin, reply_to_message_id
                 FROM messages
-                WHERE {' AND '.join(where_parts)} AND datetime(created_at) >= datetime(?)
-                ORDER BY id ASC
+                WHERE {' AND '.join(where_parts)} AND created_at >= ?
+                ORDER BY created_at ASC, id ASC
                 LIMIT ?
                 """,
-                params,
-            ) as cursor:
-                rows = await cursor.fetchall()
+                tuple(params),
+            )
         else:
             params.append(limit)
-            async with connection.execute(
+            rows = await self.database.fetch_all(
+                "get_session_history",
                 f"""
                 SELECT role, text, bot_id, exchange_id, message_origin, reply_to_message_id FROM (
                     SELECT role, text, bot_id, exchange_id, message_origin, reply_to_message_id, id FROM messages
@@ -214,9 +202,8 @@ class MessageHistory:
                 ) sub
                 ORDER BY id ASC
                 """,
-                params,
-            ) as cursor:
-                rows = await cursor.fetchall()
+                tuple(params),
+            )
 
         messages = [
             {
@@ -234,36 +221,55 @@ class MessageHistory:
         )
         return messages
 
-    async def close(self) -> None:
-        """Закрывает открытое SQLite-соединение."""
-        if self._connection is None:
-            return
+    async def prune_older_than(self, *, retention_days: int) -> int:
+        """Удаляет старые сообщения по retention window."""
+        if retention_days <= 0:
+            logger.info("Пропуск очистки history: retention_days=%s", retention_days)
+            return 0
 
-        await self._connection.close()
-        self._connection = None
+        cutoff = _to_utc_sqlite_timestamp(datetime.now(UTC) - timedelta(days=retention_days))
+        async def prune(connection: aiosqlite.Connection) -> int:
+            cursor = await connection.execute(
+                "DELETE FROM messages WHERE created_at < ?",
+                (cutoff,),
+            )
+            return int(cursor.rowcount or 0)
 
-    async def _get_connection(self) -> aiosqlite.Connection:
-        """Возвращает общее подключение к SQLite, необходимое для :memory:."""
-        if self._connection is None:
-            self._ensure_parent_dir()
-            logger.info("Открытие SQLite-соединения: %s", self.db_path)
-            self._connection = await aiosqlite.connect(self.db_path)
-        return self._connection
-
-    def _ensure_parent_dir(self) -> None:
-        """Создаёт директорию для файла БД, если это файловый путь."""
-        if self.db_path == ":memory:":
-            return
-
-        parent = Path(self.db_path).parent
-        if str(parent) and str(parent) != ".":
-            parent.mkdir(parents=True, exist_ok=True)
+        deleted = await self.database.write("prune_message_history", prune)
+        logger.info("Очистка history завершена: retention_days=%s deleted=%s", retention_days, deleted)
+        return deleted
 
     async def _ensure_column(self, connection: aiosqlite.Connection, column_name: str, column_type: str) -> None:
         """Добавляет колонку в messages; пропускает только duplicate-column."""
         try:
             await connection.execute(f"ALTER TABLE messages ADD COLUMN {column_name} {column_type}")
-            await connection.commit()
         except aiosqlite.OperationalError as exc:
             if "duplicate column" not in str(exc).lower():
                 raise
+
+    async def _ensure_indexes(self, connection: aiosqlite.Connection) -> None:
+        """Создаёт индексы для горячих запросов истории."""
+        index_statements = [
+            """
+            CREATE INDEX IF NOT EXISTS idx_messages_user_id_id
+            ON messages (user_id, id DESC)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_messages_chat_id_id
+            ON messages (chat_id, id DESC)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_messages_chat_bot_id
+            ON messages (chat_id, bot_id, id DESC)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_messages_chat_created_at
+            ON messages (chat_id, created_at, id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_messages_chat_bot_created_at
+            ON messages (chat_id, bot_id, created_at, id)
+            """,
+        ]
+        for statement in index_statements:
+            await connection.execute(statement)

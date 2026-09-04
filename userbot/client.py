@@ -6,8 +6,29 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from telethon.errors import (
+    AuthKeyUnregisteredError,
+    FrozenMethodInvalidError,
+    SessionRevokedError,
+    UserDeactivatedBanError,
+    UserDeactivatedError,
+)
+
 
 logger = logging.getLogger(__name__)
+
+
+class AccountMessagingUnavailableError(RuntimeError):
+    """Telegram подтвердил, что сессия принадлежит глобально недоступному аккаунту."""
+
+
+GLOBAL_ACCOUNT_UNAVAILABLE_ERRORS = (
+    AuthKeyUnregisteredError,
+    FrozenMethodInvalidError,
+    SessionRevokedError,
+    UserDeactivatedBanError,
+    UserDeactivatedError,
+)
 
 
 class UserBotClient:
@@ -18,7 +39,7 @@ class UserBotClient:
         session_string: str,
         api_id: int,
         api_hash: str,
-        proxy_url: str | None = None,
+        proxy: str | None = None,
     ) -> None:
         """
         Инициализирует Telethon клиент.
@@ -27,12 +48,12 @@ class UserBotClient:
             session_string: Строковая Telethon-сессия.
             api_id: Telegram API ID (получить на https://my.telegram.org).
             api_hash: Telegram API Hash.
-            proxy_url: URL proxy для подключения к Telegram.
+            proxy: URL proxy для подключения к Telegram.
         """
         self.session_string = session_string
         self.api_id = api_id
         self.api_hash = api_hash
-        self.proxy_url = proxy_url
+        self.proxy = proxy
         self._client: Any | None = None
 
     async def start(self) -> None:
@@ -43,10 +64,14 @@ class UserBotClient:
                 self.session_string,
                 self.api_id,
                 self.api_hash,
-                proxy=_build_proxy_settings(self.proxy_url),
+                proxy=_build_proxy_settings(self.proxy),
             )
         logger.info("Подключение Telegram-клиента запущено")
-        await self._client.start()
+        try:
+            await self._client.start()
+        except GLOBAL_ACCOUNT_UNAVAILABLE_ERRORS as exc:
+            await self.stop()
+            raise AccountMessagingUnavailableError("Telegram отклонил сессию аккаунта") from exc
         logger.info("Telegram-клиент успешно запущен")
 
     async def stop(self) -> None:
@@ -105,6 +130,22 @@ class UserBotClient:
         logger.info("Запрос данных текущего Telegram-пользователя")
         return await client.get_me()
 
+    async def verify_global_messaging_eligibility(self) -> None:
+        """Проверяет глобальную доступность messaging API без публикации сообщения."""
+        client = self._require_client()
+        requests = _import_telethon_messaging_requests()
+        logger.info("Проверка глобальной доступности messaging API Telegram-аккаунта")
+        try:
+            await client(
+                requests.SetTypingRequest(
+                    peer=requests.InputPeerSelf(),
+                    action=requests.SendMessageTypingAction(),
+                )
+            )
+        except GLOBAL_ACCOUNT_UNAVAILABLE_ERRORS as exc:
+            raise AccountMessagingUnavailableError("Telegram подтвердил глобальную недоступность аккаунта") from exc
+        logger.info("Глобальная проверка messaging API Telegram-аккаунта пройдена")
+
     async def join_group(self, target: str) -> Any:
         """Вступает в публичную группу или канал по username/ссылке."""
         client = self._require_client()
@@ -139,7 +180,7 @@ def _build_telegram_client(
     """Создаёт экземпляр TelegramClient с ленивым импортом Telethon."""
     normalized_session_string = session_string.strip()
     if not normalized_session_string:
-        raise ValueError("SESSION_STRING не должен быть пустым")
+        raise ValueError("Строка Telethon-сессии не должна быть пустой")
 
     try:
         from telethon import TelegramClient
@@ -151,15 +192,15 @@ def _build_telegram_client(
     return TelegramClient(StringSession(normalized_session_string), api_id, api_hash, proxy=proxy)
 
 
-def _build_proxy_settings(proxy_url: str | None) -> dict[str, Any] | None:
+def _build_proxy_settings(proxy: str | None) -> dict[str, Any] | None:
     """Преобразует proxy URL в формат, поддерживаемый Telethon."""
-    if not proxy_url:
+    if not proxy:
         logger.debug("Proxy для Telethon не настроен")
         return None
 
-    parsed = urlparse(proxy_url)
+    parsed = urlparse(proxy)
     if not parsed.scheme or not parsed.hostname or parsed.port is None:
-        raise ValueError("Некорректный PROXY_URL: ожидается схема, хост и порт")
+        raise ValueError("Некорректный PROXY: ожидается схема, хост и порт")
 
     proxy_type = parsed.scheme.lower()
     if proxy_type not in {"http", "socks4", "socks5"}:
@@ -216,6 +257,25 @@ def _import_telethon_invite_requests() -> Any:
         raise RuntimeError("Пакет telethon не установлен") from exc
 
     return type("TelethonInviteRequests", (), {"ImportChatInviteRequest": ImportChatInviteRequest})
+
+
+def _import_telethon_messaging_requests() -> Any:
+    """Импортирует Telethon-типы для непубликуемой проверки messaging API."""
+    try:
+        from telethon.tl.functions.messages import SetTypingRequest
+        from telethon.tl.types import InputPeerSelf, SendMessageTypingAction
+    except ImportError as exc:
+        raise RuntimeError("Пакет telethon не установлен") from exc
+
+    return type(
+        "TelethonMessagingRequests",
+        (),
+        {
+            "SetTypingRequest": SetTypingRequest,
+            "InputPeerSelf": InputPeerSelf,
+            "SendMessageTypingAction": SendMessageTypingAction,
+        },
+    )
 
 
 def _extract_invite_hash(invite_link: str) -> str | None:

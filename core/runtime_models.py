@@ -46,6 +46,12 @@ class BotRuntimeState:
         self.last_error_text = error_text
         self.reconnect_attempts += 1
 
+    def mark_disabled(self, reason: str) -> None:
+        """Фиксирует запрет на использование аккаунта в текущем runtime."""
+        self.status = "disabled"
+        self.last_error_at = datetime.now(UTC)
+        self.last_error_text = reason
+
     def mark_failed(self, error_text: str) -> None:
         """Фиксирует фатальную ошибку и исключение бота из активного пула."""
         self.status = "error"
@@ -58,6 +64,30 @@ class BotRuntimeState:
 
 
 @dataclass(slots=True)
+class GroupRuntimeState:
+    """Runtime-состояние одной Telegram-группы."""
+
+    group_id: str
+    city: str
+    enabled: bool = True
+    group_chat_id: int | None = None
+    group_target: str | None = None
+    resolved_target: object | None = None
+    resolved_chat_id: int | None = None
+    last_resolved_at: datetime | None = None
+
+    def mark_resolved(self, *, target: object, chat_id: int | None = None) -> None:
+        """Фиксирует успешный resolve группы."""
+        self.resolved_target = target
+        self.resolved_chat_id = chat_id if chat_id is not None else self.group_chat_id
+        self.last_resolved_at = datetime.now(UTC)
+
+    def mark_disabled(self) -> None:
+        """Отключает runtime-обработку группы."""
+        self.enabled = False
+
+
+@dataclass(slots=True)
 class ExchangeDecision:
     """Результат выбора exchange orchestrator-ом."""
 
@@ -66,14 +96,6 @@ class ExchangeDecision:
     topic: str
     topic_key: str
     recent_questions: list[str] = field(default_factory=list)
-
-
-@dataclass(slots=True)
-class ExchangePlan:
-    """План одного scheduled-обмена между двумя ботами."""
-
-    exchange_id: str
-    initiator_bot_id: str
-    responder_bot_id: str
-    topic: str
-    max_turns: int = 2
+    exchange_kind: str = "regular"
+    important_scenario: str | None = None
+    important_answer_intent: str | None = None

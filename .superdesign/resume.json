@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "targets": {
+    "/overview": {
+      "targetKind": "new-ui",
+      "projectId": "1b3fae89-42b9-49b3-9a80-14fb4b2f4d04",
+      "activeDraftId": "555ca70f-0882-4a79-8448-fae21c0def25",
+      "designSystemPath": ".superdesign/design-system.md",
+      "contextFiles": [
+        ".superdesign/design-system.md"
+      ],
+      "fingerprints": {
+        ".superdesign/design-system.md": "fb8316d2bf404322e0345743769fb12ccd1c2fef26956aebc675eb6f633deaa7"
+      },
+      "drafts": {
+        "555ca70f-0882-4a79-8448-fae21c0def25": {
+          "title": "Swarm Control — Обзор",
+          "visualDirection": "balanced operations dashboard",
+          "currentVersion": 1
+        },
+        "89a994ab-295a-4a09-bbbf-26b59d0f343d": {
+          "title": "Swarm Control — Command Center",
+          "visualDirection": "dense operator command center",
+          "parentDraftId": "555ca70f-0882-4a79-8448-fae21c0def25",
+          "currentVersion": 1
+        },
+        "0e387c1c-b01f-4792-baa1-027b491be16a": {
+          "title": "Swarm Control — Modular Dashboard",
+          "visualDirection": "calm modular AI workspace",
+          "parentDraftId": "555ca70f-0882-4a79-8448-fae21c0def25",
+          "currentVersion": 1
+        }
+      },
+      "updatedAt": "2026-08-28T19:35:20Z"
+    }
+  }
+}
