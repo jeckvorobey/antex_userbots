@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime
@@ -22,6 +23,7 @@ OPENROUTER_FREE_MODELS_LOG = "logs/openrouter_free_models.json"
 OPENROUTER_FREE_MODELS_SORT = "intelligence-high-to-low"
 OPENROUTER_MODELS_PAGE_SIZE = 1000
 OPENROUTER_MODEL_PROBE_PROMPT = "Ответь только цифрой 1."
+OPENROUTER_MODEL_PROBE_TIMEOUT_SECONDS = 8.0
 
 
 async def write_free_models_catalog(
@@ -30,6 +32,7 @@ async def write_free_models_catalog(
     output_path: str | Path = OPENROUTER_FREE_MODELS_LOG,
     proxy: str | None = None,
     timeout_seconds: float = 45.0,
+    model_probe_timeout_seconds: float = OPENROUTER_MODEL_PROBE_TIMEOUT_SECONDS,
     configured_models: list[str] | tuple[str, ...] | None = None,
     http_client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
@@ -44,6 +47,7 @@ async def write_free_models_catalog(
                 client,
                 api_key=api_key,
                 configured_models=list(configured_models or ()),
+                timeout_seconds=model_probe_timeout_seconds,
             )
             payload = _build_success_payload(
                 models=models,
@@ -115,41 +119,70 @@ async def _probe_configured_models(
     *,
     api_key: str,
     configured_models: list[str],
+    timeout_seconds: float,
 ) -> list[dict[str, Any]]:
     """Проверяет каждую configured модель коротким безопасным Chat Completions запросом."""
-    checks: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    models = _unique_models(configured_models)
+    return list(
+        await asyncio.gather(
+            *(
+                _probe_one_configured_model(
+                    client,
+                    api_key=api_key,
+                    model=model,
+                    timeout_seconds=timeout_seconds,
+                )
+                for model in models
+            )
+        )
+    )
+
+
+async def _probe_one_configured_model(
+    client: httpx.AsyncClient,
+    *,
+    api_key: str,
+    model: str,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    """Проверяет одну configured модель коротким bounded Chat Completions запросом."""
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    try:
+        response = await client.post(
+            OPENROUTER_CHAT_COMPLETIONS_URL,
+            headers=headers,
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": OPENROUTER_MODEL_PROBE_PROMPT}],
+                "provider": {"zdr": False, "allow_fallbacks": True},
+                "stream": False,
+                "max_completion_tokens": 4,
+            },
+            timeout=timeout_seconds,
+        )
+        response.raise_for_status()
+        body = response.json()
+        answer = _extract_probe_answer(body)
+        return {
+            "connection_code": model,
+            "available": answer in {"1", "да", "yes", "true"},
+            "status_code": response.status_code,
+            "response": answer or "empty",
+        }
+    except Exception as exc:
+        return _build_probe_error_check(model=model, exc=exc, api_key=api_key)
+
+
+def _unique_models(configured_models: list[str]) -> list[str]:
+    """Оставляет configured модели в порядке конфига без дублей."""
+    models: list[str] = []
+    seen: set[str] = set()
     for model in configured_models:
         if model in seen:
             continue
         seen.add(model)
-        try:
-            response = await client.post(
-                OPENROUTER_CHAT_COMPLETIONS_URL,
-                headers=headers,
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": OPENROUTER_MODEL_PROBE_PROMPT}],
-                    "provider": {"zdr": False, "allow_fallbacks": True},
-                    "stream": False,
-                    "max_completion_tokens": 4,
-                },
-            )
-            response.raise_for_status()
-            body = response.json()
-            answer = _extract_probe_answer(body)
-            checks.append(
-                {
-                    "connection_code": model,
-                    "available": answer in {"1", "да", "yes", "true"},
-                    "status_code": response.status_code,
-                    "response": answer or "empty",
-                }
-            )
-        except Exception as exc:
-            checks.append(_build_probe_error_check(model=model, exc=exc, api_key=api_key))
-    return checks
+        models.append(model)
+    return models
 
 
 def _build_success_payload(

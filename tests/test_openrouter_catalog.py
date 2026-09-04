@@ -99,6 +99,7 @@ async def test_write_free_models_catalog_filters_sorts_and_writes_connection_cod
 async def test_write_free_models_catalog_checks_configured_model_availability(tmp_path):
     """Проверяет configured модели коротким Chat Completions probe."""
     posted_models = []
+    probe_timeouts = []
 
     async def handle(request):
         if request.url.path == "/api/v1/models":
@@ -119,6 +120,7 @@ async def test_write_free_models_catalog_checks_configured_model_availability(tm
 
         body = json.loads(request.content)
         posted_models.append(body["model"])
+        probe_timeouts.append(request.extensions["timeout"])
         if body["model"] == "available/model:free":
             assert body["messages"] == [{"role": "user", "content": "Ответь только цифрой 1."}]
             assert body["provider"] == {"zdr": False, "allow_fallbacks": True}
@@ -157,6 +159,10 @@ async def test_write_free_models_catalog_checks_configured_model_availability(tm
         "output_path": str(output_path),
     }
     assert posted_models == ["available/model:free", "broken/model:free"]
+    assert probe_timeouts == [
+        {"connect": 8.0, "read": 8.0, "write": 8.0, "pool": 8.0},
+        {"connect": 8.0, "read": 8.0, "write": 8.0, "pool": 8.0},
+    ]
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert payload["configured_model_checks"] == [
         {
