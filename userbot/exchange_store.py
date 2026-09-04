@@ -57,6 +57,7 @@ class ExchangeStore:
                 initiator_scheduled_at TIMESTAMP,
                 responder_scheduled_at TIMESTAMP,
                 initiator_message_id INTEGER,
+                responder_message_id INTEGER,
                 exchange_kind TEXT NOT NULL DEFAULT 'regular',
                 important_scenario TEXT,
                 status TEXT NOT NULL DEFAULT 'planned',
@@ -94,6 +95,7 @@ class ExchangeStore:
             await self._ensure_column(connection, "initiator_scheduled_at", "TIMESTAMP")
             await self._ensure_column(connection, "responder_scheduled_at", "TIMESTAMP")
             await self._ensure_column(connection, "initiator_message_id", "INTEGER")
+            await self._ensure_column(connection, "responder_message_id", "INTEGER")
             await self._ensure_column(connection, "exchange_kind", "TEXT NOT NULL DEFAULT 'regular'")
             await self._ensure_column(connection, "important_scenario", "TEXT")
             await self._ensure_column(connection, "skip_reason", "TEXT")
@@ -305,20 +307,37 @@ class ExchangeStore:
         )
         logger.info("Exchange помечен как started: exchange_id=%s", exchange_id)
 
-    async def mark_exchange_completed(self, exchange_id: str) -> None:
+    async def mark_exchange_completed(self, exchange_id: str, *, responder_message_id: int | None = None) -> None:
         """Помечает exchange как завершённый."""
         await self.database.execute(
             "mark_exchange_completed",
             """
             UPDATE scheduled_exchanges
             SET status = 'completed',
+                responder_message_id = COALESCE(?, responder_message_id),
                 completed_at = CURRENT_TIMESTAMP,
                 last_activity_at = CURRENT_TIMESTAMP
             WHERE exchange_id = ?
             """,
-            (exchange_id,),
+            (responder_message_id, exchange_id),
         )
         logger.info("Exchange помечен как completed: exchange_id=%s", exchange_id)
+
+    async def mark_exchange_skipped(self, exchange_id: str, reason: str) -> None:
+        """Помечает exchange терминально пропущенным без повторной отправки."""
+        await self.database.execute(
+            "mark_exchange_skipped",
+            """
+            UPDATE scheduled_exchanges
+            SET status = 'skipped',
+                skip_reason = ?,
+                completed_at = CURRENT_TIMESTAMP,
+                last_activity_at = CURRENT_TIMESTAMP
+            WHERE exchange_id = ?
+            """,
+            (reason, exchange_id),
+        )
+        logger.warning("Exchange помечен как skipped: exchange_id=%s reason=%s", exchange_id, reason)
 
     async def get_recent_bot_ids(self, limit: int, *, group_id: str | None = None, group_chat_id: int | None = None) -> list[str]:
         """Возвращает последние уникальные bot_id, которые писали scheduled-сообщения."""
@@ -349,6 +368,7 @@ class ExchangeStore:
                 FROM scheduled_exchanges
                 WHERE status = 'completed'
                   AND completed_at IS NOT NULL
+                  AND responder_message_id IS NOT NULL
                   {filter_sql}
             ),
             latest_bot_events AS (

@@ -230,6 +230,14 @@ class AddressedReplyRouter:
         remaining_delay = max(0.0, reply_due_at - self.monotonic_provider())
         if remaining_delay > 0:
             await asyncio.sleep(remaining_delay)
+        is_active = getattr(self.manager, "is_active", None)
+        if chat_id not in self.enabled_group_chat_ids or (callable(is_active) and not is_active(self.bot_profile.id)):
+            logger.warning(
+                "router: cancel delayed reply because runtime eligibility changed bot_id=%s chat_id=%s",
+                self.bot_profile.id,
+                chat_id,
+            )
+            return False
         try:
             await event.reply(response_text)
         except PERMANENT_TELEGRAM_SEND_ERRORS as exc:
@@ -251,7 +259,7 @@ class AddressedReplyRouter:
                     )
             manager_disable = getattr(self.manager, "disable_bot", None)
             if callable(manager_disable):
-                await manager_disable(self.bot_profile.id, reason=reason)
+                await manager_disable(self.bot_profile.id, reason=reason, defer_disconnect=True)
                 logger.error(
                     "router: permanently disabled bot after Telegram send error bot_id=%s chat_id=%s reason=%s auto_reuse=false",
                     self.bot_profile.id,

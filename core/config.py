@@ -8,6 +8,7 @@ import tomllib
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
+from urllib.parse import urlparse
 
 from dotenv import dotenv_values
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, SecretStr, ValidationError, field_validator, model_validator
@@ -63,6 +64,8 @@ def _optional_secret(v: object) -> SecretStr | None:
         return None
     if not isinstance(normalized, str):
         raise PydanticCustomError("invalid_secret_value", "Секрет должен быть строкой")
+    if urlparse(normalized).scheme.lower() not in {"http", "https", "socks5", "socks5h"}:
+        raise PydanticCustomError("invalid_proxy_scheme", "Unsupported proxy scheme")
     return SecretStr(normalized)
 
 

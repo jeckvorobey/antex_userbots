@@ -49,6 +49,7 @@
 - вопрос звучит как обычная реплика и не упоминает контакт;
 - ответ второго бота естественно и разными формулировками упоминает miniapp-ссылку `https://t.me/tt_exchenge_bot/antex`.
 - если scheduled LLM отключён или вернул unsafe output, important-service ответ использует короткий локальный fallback с той же разрешённой ссылкой.
+- important-service запускается только для групп с `max_turns_per_exchange >= 2`, а cooldown учитывает только фактически отправленные сообщения участников.
 
 ## Что нужно для запуска
 
@@ -174,7 +175,7 @@ temperature = 0.8
 - `data/history.db`, `ai/prompts/`, `ai/prompts/topics.md` и `ai/prompts/bots/` теперь задаются кодовыми defaults;
 - каждый `persona_file` должен реально существовать;
 - для каждого `session_env` должна быть переменная в `.env`;
-- реальные файлы `ai/prompts/**/*.md` являются частью этого production-инстанса и хранятся в git;
+- реальные файлы `ai/prompts/**/*.md` и `ai/prompts/important_service.toml` являются частью этого production-инстанса и хранятся в git;
 - `topics.md` содержит общие topic-intents, а не готовые вопросы под конкретный город.
 
 ### 4. Подготовить промты
@@ -185,8 +186,9 @@ Runtime читает реальные файлы:
 - `ai/prompts/start_topic.md`
 - `ai/prompts/topics.md`
 - `ai/prompts/wind_down_hint.md`
+- `ai/prompts/important_service.toml`
 
-Эти файлы уже лежат в репозитории. `start_topic.md` отвечает за превращение общей темы из `topics.md` в один вопрос для города текущей группы.
+Эти файлы уже лежат в репозитории. `start_topic.md` отвечает за превращение общей темы из `topics.md` в один вопрос для города текущей группы, а `important_service.toml` хранит циклические question/answer intents важных service-сценариев.
 
 Для важных service-вопросов orchestrator добавляет в prompt context markers:
 - `important_service_question` для вопроса инициатора;

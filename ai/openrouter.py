@@ -75,10 +75,12 @@ class OpenRouterClient(TextGenerationClient):
         client, http_client = self._client, self._http_client
         self._client = None
         self._http_client = None
-        if client is not None:
-            await client.__aexit__(None, None, None)
-        if http_client is not None:
-            await http_client.aclose()
+        try:
+            if client is not None:
+                await client.__aexit__(None, None, None)
+        finally:
+            if http_client is not None:
+                await http_client.aclose()
 
     async def _generate_text(self, operation: str, system_prompt: str, user_context: str) -> str:
         """Отправляет один provider-routed запрос и нормализует первый ответ."""

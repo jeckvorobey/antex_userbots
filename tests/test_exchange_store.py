@@ -65,7 +65,7 @@ async def test_exchange_store_persists_recent_bot_ids_topics_and_signatures(exch
         topic="Где есть суп?",
     )
     await exchange_store.mark_exchange_started(exchange_id, initiator_message_id=55, question_signature="Кто знает место с супом?")
-    await exchange_store.mark_exchange_completed(exchange_id)
+    await exchange_store.mark_exchange_completed(exchange_id, responder_message_id=56)
 
     bot_ids = await exchange_store.get_recent_bot_ids(2)
     topics = await exchange_store.get_recent_topic_keys_by_limit(1)
@@ -84,7 +84,7 @@ async def test_exchange_store_returns_recent_unique_bot_ids_by_message_order(exc
         topic="Первая тема",
     )
     await exchange_store.mark_exchange_started(first_exchange, initiator_message_id=101, question_signature="Первый вопрос")
-    await exchange_store.mark_exchange_completed(first_exchange)
+    await exchange_store.mark_exchange_completed(first_exchange, responder_message_id=201)
 
     second_exchange = await exchange_store.create_exchange(
         initiator_bot_id="john",
@@ -92,7 +92,7 @@ async def test_exchange_store_returns_recent_unique_bot_ids_by_message_order(exc
         topic="Вторая тема",
     )
     await exchange_store.mark_exchange_started(second_exchange, initiator_message_id=102, question_signature="Второй вопрос")
-    await exchange_store.mark_exchange_completed(second_exchange)
+    await exchange_store.mark_exchange_completed(second_exchange, responder_message_id=202)
 
     third_exchange = await exchange_store.create_exchange(
         initiator_bot_id="lena",
@@ -108,6 +108,19 @@ async def test_exchange_store_returns_recent_unique_bot_ids_by_message_order(exc
     limited_bot_ids = await exchange_store.get_recent_bot_ids(2)
 
     assert limited_bot_ids == ["lena", "kate"]
+
+
+async def test_one_turn_exchange_does_not_cool_down_unsent_responder(exchange_store):
+    """Completed без responder_message_id учитывает только фактического initiator-а."""
+    exchange_id = await exchange_store.create_exchange(
+        initiator_bot_id="anna",
+        responder_bot_id="mike",
+        topic="Одноходовая тема",
+    )
+    await exchange_store.mark_exchange_started(exchange_id, initiator_message_id=101, question_signature="Вопрос")
+    await exchange_store.mark_exchange_completed(exchange_id)
+
+    assert await exchange_store.get_recent_bot_ids(2) == ["anna"]
 
 
 async def test_exchange_store_returns_recent_topic_keys_by_limit(exchange_store):
@@ -160,6 +173,22 @@ async def test_exchange_store_tracks_window_and_due_stages(exchange_store):
     assert due_started["question_text"] == "Кто где сейчас живёт ближе к морю?"
 
 
+async def test_exchange_store_marks_unreassignable_exchange_skipped(exchange_store):
+    """Concrete store переводит exchange в terminal skipped state."""
+    exchange_id = await exchange_store.create_exchange(
+        initiator_bot_id="anna",
+        responder_bot_id="mike",
+        topic="Недоступная тема",
+    )
+
+    await exchange_store.mark_exchange_skipped(exchange_id, "scheduled_responder_bot_unavailable")
+
+    exchange = await exchange_store.get_exchange(exchange_id)
+    assert exchange is not None
+    assert exchange["status"] == "skipped"
+    assert exchange["skip_reason"] == "scheduled_responder_bot_unavailable"
+
+
 async def test_exchange_store_scopes_queries_by_group(exchange_store):
     """Проверяет изоляцию persisted anti-repeat state между группами."""
     danang_exchange = await exchange_store.create_exchange(
@@ -177,7 +206,7 @@ async def test_exchange_store_scopes_queries_by_group(exchange_store):
         question_signature="Где суп?",
         responder_scheduled_at=datetime(2026, 4, 20, 19, 10, tzinfo=UTC),
     )
-    await exchange_store.mark_exchange_completed(danang_exchange)
+    await exchange_store.mark_exchange_completed(danang_exchange, responder_message_id=502)
 
     batumi_exchange = await exchange_store.create_exchange(
         group_id="batumi",
@@ -242,6 +271,7 @@ async def test_exchange_store_migrates_legacy_table_idempotently(tmp_path):
     assert "group_chat_id" in columns
     assert "exchange_kind" in columns
     assert "important_scenario" in columns
+    assert "responder_message_id" in columns
     assert "last_activity_at" in columns
 
 

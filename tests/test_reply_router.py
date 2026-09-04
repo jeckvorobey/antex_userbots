@@ -217,7 +217,9 @@ async def test_router_persists_quarantine_after_permanent_send_error():
         reason="telegram_human_reply_send_forbidden:UserBannedInChannelError",
     )
     manager.disable_bot.assert_awaited_once_with(
-        "anna", reason="telegram_human_reply_send_forbidden:UserBannedInChannelError"
+        "anna",
+        reason="telegram_human_reply_send_forbidden:UserBannedInChannelError",
+        defer_disconnect=True,
     )
 
 
@@ -247,8 +249,79 @@ async def test_router_disables_bot_when_quarantine_persistence_fails():
         await router.handle_event(event)
 
     manager.disable_bot.assert_awaited_once_with(
-        "anna", reason="telegram_human_reply_send_forbidden:UserBannedInChannelError"
+        "anna",
+        reason="telegram_human_reply_send_forbidden:UserBannedInChannelError",
+        defer_disconnect=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_router_does_not_publish_after_group_is_removed_during_delay(monkeypatch):
+    """Отложенный reply повторно проверяет актуальный allowlist перед отправкой."""
+    sleep_started = asyncio.Event()
+    release_sleep = asyncio.Event()
+
+    async def controlled_sleep(_delay):
+        sleep_started.set()
+        await release_sleep.wait()
+
+    monkeypatch.setattr(reply_router, "asyncio", SimpleNamespace(sleep=controlled_sleep), raising=False)
+    enabled_groups = {-100555}
+    router = AddressedReplyRouter(
+        bot_profile=SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+        history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system")),
+        ai_client=SimpleNamespace(generate_reply=AsyncMock(return_value="Ответ")),
+        swarm_user_ids=set(),
+        enabled_group_chat_ids=enabled_groups,
+        monotonic_provider=lambda: 1000.0,
+    )
+    event = _build_event(sender_id=999)
+
+    task = asyncio.create_task(router.handle_event(event))
+    await sleep_started.wait()
+    enabled_groups.clear()
+    release_sleep.set()
+
+    assert await task is False
+    event.reply.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_router_does_not_publish_after_bot_is_disabled_during_delay(monkeypatch):
+    """Отложенный reply повторно проверяет active pool перед отправкой."""
+    sleep_started = asyncio.Event()
+    release_sleep = asyncio.Event()
+
+    async def controlled_sleep(_delay):
+        sleep_started.set()
+        await release_sleep.wait()
+
+    monkeypatch.setattr(reply_router, "asyncio", SimpleNamespace(sleep=controlled_sleep), raising=False)
+    active = {"value": True}
+    manager = SimpleNamespace(
+        is_active=lambda _bot_id: active["value"],
+        human_slot=lambda _bot_id: _AsyncNullContext(),
+    )
+    router = AddressedReplyRouter(
+        bot_profile=SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+        history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system")),
+        ai_client=SimpleNamespace(generate_reply=AsyncMock(return_value="Ответ")),
+        swarm_user_ids=set(),
+        enabled_group_chat_ids={-100555},
+        manager=manager,
+        monotonic_provider=lambda: 1000.0,
+    )
+    event = _build_event(sender_id=999)
+
+    task = asyncio.create_task(router.handle_event(event))
+    await sleep_started.wait()
+    active["value"] = False
+    release_sleep.set()
+
+    assert await task is False
+    event.reply.assert_not_awaited()
 
 
 @pytest.mark.asyncio

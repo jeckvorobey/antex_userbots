@@ -95,6 +95,30 @@ async def test_swarm_manager_disables_bot_after_permanent_send_error():
 
 
 @pytest.mark.asyncio
+async def test_swarm_manager_can_defer_disconnect_until_handler_returns():
+    """Runtime-state меняется сразу, а disconnect не отменяет текущий event handler."""
+    fake_client = SimpleNamespace(
+        start=AsyncMock(),
+        stop=AsyncMock(),
+        get_current_user=AsyncMock(return_value=SimpleNamespace(id=101)),
+        run_until_disconnected=AsyncMock(),
+    )
+    manager = SwarmManager(
+        bot_profiles=[SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md")],
+        client_factory=lambda _profile: fake_client,
+    )
+    await manager.start()
+
+    await manager.disable_bot("anna", reason="permanent", defer_disconnect=True)
+
+    assert manager.is_active("anna") is False
+    fake_client.stop.assert_not_awaited()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    fake_client.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_swarm_manager_disables_frozen_bot_when_global_messaging_check_fails():
     """Глобально недоступный аккаунт останавливается и требует ручной проверки."""
     fake_client = SimpleNamespace(
@@ -164,6 +188,67 @@ async def test_swarm_manager_stops_startup_when_global_quarantine_cannot_be_pers
     assert manager.runtime_states["anna"].status == "disabled"
     anna_client.stop.assert_awaited_once()
     john_client.start.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_swarm_manager_rolls_back_activation_when_success_snapshot_fails():
+    """Ошибка available snapshot не оставляет активный Telegram-клиент."""
+    fake_client = SimpleNamespace(
+        start=AsyncMock(),
+        stop=AsyncMock(),
+        get_current_user=AsyncMock(return_value=SimpleNamespace(id=101)),
+        run_until_disconnected=AsyncMock(),
+    )
+    availability = AsyncMock(side_effect=[RuntimeError("snapshot unavailable"), None])
+    profile = SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md")
+    manager = SwarmManager(
+        bot_profiles=[profile],
+        client_factory=lambda _profile: fake_client,
+        startup_availability_bot=availability,
+    )
+
+    await manager.start()
+
+    assert manager.active_bot_ids == []
+    assert manager.clients == {}
+    assert manager.is_active("anna") is False
+    fake_client.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_global_quarantine_is_persisted_before_transient_snapshot():
+    """Ошибка startup snapshot не препятствует durable global quarantine."""
+    fake_client = SimpleNamespace(
+        start=AsyncMock(),
+        stop=AsyncMock(),
+        get_current_user=AsyncMock(return_value=SimpleNamespace(id=101)),
+        run_until_disconnected=AsyncMock(),
+    )
+    call_order: list[str] = []
+
+    async def startup_hook(_profile, _client):
+        raise AccountMessagingUnavailableError("global messaging unavailable")
+
+    async def quarantine_bot(_bot_id, _reason):
+        call_order.append("quarantine")
+
+    async def availability_bot(_bot_id, _is_available, _reason):
+        call_order.append("snapshot")
+        raise RuntimeError("snapshot unavailable")
+
+    manager = SwarmManager(
+        bot_profiles=[SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md")],
+        client_factory=lambda _profile: fake_client,
+        startup_hook=startup_hook,
+        startup_quarantine_bot=quarantine_bot,
+        startup_availability_bot=availability_bot,
+    )
+
+    with pytest.raises(RuntimeError, match="snapshot unavailable"):
+        await manager.start()
+
+    assert call_order == ["quarantine", "snapshot"]
+    assert manager.active_bot_ids == []
 
 
 @pytest.mark.asyncio

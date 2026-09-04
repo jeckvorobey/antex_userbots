@@ -82,6 +82,33 @@ def test_extract_event_chat_id_normalizes_positive_fallback_from_resolved_entity
     assert run._extract_event_chat_id(channel, 123456) == -(10**12 + 123456)
 
 
+def test_extract_resolved_chat_id_uses_marked_channel_id_for_persistence():
+    """Scheduled history target-only группы совпадает с Telegram event.chat_id."""
+    from telethon.tl.types import Channel, ChatPhotoEmpty
+
+    import run
+
+    channel = Channel(
+        id=123456,
+        title="Group",
+        photo=ChatPhotoEmpty(),
+        date=None,
+        megagroup=True,
+    )
+
+    assert run._extract_resolved_chat_id(channel, None) == -(10**12 + 123456)
+
+
+def test_private_invite_link_detection_is_case_insensitive():
+    """Scheme и host invite URL не влияют на приватную классификацию."""
+    import run
+
+    target = "HTTPS://T.ME/+SecretInviteHash"
+
+    assert run._is_invite_link(target) is True
+    assert run._redact_group_target(target) == "<private invite link>"
+
+
 def test_enabled_groups_do_not_fall_back_when_explicit_groups_are_all_disabled():
     """Явно отключённая группа не активируется через legacy compatibility fields."""
     import run
@@ -301,7 +328,11 @@ async def test_build_runtime_context_preserves_init_error_and_closes_all_resourc
     topic_selector = SimpleNamespace(load=AsyncMock(side_effect=RuntimeError("topics failed")))
     monkeypatch.setattr(run, "SQLiteDatabase", lambda _path: database)
     monkeypatch.setattr(run, "MessageHistory", lambda _database: history)
-    monkeypatch.setattr(run, "PromptLoader", lambda _path: object())
+    monkeypatch.setattr(
+        run,
+        "PromptLoader",
+        lambda _path: SimpleNamespace(load_important_service_scenarios=AsyncMock(return_value=())),
+    )
     monkeypatch.setattr(run, "OpenRouterClient", lambda **_kwargs: ai_client)
     monkeypatch.setattr(run, "TopicSelector", lambda _path: topic_selector)
     settings = SimpleNamespace(
@@ -591,7 +622,9 @@ async def _build_swarm_tick_with_distinct_clients(monkeypatch, tmp_path):
 
     await run._run_swarm_mode(settings, runtime, scheduler)
     resolve_group_target.reset_mock()
-    return scheduler.add_job.call_args.args[0], manager, clients, resolve_group_target
+    tick = scheduler.add_job.call_args.args[0]
+    tick.test_runtime = runtime
+    return tick, manager, clients, resolve_group_target
 
 
 @pytest.mark.asyncio
@@ -613,6 +646,75 @@ async def test_scheduler_tick_skips_group_resolution_without_active_clients(monk
 
     assert await tick() is False
     resolve_group_target.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_settings_reload_updates_shared_ai_safety_limits(monkeypatch, tmp_path):
+    """Reload применяет изменяемые safety limits к общему AI-клиенту."""
+    import copy
+    import run
+
+    class ReloadWatcher:
+        def __init__(self, settings):
+            reloaded = copy.copy(settings)
+            reloaded.swarm_max_output_chars = 777
+            reloaded.swarm_max_mentions_per_message = 1
+            self.poll = Mock(side_effect=[reloaded, None])
+
+    monkeypatch.setattr(run, "SettingsReloadWatcher", ReloadWatcher)
+    tick, _manager, _clients, _resolve = await _build_swarm_tick_with_distinct_clients(
+        monkeypatch, tmp_path
+    )
+
+    await tick()
+
+    assert tick.test_runtime.ai_client.max_output_chars == 777
+    assert tick.test_runtime.ai_client.max_mentions_per_message == 1
+
+
+@pytest.mark.asyncio
+async def test_scheduler_retries_pending_reload_group_without_new_file_change(monkeypatch, tmp_path):
+    """Временно недоступная reload-группа повторно проверяется на следующем tick."""
+    import copy
+    import run
+
+    new_group = SimpleNamespace(
+        id="new",
+        city="New",
+        enabled=True,
+        group_chat_id=-100222,
+        group_target="@new",
+        active_windows_utc=[],
+        initiator_offset_minutes=(0, 0),
+        responder_delay_minutes=(0, 0),
+        max_turns_per_exchange=2,
+    )
+
+    class ReloadWatcher:
+        def __init__(self, settings):
+            reloaded = copy.copy(settings)
+            old_group = run._enabled_groups_from_settings(settings)[0]
+            reloaded.groups = [old_group, new_group]
+            reloaded.enabled_groups = [old_group, new_group]
+            self.poll = Mock(side_effect=[reloaded, None])
+
+    filter_groups = AsyncMock()
+
+    async def filter_side_effect(_manager, previous, candidates):
+        return [candidates[0]] if filter_groups.await_count == 1 else candidates
+
+    filter_groups.side_effect = filter_side_effect
+    monkeypatch.setattr(run, "SettingsReloadWatcher", ReloadWatcher)
+    monkeypatch.setattr(run, "_filter_reload_ready_groups", filter_groups)
+    tick, _manager, _clients, _resolve = await _build_swarm_tick_with_distinct_clients(
+        monkeypatch, tmp_path
+    )
+
+    await tick()
+    await tick()
+
+    assert filter_groups.await_count == 2
+    assert [group.id for group in filter_groups.await_args_list[1].args[2]] == ["legacy", "new"]
 
 
 def test_group_orchestrator_cache_rebuilds_on_signature_change_and_prunes():
@@ -1025,6 +1127,29 @@ async def test_multi_group_membership_scans_dialogs_once_for_all_groups(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_multi_group_membership_hook_reads_current_groups_on_reconnect(monkeypatch):
+    """Reconnect health-check использует актуальный registry групп после reload."""
+    import run
+
+    groups = [SimpleNamespace(id="old", enabled=True, group_chat_id=101, group_target="@old")]
+    wrapper = SimpleNamespace(
+        client=FakeTelegramClient("anna", 1, "hash"),
+        verify_global_messaging_eligibility=AsyncMock(),
+    )
+    monkeypatch.setattr(run.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(run, "_build_group_dialog_index", AsyncMock(return_value={}))
+    require_group = AsyncMock(return_value=SimpleNamespace(id=202))
+    monkeypatch.setattr(run, "_require_group_availability", require_group)
+    hook = run._build_multi_group_membership_startup_hook(groups=lambda: groups)
+    groups[:] = [SimpleNamespace(id="new", enabled=True, group_chat_id=202, group_target="@new")]
+
+    resolved = await hook(SimpleNamespace(id="anna"), wrapper)
+
+    assert set(resolved) == {"new"}
+    assert require_group.await_args.args[1].id == "new"
+
+
+@pytest.mark.asyncio
 async def test_multi_group_membership_logs_bot_write_permission(monkeypatch, caplog):
     """Проверяет стартовый лог возможности бота писать в группу."""
     import logging
@@ -1144,6 +1269,21 @@ async def test_reload_excludes_new_group_when_any_active_bot_cannot_write(monkey
     ready = await run._filter_reload_ready_groups(manager, [old_group], [old_group, new_group])
 
     assert ready == [old_group]
+
+
+@pytest.mark.asyncio
+async def test_reload_keeps_changed_groups_pending_when_active_pool_is_empty():
+    """Изменённая группа не проходит проверку vacuous truth без active bots."""
+    import run
+
+    manager = SimpleNamespace(active_bot_ids=[], get_client=Mock())
+    old_group = SimpleNamespace(id="old", enabled=True, group_chat_id=-1001, group_target="@old")
+    changed_group = SimpleNamespace(id="old", enabled=True, group_chat_id=-1002, group_target="@changed")
+
+    ready = await run._filter_reload_ready_groups(manager, [old_group], [changed_group])
+
+    assert ready == []
+    manager.get_client.assert_not_called()
 
 
 @pytest.mark.asyncio

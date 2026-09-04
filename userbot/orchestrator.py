@@ -5,13 +5,13 @@ from __future__ import annotations
 import logging
 import random
 from collections import Counter
-from dataclasses import dataclass
 from datetime import date
 from datetime import UTC, datetime, timedelta
 from typing import Any, Callable
 
 from telethon.errors import ChannelPrivateError, ChatWriteForbiddenError, UserBannedInChannelError, UserNotParticipantError
 
+from ai.prompt_loader import ImportantServiceScenario
 from core.runtime_models import ExchangeDecision, SwarmBotProfile
 from userbot.exchange_store import ExchangeStore, normalize_signature
 from userbot.scheduler import is_within_windows_utc, pick_random_datetime, pick_random_delay
@@ -35,39 +35,6 @@ IMPORTANT_SERVICE_CONTACT = "https://t.me/tt_exchenge_bot/antex"
 SAFE_SCHEDULED_REPLY_FALLBACK_TEXT = "Я бы уточнил это у тех, кто сталкивался с этим совсем недавно."
 SAFE_IMPORTANT_SERVICE_REPLY_FALLBACK_TEXT = (
     f"Можно обратиться сюда: {IMPORTANT_SERVICE_CONTACT} — там подскажут по обмену или оплате."
-)
-
-
-@dataclass(frozen=True, slots=True)
-class ImportantServiceScenario:
-    """Описание important-service сценария без готового финального текста."""
-
-    key: str
-    question_intent: str
-    answer_intent: str
-
-
-IMPORTANT_SERVICE_SCENARIOS: tuple[ImportantServiceScenario, ...] = (
-    ImportantServiceScenario(
-        key="exchange_rub",
-        question_intent="Где можно обменять безналичные рубли?",
-        answer_intent=f"Разговорно посоветуй обратиться в {IMPORTANT_SERVICE_CONTACT} для обмена безналичных рублей.",
-    ),
-    ImportantServiceScenario(
-        key="booking_airbnb",
-        question_intent="Как забронировать и оплатить Airbnb рублями или USDT?",
-        answer_intent=f"Разговорно посоветуй обратиться в {IMPORTANT_SERVICE_CONTACT} для помощи с оплатой Airbnb рублями или USDT.",
-    ),
-    ImportantServiceScenario(
-        key="exchange_usdt",
-        question_intent="Где можно обменять безналичный USDT?",
-        answer_intent=f"Разговорно посоветуй обратиться в {IMPORTANT_SERVICE_CONTACT} для обмена безналичного USDT.",
-    ),
-    ImportantServiceScenario(
-        key="booking_booking",
-        question_intent="Как забронировать и оплатить Booking рублями или USDT?",
-        answer_intent=f"Разговорно посоветуй обратиться в {IMPORTANT_SERVICE_CONTACT} для помощи с оплатой Booking рублями или USDT.",
-    ),
 )
 
 
@@ -100,6 +67,7 @@ class SwarmOrchestrator:
         resolve_group_target: Callable[[object], Any] | None = None,
         randint_provider: Callable[[int, int], int] | None = None,
         allow_external_llm_for_scheduled: bool = True,
+        important_service_scenarios: tuple[ImportantServiceScenario, ...] = (),
     ) -> None:
         self.bot_profiles = [profile for profile in bot_profiles if profile.enabled]
         self.disabled_bot_ids: set[str] = set()
@@ -125,6 +93,7 @@ class SwarmOrchestrator:
         self.resolve_group_target = resolve_group_target
         self.randint_provider = randint_provider or random.randint
         self.allow_external_llm_for_scheduled = allow_external_llm_for_scheduled
+        self.important_service_scenarios = important_service_scenarios
 
     async def run_once(self) -> bool:
         """Выполняет одну due-стадию scheduled exchange."""
@@ -242,6 +211,8 @@ class SwarmOrchestrator:
 
     async def _build_important_service_decision_if_due(self, now: datetime) -> ExchangeDecision | None:
         """Возвращает important-service decision, если группа достигла cadence."""
+        if self.max_turns_per_exchange <= 1 or not self.important_service_scenarios:
+            return None
         latest_getter = getattr(self.exchange_store, "get_latest_important_service_exchange", None)
         if not callable(latest_getter):
             return None
@@ -422,7 +393,13 @@ class SwarmOrchestrator:
                     initiator_text = await self._generate_non_repeating_question(
                         initiator_prompt=initiator_prompt, topic=decision.topic, recent_bot_questions=recent_initiator_questions,
                     )
-                    if not getattr(self.ai_client, "is_output_safe", lambda _text: True)(initiator_text):
+                    if (
+                        not getattr(self.ai_client, "is_output_safe", lambda _text: True)(initiator_text)
+                        or (
+                            decision.exchange_kind == IMPORTANT_SERVICE_KIND
+                            and IMPORTANT_SERVICE_CONTACT in initiator_text
+                        )
+                    ):
                         initiator_text = self._build_safe_start_topic(decision.topic)
                 else:
                     initiator_text = self._build_safe_start_topic(decision.topic)
@@ -535,7 +512,13 @@ class SwarmOrchestrator:
                     responder_text = await self.ai_client.generate_reply(
                         system_prompt=responder_prompt, history=responder_history, user_message=str(exchange["question_text"]),
                     )
-                    if not getattr(self.ai_client, "is_output_safe", lambda _text: True)(responder_text):
+                    if (
+                        not getattr(self.ai_client, "is_output_safe", lambda _text: True)(responder_text)
+                        or (
+                            exchange.get("exchange_kind") == IMPORTANT_SERVICE_KIND
+                            and IMPORTANT_SERVICE_CONTACT not in responder_text
+                        )
+                    ):
                         responder_text = self._responder_fallback_text(exchange)
                 else:
                     responder_text = self._responder_fallback_text(exchange)
@@ -546,7 +529,11 @@ class SwarmOrchestrator:
             reply_to_message_id = exchange.get("initiator_message_id")
             responder_group_target = await self._resolve_group_target_for_client(responder_client.client)
             try:
-                await responder_client.client.send_message(responder_group_target, responder_text, reply_to=reply_to_message_id)
+                responder_message = await responder_client.client.send_message(
+                    responder_group_target,
+                    responder_text,
+                    reply_to=reply_to_message_id,
+                )
             except PERMANENT_TELEGRAM_SEND_ERRORS as exc:
                 retry_exchange = await self._handle_permanent_send_error(
                     exchange_id=str(exchange["exchange_id"]), bot_id=responder.id,
@@ -571,7 +558,14 @@ class SwarmOrchestrator:
                 initiator_id,
             )
 
-        await self.exchange_store.mark_exchange_completed(str(exchange["exchange_id"]))
+        responder_message_id = getattr(responder_message, "id", None)
+        if isinstance(responder_message_id, int):
+            await self.exchange_store.mark_exchange_completed(
+                str(exchange["exchange_id"]),
+                responder_message_id=responder_message_id,
+            )
+        else:
+            await self.exchange_store.mark_exchange_completed(str(exchange["exchange_id"]))
         logger.info("orchestrator: exchange completed exchange_id=%s", exchange["exchange_id"])
         return True
 
@@ -833,15 +827,15 @@ class SwarmOrchestrator:
 
     def _next_important_service_scenario(self, latest_scenario: object | None) -> ImportantServiceScenario:
         """Возвращает следующий сценарий fixed-cycle очереди."""
-        scenario_keys = [scenario.key for scenario in IMPORTANT_SERVICE_SCENARIOS]
+        scenario_keys = [scenario.key for scenario in self.important_service_scenarios]
         if not isinstance(latest_scenario, str) or latest_scenario not in scenario_keys:
-            return IMPORTANT_SERVICE_SCENARIOS[0]
-        next_index = (scenario_keys.index(latest_scenario) + 1) % len(IMPORTANT_SERVICE_SCENARIOS)
-        return IMPORTANT_SERVICE_SCENARIOS[next_index]
+            return self.important_service_scenarios[0]
+        next_index = (scenario_keys.index(latest_scenario) + 1) % len(self.important_service_scenarios)
+        return self.important_service_scenarios[next_index]
 
     def _important_service_answer_intent(self, scenario_key: str | None) -> str | None:
         """Возвращает answer intent по ключу important-service сценария."""
-        for scenario in IMPORTANT_SERVICE_SCENARIOS:
+        for scenario in self.important_service_scenarios:
             if scenario.key == scenario_key:
                 return scenario.answer_intent
         return None

@@ -58,6 +58,7 @@ def test_runtime_prompt_files_are_committed():
         Path("ai/prompts/start_topic.md"),
         Path("ai/prompts/topics.md"),
         Path("ai/prompts/wind_down_hint.md"),
+        Path("ai/prompts/important_service.toml"),
     ]
 
     for path in prompt_files:
@@ -72,6 +73,23 @@ async def test_prompt_loader_can_read_committed_runtime_prompt():
     system_prompt = await loader.load("system")
 
     assert "Telegram" in system_prompt
+
+
+@pytest.mark.asyncio
+async def test_prompt_loader_reads_important_service_scenarios_from_tracked_resource(tmp_path):
+    """Сценарные инструкции important-service загружаются из prompts, а не Python-кода."""
+    (tmp_path / "important_service.toml").write_text(
+        '[[scenarios]]\nkey = "exchange_rub"\nquestion_intent = "Где обменять рубли?"\n'
+        'answer_intent = "Посоветуй проверенный сервис."\n',
+        encoding="utf-8",
+    )
+    loader = PromptLoader(prompts_dir=str(tmp_path))
+
+    scenarios = await loader.load_important_service_scenarios()
+
+    assert [(item.key, item.question_intent, item.answer_intent) for item in scenarios] == [
+        ("exchange_rub", "Где обменять рубли?", "Посоветуй проверенный сервис.")
+    ]
 
 
 def test_no_prompt_examples_are_required_anymore():

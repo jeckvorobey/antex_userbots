@@ -7,8 +7,33 @@ from unittest.mock import AsyncMock
 import pytest
 from telethon.errors import ChatWriteForbiddenError, UserBannedInChannelError
 
+from ai.prompt_loader import ImportantServiceScenario
 from core.runtime_models import SwarmBotProfile
-from userbot.orchestrator import IMPORTANT_SERVICE_SCENARIOS, SAFE_SCHEDULED_REPLY_FALLBACK_TEXT, SwarmOrchestrator
+from userbot.orchestrator import SAFE_SCHEDULED_REPLY_FALLBACK_TEXT, SwarmOrchestrator
+
+
+IMPORTANT_SERVICE_SCENARIOS = (
+    ImportantServiceScenario(
+        key="exchange_rub",
+        question_intent="Где можно обменять безналичные рубли?",
+        answer_intent="Посоветуй сервис для обмена рублей.",
+    ),
+    ImportantServiceScenario(
+        key="booking_airbnb",
+        question_intent="Как оплатить Airbnb?",
+        answer_intent="Посоветуй сервис для оплаты Airbnb.",
+    ),
+    ImportantServiceScenario(
+        key="exchange_usdt",
+        question_intent="Где обменять USDT?",
+        answer_intent="Посоветуй сервис для обмена USDT.",
+    ),
+    ImportantServiceScenario(
+        key="booking_booking",
+        question_intent="Как оплатить Booking?",
+        answer_intent="Посоветуй сервис для оплаты Booking.",
+    ),
+)
 
 
 def _manager_with_clients(initiator_client, responder_client):
@@ -41,6 +66,7 @@ def test_orchestrator_selects_candidates_with_one_roster_scan_after_cooldown_res
         ai_client=SimpleNamespace(),
         history=SimpleNamespace(),
         exchange_store=SimpleNamespace(),
+        important_service_scenarios=IMPORTANT_SERVICE_SCENARIOS,
     )
     for profile in profiles:
         profile.id_reads = 0
@@ -345,6 +371,7 @@ async def test_orchestrator_uses_local_fallback_when_scheduled_llm_disabled():
         active_windows_utc=["19-20"],
         now_provider=lambda: datetime(2026, 4, 20, 19, 5, tzinfo=UTC),
         randint_provider=lambda start, end: start,
+        important_service_scenarios=IMPORTANT_SERVICE_SCENARIOS,
     )
     orchestrator._build_exchange_decision = AsyncMock(
         return_value=SimpleNamespace(
@@ -464,6 +491,110 @@ async def test_important_service_responder_fallback_keeps_approved_contact(
         ai_client.generate_reply.assert_awaited_once()
     else:
         ai_client.generate_reply.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_important_service_safe_responder_without_contact_uses_contract_fallback():
+    """Даже safe AI-ответ заменяется, если в нём нет обязательного контакта."""
+    responder_client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=902)))
+    exchange_store = SimpleNamespace(mark_responder_generated=AsyncMock(), mark_exchange_completed=AsyncMock())
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md"),
+            SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md"),
+        ],
+        manager=_manager_with_clients(SimpleNamespace(send_message=AsyncMock()), responder_client),
+        topic_selector=SimpleNamespace(),
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system")),
+        ai_client=SimpleNamespace(
+            generate_reply=AsyncMock(return_value="Попробуй знакомый обменник."),
+            is_output_safe=lambda _text: True,
+        ),
+        history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
+        exchange_store=exchange_store,
+        group_target="@chat",
+    )
+    exchange = {
+        "exchange_id": "important",
+        "initiator_bot_id": "anna",
+        "responder_bot_id": "mike",
+        "topic": "Обмен",
+        "question_text": "Где обменять?",
+        "initiator_message_id": 1,
+        "exchange_kind": "important_service",
+        "important_scenario": "exchange_rub",
+    }
+
+    assert await orchestrator._run_due_responder_exchange(exchange=exchange) is True
+
+    assert "https://t.me/tt_exchenge_bot/antex" in responder_client.send_message.await_args.args[1]
+    exchange_store.mark_exchange_completed.assert_awaited_once_with(
+        "important", responder_message_id=902
+    )
+
+
+@pytest.mark.asyncio
+async def test_important_service_initiator_must_not_publish_required_contact():
+    """Ссылка important-service разрешена только в ответе responder-а."""
+    initiator_client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=501)))
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[
+            SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md"),
+            SwarmBotProfile(id="mike", session_string="mike", persona_file="mike.md"),
+        ],
+        manager=_manager_with_clients(initiator_client, SimpleNamespace(send_message=AsyncMock())),
+        topic_selector=SimpleNamespace(),
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system")),
+        ai_client=SimpleNamespace(
+            start_topic=AsyncMock(return_value="Пишите в https://t.me/tt_exchenge_bot/antex"),
+            is_output_safe=lambda _text: True,
+        ),
+        history=SimpleNamespace(get_session_history=AsyncMock(return_value=[]), save_message=AsyncMock()),
+        exchange_store=SimpleNamespace(
+            get_recent_questions=AsyncMock(return_value=[]),
+            get_recent_question_signatures=AsyncMock(return_value=set()),
+            mark_initiator_generated=AsyncMock(),
+            mark_exchange_started=AsyncMock(),
+            mark_exchange_completed=AsyncMock(),
+        ),
+        group_target="@chat",
+        max_turns_per_exchange=1,
+        now_provider=lambda: datetime(2026, 7, 8, 10, 0, tzinfo=UTC),
+        randint_provider=lambda start, end: start,
+    )
+
+    assert await orchestrator._run_due_planned_exchange(
+        exchange={
+            "exchange_id": "important",
+            "initiator_bot_id": "anna",
+            "responder_bot_id": "mike",
+            "topic": "Где обменять рубли?",
+            "exchange_kind": "important_service",
+            "important_scenario": "exchange_rub",
+        },
+        now=datetime(2026, 7, 8, 10, 0, tzinfo=UTC),
+    ) is True
+
+    assert "https://t.me/tt_exchenge_bot/antex" not in initiator_client.send_message.await_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_important_service_is_not_selected_for_one_turn_group():
+    """Important-service не планируется там, где responder никогда не отправляется."""
+    latest = AsyncMock(return_value=None)
+    orchestrator = SwarmOrchestrator(
+        bot_profiles=[],
+        manager=SimpleNamespace(),
+        topic_selector=SimpleNamespace(),
+        prompt_composer=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
+        history=SimpleNamespace(),
+        exchange_store=SimpleNamespace(get_latest_important_service_exchange=latest),
+        max_turns_per_exchange=1,
+    )
+
+    assert await orchestrator._build_important_service_decision_if_due(datetime.now(UTC)) is None
+    latest.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -984,6 +1115,7 @@ def test_orchestrator_rotates_important_service_scenarios():
         ai_client=SimpleNamespace(),
         history=SimpleNamespace(),
         exchange_store=SimpleNamespace(),
+        important_service_scenarios=IMPORTANT_SERVICE_SCENARIOS,
     )
 
     assert orchestrator._next_important_service_scenario(None).key == "exchange_rub"
@@ -1028,6 +1160,7 @@ async def test_orchestrator_important_service_replaces_regular_topic_when_due():
         active_windows_utc=["10-11"],
         now_provider=lambda: datetime(2026, 7, 8, 10, 15, tzinfo=UTC),
         randint_provider=lambda start, end: start,
+        important_service_scenarios=IMPORTANT_SERVICE_SCENARIOS,
     )
 
     assert await orchestrator.run_once() is True

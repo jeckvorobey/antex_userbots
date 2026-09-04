@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from random import randint
@@ -14,7 +15,7 @@ from urllib.parse import urlparse
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from ai.openrouter import OpenRouterClient
-from ai.prompt_loader import PromptLoader
+from ai.prompt_loader import ImportantServiceScenario, PromptLoader
 from ai.history import MessageHistory
 from ai.prompt_composer import PromptComposer
 from core.config import SettingsReloadWatcher, load_settings_or_exit
@@ -57,6 +58,7 @@ class RuntimeContext:
     topic_selector: TopicSelector
     prompt_composer: PromptComposer
     exchange_store: ExchangeStore
+    important_service_scenarios: tuple[ImportantServiceScenario, ...] = ()
 
     async def close(self) -> None:
         """Закрывает runtime-ресурсы с внешними соединениями."""
@@ -92,8 +94,12 @@ def _is_invite_link(target: str | None) -> bool:
     """Определяет, является ли target приватной invite-ссылкой Telegram."""
     if not isinstance(target, str):
         return False
-    normalized = target.strip()
-    return normalized.startswith(("https://t.me/+", "http://t.me/+", "https://t.me/joinchat/", "http://t.me/joinchat/"))
+    parsed = urlparse(target.strip())
+    return (
+        parsed.scheme.lower() in {"http", "https"}
+        and (parsed.hostname or "").lower() == "t.me"
+        and (parsed.path.startswith("/+") or parsed.path.lower().startswith("/joinchat/"))
+    )
 
 
 def _redact_group_target(target: object) -> object:
@@ -233,6 +239,9 @@ def _extract_join_result_target(join_result: object | None) -> object | None:
 
 def _extract_resolved_chat_id(resolved_target: object | None, fallback_chat_id: int | None) -> int | None:
     """Извлекает реальный chat_id группы из resolved entity или fallback."""
+    marked_chat_id = _extract_event_chat_id(resolved_target, None)
+    if marked_chat_id is not None:
+        return marked_chat_id
     if fallback_chat_id is not None:
         return fallback_chat_id
     target_id = getattr(resolved_target, "id", None)
@@ -496,6 +505,12 @@ async def _filter_reload_ready_groups(
         if previous_signatures.get(group_id) == _group_membership_signature(group):
             ready_groups.append(group)
             continue
+        if not manager.active_bot_ids:
+            logger.warning(
+                "settings reload: changed group remains pending because active bot pool is empty group_id=%s",
+                group_id,
+            )
+            continue
         try:
             for bot_id in manager.active_bot_ids:
                 client_wrapper = manager.get_client(bot_id)
@@ -539,7 +554,7 @@ def _build_group_membership_startup_hook(
 
 def _build_multi_group_membership_startup_hook(
     *,
-    groups: list[object],
+    groups: list[object] | Callable[[], list[object]],
 ):
     """Строит startup hook с global messaging check и membership всех enabled groups."""
 
@@ -564,7 +579,8 @@ def _build_multi_group_membership_startup_hook(
         await asyncio.sleep(delay_seconds)
         dialog_index = await _build_group_dialog_index(client_wrapper.client)
         resolved: dict[str, object | None] = {}
-        for group in groups:
+        current_groups = groups() if callable(groups) else groups
+        for group in current_groups:
             if not getattr(group, "enabled", True):
                 continue
             group_id = getattr(group, "id")
@@ -706,6 +722,7 @@ async def _build_runtime_context(settings: object) -> RuntimeContext:
         await history.init_db()
 
         prompt_loader = PromptLoader(settings.prompts_dir)
+        important_service_scenarios = await prompt_loader.load_important_service_scenarios()
         ai_client = OpenRouterClient(
             api_key=_unwrap_secret(settings.openrouter_api_key),
             models=settings.openrouter_models,
@@ -753,6 +770,7 @@ async def _build_runtime_context(settings: object) -> RuntimeContext:
         topic_selector=topic_selector,
         prompt_composer=prompt_composer,
         exchange_store=exchange_store,
+        important_service_scenarios=important_service_scenarios,
     )
 
 
@@ -829,6 +847,7 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
         raise ValueError("Swarm mode requires at least two enabled bots")
     current_settings = settings
     current_groups = _enabled_groups_from_settings(current_settings)
+    desired_groups = current_groups
     if not current_groups:
         raise ValueError("Swarm mode requires at least one enabled group")
 
@@ -842,7 +861,7 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
             proxy=_unwrap_secret(settings.proxy),
         ),
         startup_hook=_build_multi_group_membership_startup_hook(
-            groups=current_groups,
+            groups=lambda: current_groups,
         ),
         startup_quarantine_bot=lambda bot_id, reason: runtime.exchange_store.quarantine_bot(
             group_key=GLOBAL_ACCOUNT_QUARANTINE_KEY,
@@ -884,16 +903,28 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
     next_group_start_index = 0
 
     async def orchestrator_tick() -> bool:
-        nonlocal current_settings, current_groups, next_group_start_index
+        nonlocal current_settings, current_groups, desired_groups, next_group_start_index
         reloaded_settings = reload_watcher.poll()
         if reloaded_settings is not None:
             current_settings = reloaded_settings
-            candidate_groups = _enabled_groups_from_settings(current_settings)
-            current_groups = await _filter_reload_ready_groups(manager, current_groups, candidate_groups)
+            desired_groups = _enabled_groups_from_settings(current_settings)
+            runtime.ai_client.max_output_chars = current_settings.swarm_max_output_chars
+            runtime.ai_client.max_mentions_per_message = current_settings.swarm_max_mentions_per_message
+
+        previous_ready_signatures = [_group_membership_signature(group) for group in current_groups]
+        next_ready_groups = await _filter_reload_ready_groups(manager, current_groups, desired_groups)
+        ready_registry_changed = previous_ready_signatures != [
+            _group_membership_signature(group) for group in next_ready_groups
+        ]
+        current_groups = next_ready_groups
+        if ready_registry_changed:
             enabled_group_chat_ids.clear()
             enabled_group_chat_ids.update(
-                group.group_chat_id for group in current_groups if isinstance(getattr(group, "group_chat_id", None), int)
+                group.group_chat_id
+                for group in current_groups
+                if isinstance(getattr(group, "group_chat_id", None), int)
             )
+        if reloaded_settings is not None:
             logger.info("settings reload: enabled_groups=%s", [group.id for group in current_groups])
 
         if not manager.active_bot_ids:
@@ -957,6 +988,7 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
                     responder_delay_minutes=_group.responder_delay_minutes,
                     skip_if_recent_human_activity=_settings.swarm_skip_if_recent_human_activity,
                     allow_external_llm_for_scheduled=_settings.swarm_allow_external_llm_for_scheduled,
+                    important_service_scenarios=getattr(runtime, "important_service_scenarios", ()),
                     resolve_group_target=lambda telegram_client, _resolver_group=_group: _resolve_group_target(
                         telegram_client,
                         getattr(_resolver_group, "group_chat_id", None),

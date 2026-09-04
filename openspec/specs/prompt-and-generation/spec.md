@@ -278,3 +278,17 @@ The system SHALL log only safe operation categories, model count, status, and cr
 #### Scenario: Provider failure hides sensitive details
 - **WHEN** a provider request fails with a raw payload or exception
 - **THEN** logs and the raised exception chain omit keys, proxy credentials, prompts, history, generated text, and raw provider text
+
+### Requirement: Important service scenarios are file-backed
+The system SHALL load important-service question and answer intent text from tracked prompt files through `PromptLoader` rather than embedding model instructions in Python.
+
+#### Scenario: Scenario prompt is composed
+- **WHEN** an important-service exchange is selected
+- **THEN** its question and answer intent comes from the cached tracked prompt resource
+
+### Requirement: OpenRouter owned transport always closes
+The system SHALL attempt to close its owned HTTP transport even when OpenRouter SDK shutdown raises.
+
+#### Scenario: SDK exit fails
+- **WHEN** the SDK `__aexit__` raises during adapter shutdown
+- **THEN** HTTPX `aclose` is awaited and the original SDK exception propagates

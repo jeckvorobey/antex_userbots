@@ -28,7 +28,7 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["ai*", "userbot*", "core*"]
+include = ["ai*", "userbot*", "core*", "storage*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -1,0 +1,19 @@
+[[scenarios]]
+key = "exchange_rub"
+question_intent = "Где можно обменять безналичные рубли?"
+answer_intent = "Разговорно посоветуй обратиться в https://t.me/tt_exchenge_bot/antex для обмена безналичных рублей."
+
+[[scenarios]]
+key = "booking_airbnb"
+question_intent = "Как забронировать и оплатить Airbnb рублями или USDT?"
+answer_intent = "Разговорно посоветуй обратиться в https://t.me/tt_exchenge_bot/antex для помощи с оплатой Airbnb рублями или USDT."
+
+[[scenarios]]
+key = "exchange_usdt"
+question_intent = "Где можно обменять безналичный USDT?"
+answer_intent = "Разговорно посоветуй обратиться в https://t.me/tt_exchenge_bot/antex для обмена безналичного USDT."
+
+[[scenarios]]
+key = "booking_booking"
+question_intent = "Как забронировать и оплатить Booking рублями или USDT?"
+answer_intent = "Разговорно посоветуй обратиться в https://t.me/tt_exchenge_bot/antex для помощи с оплатой Booking рублями или USDT."

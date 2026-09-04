@@ -95,7 +95,6 @@ class SwarmManager:
             async with semaphore:
                 try:
                     await self._start_single_bot(profile)
-                    await self._record_startup_availability(profile.id, True, None)
                 except AccountMessagingUnavailableError as exc:
                     await self._quarantine_globally_unavailable_bot(profile, exc)
                 except Exception as exc:
@@ -103,6 +102,18 @@ class SwarmManager:
                     state.mark_failed(str(exc))
                     await self._record_startup_availability(profile.id, False, str(exc))
                     logger.exception("swarm: bot_id=%s исключён из активного пула при startup: %s", profile.id, exc)
+                else:
+                    try:
+                        await self._record_startup_availability(profile.id, True, None)
+                    except Exception as exc:
+                        await self._rollback_started_bot(profile)
+                        state = self.runtime_states[profile.id]
+                        state.mark_failed(str(exc))
+                        await self._record_startup_availability(profile.id, False, str(exc))
+                        logger.exception(
+                            "swarm: bot_id=%s activation rolled back after startup snapshot failure",
+                            profile.id,
+                        )
 
         semaphore = asyncio.Semaphore(self.startup_concurrency)
         await asyncio.gather(*(start_profile(profile, semaphore) for profile in self.bot_profiles))
@@ -114,6 +125,21 @@ class SwarmManager:
         result = self.startup_availability_bot(bot_id, is_available, reason)
         if asyncio.iscoroutine(result):
             await result
+
+    async def _rollback_started_bot(self, profile: SwarmBotProfile) -> None:
+        """Откатывает runtime activation после ошибки startup persistence."""
+        if profile.id in self.active_bot_ids:
+            self.active_bot_ids.remove(profile.id)
+        self._gates.pop(profile.id, None)
+        telegram_user_id = profile.telegram_user_id
+        if isinstance(telegram_user_id, int):
+            self.swarm_user_ids.discard(telegram_user_id)
+        client = self.clients.pop(profile.id, None)
+        if client is not None:
+            try:
+                await client.stop()
+            except Exception:
+                logger.warning("swarm: rollback stop не выполнен bot_id=%s", profile.id)
 
     async def stop(self) -> None:
         """Останавливает все активные клиенты и завершает supervise loops."""
@@ -163,7 +189,7 @@ class SwarmManager:
         """Проверяет, доступен ли аккаунт для новых отправок."""
         return bot_id in self.active_bot_ids and bot_id not in self.disabled_bot_ids
 
-    async def disable_bot(self, bot_id: str, *, reason: str) -> None:
+    async def disable_bot(self, bot_id: str, *, reason: str, defer_disconnect: bool = False) -> None:
         """Немедленно выводит аккаунт из runtime-пула после постоянного Telegram запрета."""
         if bot_id in self.disabled_bot_ids:
             return
@@ -175,8 +201,23 @@ class SwarmManager:
         self.runtime_states[bot_id].mark_disabled(reason)
         client = self.clients.get(bot_id)
         if client is not None:
-            await client.stop()
+            if defer_disconnect:
+                asyncio.get_running_loop().call_soon(self._schedule_disabled_client_stop, bot_id, client)
+            else:
+                await client.stop()
         logger.error("swarm: bot_id=%s отключён runtime reason=%s", bot_id, reason)
+
+    def _schedule_disabled_client_stop(self, bot_id: str, client: UserBotClient | Any) -> None:
+        """Запускает disconnect после возврата из текущего Telegram event handler."""
+        asyncio.create_task(self._stop_disabled_client(bot_id, client))
+
+    @staticmethod
+    async def _stop_disabled_client(bot_id: str, client: UserBotClient | Any) -> None:
+        """Безопасно завершает клиент, отключённый из runtime-пула."""
+        try:
+            await client.stop()
+        except Exception:
+            logger.exception("swarm: ошибка отложенного disconnect для bot_id=%s", bot_id)
 
     @asynccontextmanager
     async def human_slot(self, bot_id: str) -> AsyncIterator[None]:
@@ -272,7 +313,6 @@ class SwarmManager:
         """Отключает и сохраняет global quarantine без допуска к дальнейшей работе."""
         reason = str(exc)
         await self.disable_bot(profile.id, reason=reason)
-        await self._record_startup_availability(profile.id, False, reason)
         if self.startup_quarantine_bot is not None:
             try:
                 result = self.startup_quarantine_bot(profile.id, reason)
@@ -281,6 +321,7 @@ class SwarmManager:
             except Exception:
                 logger.exception("swarm: не удалось сохранить global quarantine для bot_id=%s", profile.id)
                 raise
+        await self._record_startup_availability(profile.id, False, reason)
         logger.error(
             "swarm: bot_id=%s заморожен или глобально недоступен для messaging; "
             "требует внимания, auto_reuse=false reason=%s",

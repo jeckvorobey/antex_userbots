@@ -3,6 +3,7 @@
 import logging
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -173,6 +174,21 @@ async def test_openrouter_closes_direct_sdk_transport_once(monkeypatch):
     await client.close()
 
     assert created_sdk[0].exit_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_openrouter_closes_proxy_transport_when_sdk_exit_fails():
+    """Owned HTTPX transport закрывается даже при ошибке SDK shutdown."""
+    sdk_client = SimpleNamespace(__aexit__=AsyncMock(side_effect=RuntimeError("sdk close failed")))
+    http_client = SimpleNamespace(aclose=AsyncMock())
+    client = OpenRouterClient(api_key="secret-key", models=["vendor/primary", "vendor/fallback"])
+    client._client = sdk_client
+    client._http_client = http_client
+
+    with pytest.raises(RuntimeError, match="sdk close failed"):
+        await client.close()
+
+    http_client.aclose.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -136,6 +136,29 @@ def test_settings_reads_proxy():
         assert s.proxy.get_secret_value() == "http://user:pass@127.0.0.1:8080"
 
 
+@pytest.mark.parametrize("scheme", ["http", "https", "socks5", "socks5h"])
+def test_settings_accepts_proxy_schemes_supported_by_both_clients(scheme):
+    """Общий proxy принимает только транспортно совместимые рабочие схемы."""
+    env = {**BASE_ENV, "PROXY": f"{scheme}://127.0.0.1:8080"}
+    with patch.dict(os.environ, env, clear=True):
+        from core.config import Settings
+
+        settings = Settings(_env_file=None)
+
+    assert settings.proxy is not None
+    assert settings.proxy.get_secret_value() == f"{scheme}://127.0.0.1:8080"
+
+
+def test_settings_rejects_socks4_shared_proxy():
+    """SOCKS4 отклоняется до создания несовместимого HTTPX transport."""
+    env = {**BASE_ENV, "PROXY": "socks4://127.0.0.1:8080"}
+    with patch.dict(os.environ, env, clear=True):
+        from core.config import Settings
+
+        with pytest.raises(ValueError, match="proxy scheme"):
+            Settings(_env_file=None)
+
+
 def test_settings_masks_openrouter_key_and_proxy():
     """Проверяет маскирование provider key и proxy credentials в диагностике."""
     env = {**BASE_ENV, "PROXY": "http://user:pass@127.0.0.1:8080"}
