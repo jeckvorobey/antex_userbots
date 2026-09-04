@@ -39,3 +39,9 @@
 - [x] 7.3 Добавить RED-тест retry после невалидного reload и обновлять mtime только после успешной загрузки.
 - [x] 7.4 Добавить RED-тест минимального output cap и запретить значения короче обязательного fallback.
 - [x] 7.5 Добавить RED-тест миграции legacy exchange scope и выполнить backfill после resolve первой группы.
+
+## 8. Second follow-up review findings
+
+- [x] 8.1 Добавить RED wheel test для entrypoint и prompt/persona package data; исправить packaging и installed defaults.
+- [x] 8.2 Добавить RED-тест отсутствия Python service directives в exchange context и оставить wording/contact в prompt resources.
+- [x] 8.3 Добавить RED-тест безопасной ошибки rejected credential proxy и скрыть validation input.

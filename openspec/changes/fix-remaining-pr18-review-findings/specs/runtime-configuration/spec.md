@@ -15,6 +15,10 @@ The system SHALL accept a shared proxy only when its scheme is supported by both
 - **WHEN** `PROXY` uses `https`, `socks4`, or `socks5h`
 - **THEN** settings validation fails before any external client is constructed
 
+#### Scenario: Rejected proxy contains credentials
+- **WHEN** a rejected proxy URL contains username and password
+- **THEN** validation and startup logs omit both credential values
+
 ### Requirement: Reloaded safety limits apply immediately
 The system SHALL apply reloaded output-length and mention-count limits to the shared generation client before subsequent publishing work.
 

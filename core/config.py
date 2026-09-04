@@ -92,6 +92,7 @@ class Secrets(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     openrouter_api_key: RequiredSecretStr
@@ -356,9 +357,10 @@ _UNSET = object()
 DEFAULT_SETTINGS_PATH = "config/settings.toml"
 DEFAULT_MODE = "swarm"
 DEFAULT_DB_PATH = "data/history.db"
-DEFAULT_PROMPTS_DIR = "ai/prompts"
-DEFAULT_TOPICS_PATH = "ai/prompts/topics.md"
-DEFAULT_BOT_PROFILES_DIR = "ai/prompts/bots"
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_PROMPTS_DIR = str(PACKAGE_ROOT / "ai" / "prompts")
+DEFAULT_TOPICS_PATH = str(PACKAGE_ROOT / "ai" / "prompts" / "topics.md")
+DEFAULT_BOT_PROFILES_DIR = str(PACKAGE_ROOT / "ai" / "prompts" / "bots")
 OPENROUTER_REQUEST_TIMEOUT_SECONDS = 45.0
 OPENROUTER_RETRY_INITIAL_INTERVAL_MS = 500
 OPENROUTER_RETRY_MAX_INTERVAL_MS = 5000

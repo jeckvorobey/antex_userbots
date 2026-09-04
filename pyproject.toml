@@ -30,6 +30,12 @@ dev = [
 where = ["."]
 include = ["ai*", "userbot*", "core*", "storage*"]
 
+[tool.setuptools]
+py-modules = ["run"]
+
+[tool.setuptools.package-data]
+ai = ["prompts/*.md", "prompts/*.toml", "prompts/bots/*.md"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

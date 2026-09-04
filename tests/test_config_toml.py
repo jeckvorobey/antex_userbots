@@ -66,9 +66,9 @@ def test_settings_loads_non_secret_values_from_minimal_toml(tmp_path):
 
     assert settings.mode == "swarm"
     assert settings.db_path == "data/history.db"
-    assert settings.topics_path == "ai/prompts/topics.md"
-    assert settings.prompts_dir == "ai/prompts"
-    assert settings.bot_profiles_dir == "ai/prompts/bots"
+    assert Path(settings.topics_path).as_posix().endswith("/ai/prompts/topics.md")
+    assert Path(settings.prompts_dir).as_posix().endswith("/ai/prompts")
+    assert Path(settings.bot_profiles_dir).as_posix().endswith("/ai/prompts/bots")
     assert settings.openrouter_models == ["test/primary", "test/fallback"]
     assert settings.openrouter_temperature is None
     assert settings.api_id == 12345678
@@ -665,8 +665,8 @@ def test_settings_loads_swarm_mode_and_bots(tmp_path):
 
     assert settings.mode == "swarm"
     assert settings.db_path == "data/history.db"
-    assert settings.prompts_dir == "ai/prompts"
-    assert settings.topics_path == "ai/prompts/topics.md"
+    assert Path(settings.prompts_dir).as_posix().endswith("/ai/prompts")
+    assert Path(settings.topics_path).as_posix().endswith("/ai/prompts/topics.md")
     assert settings.swarm_schedule_active_windows_utc == ["10-11", "16-18"]
     assert settings.swarm_initiator_offset_minutes == (0, 30)
     assert settings.swarm_responder_delay_minutes == (3, 10)

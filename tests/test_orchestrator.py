@@ -1173,7 +1173,7 @@ async def test_orchestrator_important_service_replaces_regular_topic_when_due():
     assert exchange_store.create_exchange.await_args.kwargs["exchange_kind"] == "important_service"
     assert exchange_store.create_exchange.await_args.kwargs["important_scenario"] == "exchange_rub"
     assert "important_service_question" in prompt_composer.compose.await_args.kwargs["exchange_context"]
-    assert "https://t.me/tt_exchenge_bot/antex" in prompt_composer.compose.await_args.kwargs["exchange_context"]
+    assert "required_contact_for_answer" not in prompt_composer.compose.await_args.kwargs["exchange_context"]
 
 
 @pytest.mark.asyncio
@@ -1352,8 +1352,8 @@ async def test_orchestrator_important_service_reply_context_mentions_required_co
     context = prompt_composer.compose.await_args.kwargs["exchange_context"]
     assert "important_service_answer" in context
     assert "exchange_rub" in context
-    assert "https://t.me/tt_exchenge_bot/antex" in context
-    assert "Обратись в сервис" in context
+    assert "Пример стиля" not in context
+    assert "Не копируй пример" not in context
 
 
 @pytest.mark.asyncio

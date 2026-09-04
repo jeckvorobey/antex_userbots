@@ -315,11 +315,15 @@ The system SHALL not log private Telegram invite hashes.
 - **THEN** audit-log quarantine содержит redacted marker вместо invite hash
 
 ### Requirement: Installed runtime includes storage package
-The system SHALL include the `storage` Python package in built wheel and source distributions.
+The system SHALL include the entrypoint, `storage` Python package, and tracked runtime prompt/persona assets in built wheel and source distributions, and default asset paths SHALL resolve outside the source checkout.
 
 #### Scenario: Wheel import succeeds
 - **WHEN** the project wheel is installed outside the source checkout
 - **THEN** runtime modules importing `storage.sqlite_database` load without `ModuleNotFoundError`
+
+#### Scenario: Installed runtime loads default prompts
+- **WHEN** the wheel is installed and started from a directory outside the source checkout
+- **THEN** default prompt, topic, persona, and important-service resources resolve from installed package data
 
 ### Requirement: Startup activation rollback
 The system SHALL remove and stop a newly activated bot when persistence of its successful startup availability fails.

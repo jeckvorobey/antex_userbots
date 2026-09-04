@@ -793,9 +793,6 @@ class SwarmOrchestrator:
                 "important_service_question",
                 f"important_scenario: {decision.important_scenario}",
                 f"question_intent: {decision.topic}",
-                f"answer_intent: {decision.important_answer_intent}",
-                f"required_contact_for_answer: {IMPORTANT_SERVICE_CONTACT}",
-                "Не упоминай required_contact_for_answer в вопросе.",
                 recent_questions_context,
             )
             if item
@@ -816,9 +813,6 @@ class SwarmOrchestrator:
                 "important_service_answer",
                 f"important_scenario: {scenario_key}",
                 f"answer_intent: {answer_intent}",
-                f"required_contact: {IMPORTANT_SERVICE_CONTACT}",
-                f"Пример стиля: Обратись в сервис {IMPORTANT_SERVICE_CONTACT}, отличный курс и надежно.",
-                "Не копируй пример дословно, каждый раз формулируй по-разному.",
                 base,
             )
             if item

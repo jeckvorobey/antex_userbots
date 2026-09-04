@@ -173,7 +173,7 @@ temperature = 0.8
 - `group.id` должен быть уникальным;
 - каждая группа должна иметь `group_chat_id` или `group_target`;
 - если у группы есть `[groups.schedule]`, неуказанные поля наследуются из `[swarm.schedule]`;
-- `data/history.db`, `ai/prompts/`, `ai/prompts/topics.md` и `ai/prompts/bots/` теперь задаются кодовыми defaults;
+- `data/history.db` задаётся кодовым default, а prompt/topic/persona defaults разрешаются в bundled `ai/prompts/` как в checkout, так и в установленном wheel;
 - каждый `persona_file` должен реально существовать;
 - для каждого `session_env` должна быть переменная в `.env`;
 - реальные файлы `ai/prompts/**/*.md` и `ai/prompts/important_service.toml` являются частью этого production-инстанса и хранятся в git;

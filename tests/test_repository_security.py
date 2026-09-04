@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import tomllib
+import zipfile
 from fnmatch import fnmatchcase
 from pathlib import Path
 
@@ -39,3 +40,24 @@ def test_distribution_package_discovery_includes_storage():
     }
 
     assert "storage" in packages
+
+
+def test_built_wheel_contains_runtime_entrypoint_and_prompt_assets(tmp_path):
+    """Проверяет фактический wheel, а не только setuptools discovery config."""
+    project_root = Path(__file__).resolve().parents[1]
+    subprocess.run(
+        ["uv", "build", "--wheel", "--out-dir", str(tmp_path)],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    wheel_path = next(tmp_path.glob("*.whl"))
+
+    with zipfile.ZipFile(wheel_path) as wheel:
+        names = set(wheel.namelist())
+
+    assert "run.py" in names
+    assert "ai/prompts/system.md" in names
+    assert "ai/prompts/important_service.toml" in names
+    assert any(name.startswith("ai/prompts/bots/") and name.endswith(".md") for name in names)

@@ -174,6 +174,20 @@ def test_settings_masks_openrouter_key_and_proxy():
     assert "user:pass" not in repr(settings.proxy)
 
 
+def test_rejected_proxy_validation_hides_credentials():
+    """Невалидная proxy-схема не раскрывает username/password в ValidationError."""
+    env = {**BASE_ENV, "PROXY": "https://alice:pass123@example.com:443"}
+    with patch.dict(os.environ, env, clear=True):
+        from core.config import Settings
+
+        with pytest.raises(ValueError) as exc_info:
+            Settings(_env_file=None)
+
+    error_text = str(exc_info.value)
+    assert "alice" not in error_text
+    assert "pass123" not in error_text
+
+
 def test_settings_reads_group_target_from_env():
     """Проверяет загрузку целевой Telegram-группы из переменных окружения."""
     env = {

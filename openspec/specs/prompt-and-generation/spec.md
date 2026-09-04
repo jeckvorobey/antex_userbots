@@ -286,6 +286,10 @@ The system SHALL load important-service question and answer intent text from tra
 - **WHEN** an important-service exchange is selected
 - **THEN** its question and answer intent comes from the cached tracked prompt resource
 
+#### Scenario: Service prompt directives are maintained
+- **WHEN** important-service wording, style, or approved-contact instructions change
+- **THEN** they are edited in tracked prompt resources without changing Python prompt literals
+
 ### Requirement: OpenRouter owned transport always closes
 The system SHALL attempt to close its owned HTTP transport even when OpenRouter SDK shutdown raises.
 
