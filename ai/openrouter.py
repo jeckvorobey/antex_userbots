@@ -122,11 +122,16 @@ class OpenRouterClient(TextGenerationClient):
         except Exception as exc:
             status = self._extract_status_code(exc)
             category = "temporary" if self._is_temporary_error(exc, status) else "permanent"
+            details = self._extract_openrouter_error_details(exc)
             logger.warning(
-                "OpenRouter generation failed: operation=%s category=%s status=%s",
+                "OpenRouter generation failed: operation=%s category=%s status=%s "
+                "openrouter_error_code=%s openrouter_error_type=%s openrouter_provider_code=%s",
                 operation,
                 category,
                 status if status is not None else "unknown",
+                details.get("code", "unknown"),
+                details.get("error_type", "unknown"),
+                details.get("provider_code", "unknown"),
             )
             error_type = TemporaryGenerationError if category == "temporary" else GenerationError
             raise error_type("Ошибка генерации через OpenRouter") from None
@@ -177,6 +182,47 @@ class OpenRouterClient(TextGenerationClient):
         response = getattr(exc, "response", None)
         status = getattr(response, "status_code", None)
         return status if isinstance(status, int) else None
+
+    def _extract_openrouter_error_details(self, exc: Exception) -> dict[str, Any]:
+        """Извлекает безопасные диагностические поля OpenRouter error body."""
+        response = getattr(exc, "response", None)
+        parse_json = getattr(response, "json", None)
+        if not callable(parse_json):
+            return {}
+        try:
+            payload = parse_json()
+        except Exception:
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        error = payload.get("error")
+        if not isinstance(error, dict):
+            return {}
+
+        details: dict[str, Any] = {}
+        code = error.get("code")
+        if isinstance(code, int):
+            details["code"] = code
+        elif isinstance(code, str) and code:
+            details["code"] = self._sanitize_error_detail(code, limit=80)
+        metadata = error.get("metadata")
+        if isinstance(metadata, dict):
+            error_type = metadata.get("error_type")
+            provider_code = metadata.get("provider_code")
+            if isinstance(error_type, str) and error_type:
+                details["error_type"] = self._sanitize_error_detail(error_type, limit=80)
+            if isinstance(provider_code, str) and provider_code:
+                details["provider_code"] = self._sanitize_error_detail(provider_code, limit=80)
+        return details
+
+    def _sanitize_error_detail(self, text: str, *, limit: int = 300) -> str:
+        """Редактирует секреты и ограничивает длину provider diagnostics."""
+        sanitized = text.replace(self.api_key, "<redacted_secret>") if self.api_key else text
+        sanitized = self.sanitize_for_prompt(sanitized)
+        sanitized = " ".join(sanitized.split())
+        if len(sanitized) > limit:
+            return sanitized[: limit - 3] + "..."
+        return sanitized
 
     @staticmethod
     def _is_temporary_error(exc: Exception, status: int | None) -> bool:

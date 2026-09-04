@@ -9,7 +9,11 @@ The system SHALL initialize one shared SQLite connection and one shared provider
 
 #### Scenario: Runtime dependencies are created
 - **WHEN** the application starts with valid settings
-- **THEN** SQLite stores, prompt loading, topic selection, prompt composition, and one shared OpenRouter-backed `ai_client` are initialized before bot clients
+- **THEN** SQLite stores, prompt loading, OpenRouter free-model diagnostics, topic selection, prompt composition, and one shared OpenRouter-backed `ai_client` are initialized before bot clients
+
+#### Scenario: OpenRouter free-model diagnostics are written
+- **WHEN** runtime context is built with a valid OpenRouter key
+- **THEN** the system queries OpenRouter's models catalog for free text-output models, writes `logs/openrouter_free_models.json` with model connection slugs sorted best-first, and does not replace the configured `[openrouter].models` list
 
 #### Scenario: Runtime dependencies close once
 - **WHEN** runtime shuts down

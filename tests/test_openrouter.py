@@ -254,6 +254,47 @@ async def test_openrouter_logs_no_raw_error_or_credentials(monkeypatch, caplog):
 
 
 @pytest.mark.asyncio
+async def test_openrouter_logs_safe_error_body_details(monkeypatch, caplog):
+    """Проверяет безопасные диагностические поля из OpenRouter error body."""
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    response = httpx.Response(
+        404,
+        json={
+            "error": {
+                "code": "provider_sk-or-v1-secret1234567890abcd",
+                "message": "No endpoints found for private prompt private topic sk-or-v1-secret1234567890abcd",
+                "metadata": {
+                    "error_type": "not_found",
+                    "provider_code": "no_available_endpoint",
+                },
+            }
+        },
+        request=request,
+    )
+    error = httpx.HTTPStatusError("raw provider payload", request=request, response=response)
+    install_fake_sdk(monkeypatch, chat=FakeChat(error=error))
+    client = OpenRouterClient(
+        api_key="sk-or-v1-secret1234567890abcd",
+        models=["one", "two"],
+    )
+
+    with caplog.at_level(logging.WARNING), pytest.raises(GenerationError):
+        await client.start_topic("private prompt", "private topic")
+
+    logs = caplog.text
+    assert "status=404" in logs
+    assert "openrouter_error_code=provider_<redacted_secret>" in logs
+    assert "openrouter_error_type=not_found" in logs
+    assert "openrouter_provider_code=no_available_endpoint" in logs
+    assert "openrouter_error_message" not in logs
+    assert "No endpoints found" not in logs
+    assert "sk-or-v1-secret1234567890abcd" not in logs
+    assert "private prompt" not in logs
+    assert "private topic" not in logs
+    assert "raw provider payload" not in logs
+
+
+@pytest.mark.asyncio
 async def test_openrouter_adapter_is_compatible_with_installed_sdk(monkeypatch):
     """Проверяет сериализацию запроса реальной зафиксированной версией SDK."""
     captured = {}
