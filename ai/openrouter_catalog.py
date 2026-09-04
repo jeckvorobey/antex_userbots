@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime
@@ -17,9 +18,12 @@ from ai.generation import LONG_SECRET_RE
 logger = logging.getLogger(__name__)
 
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_FREE_MODELS_LOG = "logs/openrouter_free_models.json"
 OPENROUTER_FREE_MODELS_SORT = "intelligence-high-to-low"
 OPENROUTER_MODELS_PAGE_SIZE = 1000
+OPENROUTER_MODEL_PROBE_PROMPT = "Ответь только цифрой 1."
+OPENROUTER_MODEL_PROBE_TIMEOUT_SECONDS = 8.0
 
 
 async def write_free_models_catalog(
@@ -28,6 +32,8 @@ async def write_free_models_catalog(
     output_path: str | Path = OPENROUTER_FREE_MODELS_LOG,
     proxy: str | None = None,
     timeout_seconds: float = 45.0,
+    model_probe_timeout_seconds: float = OPENROUTER_MODEL_PROBE_TIMEOUT_SECONDS,
+    configured_models: list[str] | tuple[str, ...] | None = None,
     http_client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
     """Получает бесплатные text-output модели OpenRouter и пишет отдельный diagnostic-файл."""
@@ -37,10 +43,30 @@ async def write_free_models_catalog(
     try:
         try:
             models, total_count = await _fetch_all_free_text_models(client, api_key=api_key)
-            payload = _build_success_payload(models=models, total_count=total_count)
+            model_checks = await _probe_configured_models(
+                client,
+                api_key=api_key,
+                configured_models=list(configured_models or ()),
+                timeout_seconds=model_probe_timeout_seconds,
+            )
+            payload = _build_success_payload(
+                models=models,
+                total_count=total_count,
+                configured_model_checks=model_checks,
+            )
             _write_json(path, payload)
-            logger.info("OpenRouter free models catalog written: path=%s models=%s", path, len(models))
-            return {"status": "ok", "models_count": len(models), "output_path": str(path)}
+            logger.info(
+                "OpenRouter free models catalog written: path=%s models=%s configured_model_checks=%s",
+                path,
+                len(models),
+                len(model_checks),
+            )
+            return {
+                "status": "ok",
+                "models_count": len(models),
+                "configured_model_checks_count": len(model_checks),
+                "output_path": str(path),
+            }
         except Exception as exc:
             payload = _build_error_payload(exc=exc, api_key=api_key)
             _write_json(path, payload)
@@ -88,7 +114,83 @@ async def _fetch_all_free_text_models(client: httpx.AsyncClient, *, api_key: str
     return [_normalize_model(item) for item in collected if _is_free_text_model(item)], total_count
 
 
-def _build_success_payload(*, models: list[dict[str, Any]], total_count: int) -> dict[str, Any]:
+async def _probe_configured_models(
+    client: httpx.AsyncClient,
+    *,
+    api_key: str,
+    configured_models: list[str],
+    timeout_seconds: float,
+) -> list[dict[str, Any]]:
+    """Проверяет каждую configured модель коротким безопасным Chat Completions запросом."""
+    models = _unique_models(configured_models)
+    return list(
+        await asyncio.gather(
+            *(
+                _probe_one_configured_model(
+                    client,
+                    api_key=api_key,
+                    model=model,
+                    timeout_seconds=timeout_seconds,
+                )
+                for model in models
+            )
+        )
+    )
+
+
+async def _probe_one_configured_model(
+    client: httpx.AsyncClient,
+    *,
+    api_key: str,
+    model: str,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    """Проверяет одну configured модель коротким bounded Chat Completions запросом."""
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    try:
+        response = await client.post(
+            OPENROUTER_CHAT_COMPLETIONS_URL,
+            headers=headers,
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": OPENROUTER_MODEL_PROBE_PROMPT}],
+                "provider": {"zdr": False, "allow_fallbacks": True},
+                "stream": False,
+                "max_completion_tokens": 4,
+            },
+            timeout=timeout_seconds,
+        )
+        response.raise_for_status()
+        body = response.json()
+        answer = _extract_probe_answer(body)
+        return {
+            "connection_code": model,
+            "available": True,
+            "status_code": response.status_code,
+            "response": answer or "empty",
+        }
+    except Exception as exc:
+        return _build_probe_error_check(model=model, exc=exc, api_key=api_key)
+
+
+def _unique_models(configured_models: list[str]) -> list[str]:
+    """Оставляет configured модели в порядке конфига без дублей."""
+    models: list[str] = []
+    seen: set[str] = set()
+    for model in configured_models:
+        if model in seen:
+            continue
+        seen.add(model)
+        models.append(model)
+    return models
+
+
+def _build_success_payload(
+    *,
+    models: list[dict[str, Any]],
+    total_count: int,
+    configured_model_checks: list[dict[str, Any]],
+) -> dict[str, Any]:
     """Собирает operator-friendly JSON для диагностики и копирования TOML."""
     connection_codes = [model["connection_code"] for model in models]
     return {
@@ -103,6 +205,7 @@ def _build_success_payload(*, models: list[dict[str, Any]], total_count: int) ->
         },
         "total_count": total_count,
         "models_count": len(models),
+        "configured_model_checks": configured_model_checks,
         "connection_codes": connection_codes,
         "toml_models_line": _format_toml_models_line(connection_codes),
         "models": models,
@@ -123,6 +226,68 @@ def _build_error_payload(*, exc: Exception, api_key: str) -> dict[str, Any]:
             "message": _extract_safe_error_message(exc, api_key=api_key),
         },
     }
+
+
+def _extract_probe_answer(payload: Any) -> str:
+    """Достаёт короткий ответ probe-запроса из Chat Completions response."""
+    if not isinstance(payload, dict):
+        return ""
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    first_choice = choices[0]
+    if not isinstance(first_choice, dict):
+        return ""
+    message = first_choice.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    return " ".join(content.strip().lower().split())[:20] if isinstance(content, str) else ""
+
+
+def _build_probe_error_check(*, model: str, exc: Exception, api_key: str) -> dict[str, Any]:
+    """Собирает safe availability result без свободного provider message."""
+    status_code = getattr(getattr(exc, "response", None), "status_code", None)
+    error_payload = _extract_error_payload(exc)
+    return {
+        "connection_code": model,
+        "available": False,
+        "status_code": status_code if isinstance(status_code, int) else "unknown",
+        "error_code": _sanitize_external_scalar(error_payload.get("code"), api_key=api_key),
+        "error_type": _sanitize_external_scalar(error_payload.get("error_type"), api_key=api_key),
+        "provider_code": _sanitize_external_scalar(error_payload.get("provider_code"), api_key=api_key),
+    }
+
+
+def _extract_error_payload(exc: Exception) -> dict[str, Any]:
+    """Извлекает только whitelisted поля error body."""
+    response = getattr(exc, "response", None)
+    parse_json = getattr(response, "json", None)
+    if not callable(parse_json):
+        return {}
+    try:
+        payload = parse_json()
+    except Exception:
+        return {}
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error, dict):
+        return {}
+    metadata = error.get("metadata")
+    return {
+        "code": error.get("code"),
+        "error_type": metadata.get("error_type") if isinstance(metadata, dict) else None,
+        "provider_code": metadata.get("provider_code") if isinstance(metadata, dict) else None,
+    }
+
+
+def _sanitize_external_scalar(value: Any, *, api_key: str) -> str:
+    """Нормализует внешнее diagnostic-поле перед записью в файл."""
+    if isinstance(value, int):
+        return str(value)
+    if not isinstance(value, str) or not value:
+        return "unknown"
+    sanitized = value.replace(api_key, "<redacted_secret>") if api_key else value
+    sanitized = LONG_SECRET_RE.sub("<redacted_secret>", sanitized)
+    sanitized = " ".join(sanitized.split())
+    return sanitized[:80] if sanitized else "unknown"
 
 
 def _normalize_model(model: dict[str, Any]) -> dict[str, Any]:

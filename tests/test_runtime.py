@@ -312,6 +312,7 @@ async def test_build_runtime_context_wires_and_closes_openrouter(monkeypatch, tm
         output_path="logs/openrouter_free_models.json",
         proxy="http://user:pass@127.0.0.1:8080",
         timeout_seconds=45.0,
+        configured_models=["test/primary", "test/fallback"],
     )
     assert runtime.ai_client is fake_ai_client
     assert captured == {

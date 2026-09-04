@@ -13,7 +13,7 @@ The system SHALL initialize one shared SQLite connection and one shared provider
 
 #### Scenario: OpenRouter free-model diagnostics are written
 - **WHEN** runtime context is built with a valid OpenRouter key
-- **THEN** the system queries OpenRouter's models catalog for free text-output models, writes `logs/openrouter_free_models.json` with model connection slugs sorted best-first, and does not replace the configured `[openrouter].models` list
+- **THEN** the system queries OpenRouter's models catalog for free text-output models, checks configured `[openrouter].models` with short `1` probe requests, writes `logs/openrouter_free_models.json` with model connection slugs sorted best-first and per-configured-model availability, and does not replace the configured `[openrouter].models` list
 
 #### Scenario: Runtime dependencies close once
 - **WHEN** runtime shuts down
