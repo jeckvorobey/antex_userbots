@@ -24,7 +24,7 @@
 - игнорирует остальные аккаунты swarm;
 - собирает историю диалога из SQLite;
 - подставляет persona нужного бота и базовые промты;
-- запрашивает текст ответа у Gemini;
+- запрашивает текст ответа у OpenRouter через provider-neutral AI client;
 - отправляет ответ в группу;
 - сохраняет и сообщение пользователя, и ответ бота в БД.
 
@@ -34,7 +34,7 @@
 - проверяет каждую enabled группу отдельно;
 - проверяет, что текущее время входит в разрешённое UTC-окно группы;
 - может пропустить запуск, если недавно была активность от человека;
-- выбирает пару `бот A -> бот B`;
+- выбирает пару `бот A -> бот B`, учитывая недавние обмены и планы других групп;
 - выбирает важный service-вопрос, если он due для группы, иначе обычную тему;
 - сверяется с persisted history, чтобы не повторять недавние темы и вопросы;
 - генерирует стартовое сообщение от `A`;
@@ -45,17 +45,29 @@
 - считаются отдельно для каждой группы;
 - используют те же `active_windows_utc`, human-activity gate и правило одного exchange на окно;
 - если важный exchange был в группе в день `N`, следующий важный exchange для этой группы допустим не раньше дня `N+3`;
-- сценарии идут по кругу: обмен RUB -> Airbnb оплата/бронь -> обмен USDT -> Booking оплата/бронь;
+- начальный сценарий новой группы выбирается среди наименее использованных другими группами за 24 часа; затем сценарии идут по кругу: обмен RUB -> Airbnb оплата/бронь -> обмен USDT -> Booking оплата/бронь;
 - вопрос звучит как обычная реплика и не упоминает контакт;
 - ответ второго бота естественно и разными формулировками упоминает miniapp-ссылку `https://t.me/tt_exchenge_bot/antex`.
+- если scheduled LLM отключён или вернул unsafe output, important-service ответ использует короткий локальный fallback с той же разрешённой ссылкой.
+- important-service запускается только для групп с `max_turns_per_exchange >= 2`, а cooldown учитывает только фактически отправленные сообщения участников.
+
+### Разнообразие между группами
+
+Группы используют общую сводку scheduled exchanges за последние 24 часа. При выборе сначала минимизируются повторы той же пары в других группах (A/B и B/A считаются одной парой), затем ослабление локального cooldown, участие ботов в других группах, их общая активность и повторение ролей. Среди равноценных вариантов выбор случайный. Обычные темы сначала проходят локальную проверку свежести, затем выбираются с учётом частоты в других группах.
+
+Сохранённый `planned` exchange резервирует участников и тему до отправки. `started` учитывает инициатора и ожидающего responder; завершённые или пропущенные обмены учитывают только опубликованные роли. Это отдельная сводка: локальный cooldown продолжает учитывать только публикации, история сообщений между группами не переносится. Записи без активности более 24 часов перестают влиять на общие предпочтения.
+
+При пустой истории 4 доступных бота в 2 группах дают четыре разных участника, а 14 ботов в 3 группах — шесть. Если вариантов мало, участники могут повторяться; уже использованная пара выбирается только после исчерпания более подходящих пар. Счётчики конфликтов и ослабления cooldown видны в логе `orchestrator: diversity`. Замена недоступного участника учитывает те же предпочтения.
+
+Планирование согласовано внутри одного swarm-процесса; Telegram и LLM вызываются после освобождения planning lock. После рестарта существующие пары, темы и время отправки планов сохраняются. Временные окна и задержки работают как раньше; абсолютная уникальность сгенерированных формулировок не гарантируется. Действующие группы продолжают прежний service-цикл, поэтому гарантированное различие стартовых сценариев относится к новым группам при наличии альтернатив.
 
 ## Что нужно для запуска
 
 Для работы нужны:
 - Python `3.11+`;
 - `uv` для установки зависимостей и запуска команд;
-- `API_ID` и `API_HASH` Telegram;
-- `GEMINI_API_KEY`;
+- `API_ID` и `API_HASH` Telegram в `config/settings.toml`;
+- `OPENROUTER_API_KEY`;
 - `SESSION_STRING_*` для каждого Telegram-аккаунта из swarm-конфига;
 - файл настроек TOML;
 - persona-файлы для ботов.
@@ -79,9 +91,7 @@ cp .env.example .env
 Минимально в `.env` должны быть:
 
 ```dotenv
-API_ID=12345678
-API_HASH=your_telegram_api_hash
-GEMINI_API_KEY=your_gemini_api_key
+OPENROUTER_API_KEY=your_openrouter_api_key
 SESSION_STRING_DMITRY=...
 SESSION_STRING_VITALY=...
 ```
@@ -89,7 +99,7 @@ SESSION_STRING_VITALY=...
 Важно:
 - имя переменной `SESSION_STRING_*` должно совпадать с `session_env` у бота в TOML;
 - `SESSION_STRING_*` нельзя коммитить и нельзя логировать.
-- `.env`, `.env.prod` и SQLite-файлы должны быть доступны только владельцу (`chmod 600`); runtime автоматически применяет `0600` к файловой БД и созданным SQLite `-wal`/`-shm` файлам.
+- `.env`, `.env.prod`, `config/settings.toml`, `config/settings.prod.toml` и SQLite-файлы должны быть доступны только владельцу (`chmod 600`); runtime автоматически применяет `0600` к файловой БД и созданным SQLite `-wal`/`-shm` файлам.
 - `config/settings.toml` подхватывается автоматически; `SETTINGS_PATH` больше не нужен для обычного запуска.
 
 ### 3. Создать файл настроек
@@ -103,8 +113,12 @@ cp config/settings.example.toml config/settings.toml
 Минимальный пример:
 
 ```toml
-[gemini]
-model = "gemini-2.5-flash"
+[telegram]
+api_id = 12345678
+api_hash = "your_telegram_api_hash"
+
+[openrouter]
+models = ["provider/primary-model", "provider/fallback-model"]
 
 [logging]
 level = "INFO"
@@ -134,7 +148,7 @@ active_windows_utc = ["14-16"]
 responder_delay_minutes = [5, 12]
 
 [swarm.orchestrator]
-tick_seconds = 30
+tick_seconds = 60
 silence_timeout_minutes = 60
 skip_if_recent_human_activity = true
 
@@ -154,15 +168,26 @@ temperature = 0.8
 ```
 
 На что обратить внимание:
+- `[telegram].api_id` и `[telegram].api_hash` обязательны; переменные окружения `API_ID` и `API_HASH` не читаются;
+- `[openrouter].models` обязателен и содержит минимум две уникальные непустые модели в порядке primary -> fallback; конкретные slugs выбирает оператор;
+- `temperature` в `[openrouter]` необязательна и не отправляется в OpenRouter, если отсутствует;
+- каждый запрос использует Chat Completions с `zdr=true`, `data_collection="deny"`, `allow_fallbacks=true`, `require_parameters=true` и server-side пределом `max_completion_tokens=256`;
+- credential-bearing URL маскируются до отправки провайдеру, а в Telegram-ответах разрешена только служебная ссылка `https://t.me/tt_exchenge_bot/antex`;
+- `OPENROUTER_API_KEY` и `PROXY` хранятся в runtime-конфигурации как маскируемые секреты и раскрываются только при создании OpenRouter/Telethon клиентов;
+- timeout равен 45 секундам, а SDK retry ограничен 15 секундами для connection/timeout, 408, 429, 5xx, 524 и 529;
+- необязательный `PROXY` из `.env` применяется одновременно к Telethon и OpenRouter; без него оба соединения прямые;
+- общий `PROXY` принимает только пересечение поддерживаемых transport-схем: `http://` и `socks5://`;
 - группы задаются через `[[groups]]`; старый `[target]` в TOML больше не поддерживается;
+- если все явно настроенные `[[groups]]` имеют `enabled = false`, routing и scheduled exchanges не запускаются через legacy fallback;
 - старые секции `[app]`, `[storage]` и `[prompts]` больше не входят в публичный TOML-контракт;
 - `group.id` должен быть уникальным;
 - каждая группа должна иметь `group_chat_id` или `group_target`;
 - если у группы есть `[groups.schedule]`, неуказанные поля наследуются из `[swarm.schedule]`;
-- `data/history.db`, `ai/prompts/`, `ai/prompts/topics.md` и `ai/prompts/bots/` теперь задаются кодовыми defaults;
+- `data/history.db` задаётся кодовым default, а prompt/topic/persona defaults разрешаются в bundled `ai/prompts/` как в checkout, так и в установленном wheel;
 - каждый `persona_file` должен реально существовать;
 - для каждого `session_env` должна быть переменная в `.env`;
-- реальные файлы `ai/prompts/**/*.md` являются частью этого production-инстанса и хранятся в git;
+- реальные файлы `ai/prompts/**/*.md` и `ai/prompts/important_service.toml` являются частью этого production-инстанса и хранятся в git;
+- `swarm.security.max_output_chars` должен быть не меньше `95`, чтобы обязательные локальные fallback-сообщения всегда помещались в лимит;
 - `topics.md` содержит общие topic-intents, а не готовые вопросы под конкретный город.
 
 ### 4. Подготовить промты
@@ -173,8 +198,9 @@ Runtime читает реальные файлы:
 - `ai/prompts/start_topic.md`
 - `ai/prompts/topics.md`
 - `ai/prompts/wind_down_hint.md`
+- `ai/prompts/important_service.toml`
 
-Эти файлы уже лежат в репозитории. `start_topic.md` отвечает за превращение общей темы из `topics.md` в один вопрос для города текущей группы.
+Эти файлы уже лежат в репозитории. `start_topic.md` отвечает за превращение общей темы из `topics.md` в один вопрос для города текущей группы, а `important_service.toml` хранит циклические question/answer intents важных service-сценариев.
 
 Для важных service-вопросов orchestrator добавляет в prompt context markers:
 - `important_service_question` для вопроса инициатора;
@@ -233,7 +259,7 @@ uv run python run.py
 - поднимутся все включённые swarm-аккаунты;
 - все включённые аккаунты проверят membership во всех enabled группах;
 - зарегистрируются обработчики входящих `reply` с фильтром enabled group chat id;
-- запустится scheduler для плановых обменов; первая группа циклически меняется между тиками, обработка остаётся последовательной;
+- запустится scheduler для плановых обменов; первая группа циклически меняется между тиками, обработка остаётся последовательной, а разрешение групп выполняется через актуальный active bot;
 - в логах появится информация о группах и активных ботах.
 
 Промты и persona-файлы читаются вне event loop и кэшируются до изменения файла. Для human reply действует ограничение незавершённых обработок на одного бота: `swarm.security.addressed_reply_max_pending_per_bot` (по умолчанию `3`).
@@ -243,8 +269,11 @@ uv run python run.py
 ## Reload групп
 
 Во время работы scheduler проверяет `config/settings.toml` по `mtime`. Если файл изменился:
-- добавленные или включённые группы попадут в следующие scheduler ticks;
+- добавленные, включённые или изменённые группы попадут в runtime только после membership и `can_write=True` checks для каждого active bot;
+- группа, которую хотя бы один active bot не смог разрешить, подключить или подтвердить для записи, не активируется до следующего изменения конфигурации или restart;
 - выключенные группы перестанут получать scheduled exchanges и addressed replies;
+- удаление всех `[[groups]]` не восстанавливает прежнюю группу через compatibility fallback;
+- изменение `swarm.security.allow_external_llm_for_scheduled` применяется к group orchestrator на следующем tick;
 - боты не перезапускаются, изменения списка ботов и `SESSION_STRING_*` по-прежнему требуют restart.
 
 ## Проверка доступности ботов при startup
@@ -253,8 +282,11 @@ uv run python run.py
 проверяет все `enabled` аккаунты. В active pool попадает только бот, который
 не заморожен Telegram, проходит непубликующую global messaging-проверку и имеет
 `can_write=True` во всех enabled группах. Результат каждой проверки сохраняется
-в SQLite без строк сессий и секретов; боты, удалённые из `settings.toml`, после
-такого сброса в БД не остаются.
+в SQLite без строк сессий и секретов. Transient startup snapshot обновляется отдельно:
+durable quarantine после permanent Telegram restrictions сохраняется до ручного снятия,
+а такой аккаунт не запускается повторно автоматически. Временная ошибка запуска
+replacement-клиента не останавливает supervisor: следующая reconnect-попытка создаёт
+новый клиент после backoff.
 
 ## Как понять, что запуск прошёл нормально
 
@@ -334,12 +366,14 @@ uv run pytest tests/test_reply_router.py
 5. Проверь, что в каждой enabled группе появился отдельный обмен `A -> B`.
 6. Проверь, что exchange записался в SQLite с нужным `group_id`.
 
+На тестовой БД с пустой историей и одинаковым доступным roster проверь разные участники для 4 ботов / 2 групп или 14 / 3. Для 4 ботов / 5 групп участники будут повторяться, но первые пять неупорядоченных пар должны различаться. Не очищай production-БД ради этой проверки.
+
 Для проверки важного service-вопроса:
 
 1. Используй группу, где в SQLite нет недавних `important_service` exchanges, или тестовую БД.
 2. Временно задай ближайшее `active_windows_utc`.
 3. Запусти приложение и дождись scheduler tick.
-4. Проверь, что первый important-сценарий задаёт вопрос про обмен безналичных рублей.
+4. Проверь, что первые сценарии новых групп различаются при наличии альтернатив в `important_service.toml`; первым может быть любой из четырёх сценариев.
 5. Проверь, что ответ второго бота упоминает `https://t.me/tt_exchenge_bot/antex`.
 6. Проверь в SQLite, что exchange записан с `exchange_kind = important_service` и `important_scenario`.
 
@@ -361,7 +395,7 @@ uv run pytest tests/test_reply_router.py
 - `[prompts]`
 - `SETTINGS_PATH` из `.env`
 
-После этого проверь, что в файле остались только реально нужные override-секции вроде `[gemini]`, `[logging]`, `[swarm.schedule]`, `[swarm.orchestrator]`, `[swarm.security]`, `[[groups]]` и `[[swarm.bots]]`.
+Замени `[gemini]` на обязательный `[openrouter]` со списком минимум из двух уникальных model slugs. Удали `GEMINI_API_KEY` и `PROXY_URL`; используй `OPENROUTER_API_KEY` и необязательный общий `PROXY`. Остальные поддерживаемые секции: `[logging]`, `[swarm.schedule]`, `[swarm.orchestrator]`, `[swarm.security]`, `[[groups]]` и `[[swarm.bots]]`.
 
 ## Коротко: минимальный путь до первого запуска
 
@@ -370,7 +404,7 @@ uv run pytest tests/test_reply_router.py
 1. Установить зависимости: `uv sync`.
 2. Скопировать `.env.example` в `.env`.
 3. Скопировать `config/settings.example.toml` в `config/settings.toml`.
-4. Заполнить `API_ID`, `API_HASH`, `GEMINI_API_KEY`.
+4. Заполнить `[telegram].api_id`, `[telegram].api_hash`, `OPENROUTER_API_KEY` и заменить model placeholders в `[openrouter].models`.
 5. Получить `SESSION_STRING_*` для каждого аккаунта и добавить их в `.env`.
 6. Проверить, что persona-файлы существуют.
 7. Запустить тесты: `uv run pytest`.

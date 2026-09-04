@@ -11,7 +11,7 @@ from typing import Any
 
 from telethon.errors import ChannelPrivateError, ChatWriteForbiddenError, UserBannedInChannelError, UserNotParticipantError
 
-from ai.gemini import GeminiClient
+from ai.generation import TextGenerationClient
 from ai.history import MessageHistory
 from ai.prompt_composer import PromptComposer
 from core.runtime_models import SwarmBotProfile
@@ -71,7 +71,7 @@ class AddressedReplyRouter:
         bot_profile: SwarmBotProfile,
         history: MessageHistory | Any,
         prompt_composer: PromptComposer | Any,
-        gemini_client: GeminiClient | Any,
+        ai_client: TextGenerationClient | Any,
         swarm_user_ids: set[int],
         enabled_group_chat_ids: set[int] | None = None,
         manager: SwarmManager | Any | None = None,
@@ -83,7 +83,7 @@ class AddressedReplyRouter:
         self.bot_profile = bot_profile
         self.history = history
         self.prompt_composer = prompt_composer
-        self.gemini_client = gemini_client
+        self.ai_client = ai_client
         self.swarm_user_ids = swarm_user_ids
         self.enabled_group_chat_ids = enabled_group_chat_ids if enabled_group_chat_ids is not None else set()
         self.manager = manager
@@ -199,14 +199,14 @@ class AddressedReplyRouter:
         )
         security_settings = self.security_settings_getter()
         if getattr(security_settings, "swarm_allow_external_llm_for_replies", True):
-            response_text = await self.gemini_client.generate_reply(
+            response_text = await self.ai_client.generate_reply(
                 system_prompt=system_prompt,
                 history=history,
                 user_message=user_text,
             )
-            output_safe_checker = getattr(self.gemini_client, "is_output_safe", lambda _text: True)
+            output_safe_checker = getattr(self.ai_client, "is_output_safe", lambda _text: True)
             if not output_safe_checker(response_text):
-                logger.warning("router: bot_id=%s replaced unsafe Gemini reply", self.bot_profile.id)
+                logger.warning("router: bot_id=%s replaced unsafe AI reply", self.bot_profile.id)
                 response_text = SAFE_REPLY_FALLBACK_TEXT
         else:
             logger.info("router: bot_id=%s uses local fallback because reply LLM is disabled", self.bot_profile.id)
@@ -230,6 +230,14 @@ class AddressedReplyRouter:
         remaining_delay = max(0.0, reply_due_at - self.monotonic_provider())
         if remaining_delay > 0:
             await asyncio.sleep(remaining_delay)
+        is_active = getattr(self.manager, "is_active", None)
+        if chat_id not in self.enabled_group_chat_ids or (callable(is_active) and not is_active(self.bot_profile.id)):
+            logger.warning(
+                "router: cancel delayed reply because runtime eligibility changed bot_id=%s chat_id=%s",
+                self.bot_profile.id,
+                chat_id,
+            )
+            return False
         try:
             await event.reply(response_text)
         except PERMANENT_TELEGRAM_SEND_ERRORS as exc:
@@ -251,7 +259,7 @@ class AddressedReplyRouter:
                     )
             manager_disable = getattr(self.manager, "disable_bot", None)
             if callable(manager_disable):
-                await manager_disable(self.bot_profile.id, reason=reason)
+                await manager_disable(self.bot_profile.id, reason=reason, defer_disconnect=True)
                 logger.error(
                     "router: permanently disabled bot after Telegram send error bot_id=%s chat_id=%s reason=%s auto_reuse=false",
                     self.bot_profile.id,

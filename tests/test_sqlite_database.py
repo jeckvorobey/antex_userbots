@@ -262,15 +262,16 @@ async def test_read_waits_for_active_write_transaction():
 
 
 async def test_runtime_context_closes_shared_database_once():
-    """Проверяет, что RuntimeContext делегирует shutdown только общей базе."""
+    """Проверяет, что RuntimeContext закрывает AI client и общую базу."""
     import run
 
     database = AsyncMock()
+    ai_client = AsyncMock()
     context = run.RuntimeContext(
         database=database,
         history=object(),
         prompt_loader=object(),
-        gemini_client=object(),
+        ai_client=ai_client,
         topic_selector=object(),
         prompt_composer=object(),
         exchange_store=object(),
@@ -278,6 +279,7 @@ async def test_runtime_context_closes_shared_database_once():
 
     await context.close()
 
+    ai_client.close.assert_awaited_once_with()
     database.close.assert_awaited_once_with()
 
 

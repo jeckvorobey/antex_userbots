@@ -25,7 +25,7 @@ async def test_reply_router_logs_ignore_reason(caplog):
         bot_profile=SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
         history=SimpleNamespace(get_session_history=AsyncMock(), save_message=AsyncMock()),
         prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system")),
-        gemini_client=SimpleNamespace(generate_reply=AsyncMock()),
+        ai_client=SimpleNamespace(generate_reply=AsyncMock()),
         swarm_user_ids={202, 303},
         enabled_group_chat_ids={-100555},
     )
@@ -52,7 +52,7 @@ async def test_orchestrator_logs_skip_on_recent_human_activity(caplog):
         manager=SimpleNamespace(),
         topic_selector=SimpleNamespace(),
         prompt_composer=SimpleNamespace(),
-        gemini_client=SimpleNamespace(),
+        ai_client=SimpleNamespace(),
         history=SimpleNamespace(),
         exchange_store=SimpleNamespace(),
         group_target="@chat",

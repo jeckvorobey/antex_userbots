@@ -5,15 +5,17 @@ from __future__ import annotations
 import logging
 import random
 from collections import Counter
-from dataclasses import dataclass
+from contextlib import nullcontext
 from datetime import date
 from datetime import UTC, datetime, timedelta
 from typing import Any, Callable
 
 from telethon.errors import ChannelPrivateError, ChatWriteForbiddenError, UserBannedInChannelError, UserNotParticipantError
 
+from ai.prompt_loader import ImportantServiceScenario
 from core.runtime_models import ExchangeDecision, SwarmBotProfile
 from userbot.exchange_store import ExchangeStore, normalize_signature
+from userbot.exchange_diversity import ExchangeDiversity
 from userbot.scheduler import is_within_windows_utc, pick_random_datetime, pick_random_delay
 
 
@@ -33,38 +35,8 @@ IMPORTANT_SERVICE_KIND = "important_service"
 REGULAR_EXCHANGE_KIND = "regular"
 IMPORTANT_SERVICE_CONTACT = "https://t.me/tt_exchenge_bot/antex"
 SAFE_SCHEDULED_REPLY_FALLBACK_TEXT = "Я бы уточнил это у тех, кто сталкивался с этим совсем недавно."
-
-
-@dataclass(frozen=True, slots=True)
-class ImportantServiceScenario:
-    """Описание important-service сценария без готового финального текста."""
-
-    key: str
-    question_intent: str
-    answer_intent: str
-
-
-IMPORTANT_SERVICE_SCENARIOS: tuple[ImportantServiceScenario, ...] = (
-    ImportantServiceScenario(
-        key="exchange_rub",
-        question_intent="Где можно обменять безналичные рубли?",
-        answer_intent=f"Разговорно посоветуй обратиться в {IMPORTANT_SERVICE_CONTACT} для обмена безналичных рублей.",
-    ),
-    ImportantServiceScenario(
-        key="booking_airbnb",
-        question_intent="Как забронировать и оплатить Airbnb рублями или USDT?",
-        answer_intent=f"Разговорно посоветуй обратиться в {IMPORTANT_SERVICE_CONTACT} для помощи с оплатой Airbnb рублями или USDT.",
-    ),
-    ImportantServiceScenario(
-        key="exchange_usdt",
-        question_intent="Где можно обменять безналичный USDT?",
-        answer_intent=f"Разговорно посоветуй обратиться в {IMPORTANT_SERVICE_CONTACT} для обмена безналичного USDT.",
-    ),
-    ImportantServiceScenario(
-        key="booking_booking",
-        question_intent="Как забронировать и оплатить Booking рублями или USDT?",
-        answer_intent=f"Разговорно посоветуй обратиться в {IMPORTANT_SERVICE_CONTACT} для помощи с оплатой Booking рублями или USDT.",
-    ),
+SAFE_IMPORTANT_SERVICE_REPLY_FALLBACK_TEXT = (
+    f"Можно обратиться сюда: {IMPORTANT_SERVICE_CONTACT} — там подскажут по обмену или оплате."
 )
 
 
@@ -78,7 +50,7 @@ class SwarmOrchestrator:
         manager: Any,
         topic_selector: Any,
         prompt_composer: Any,
-        gemini_client: Any,
+        ai_client: Any,
         history: Any,
         exchange_store: ExchangeStore | Any,
         group_id: str | None = None,
@@ -97,13 +69,14 @@ class SwarmOrchestrator:
         resolve_group_target: Callable[[object], Any] | None = None,
         randint_provider: Callable[[int, int], int] | None = None,
         allow_external_llm_for_scheduled: bool = True,
+        important_service_scenarios: tuple[ImportantServiceScenario, ...] = (),
     ) -> None:
         self.bot_profiles = [profile for profile in bot_profiles if profile.enabled]
         self.disabled_bot_ids: set[str] = set()
         self.manager = manager
         self.topic_selector = topic_selector
         self.prompt_composer = prompt_composer
-        self.gemini_client = gemini_client
+        self.ai_client = ai_client
         self.history = history
         self.exchange_store = exchange_store
         self.group_id = group_id
@@ -122,6 +95,7 @@ class SwarmOrchestrator:
         self.resolve_group_target = resolve_group_target
         self.randint_provider = randint_provider or random.randint
         self.allow_external_llm_for_scheduled = allow_external_llm_for_scheduled
+        self.important_service_scenarios = important_service_scenarios
 
     async def run_once(self) -> bool:
         """Выполняет одну due-стадию scheduled exchange."""
@@ -148,6 +122,18 @@ class SwarmOrchestrator:
             logger.warning("orchestrator: skip exchange because resolved group_chat_id is missing group_id=%s", self.group_id)
             return False
 
+        async with self._planning_context():
+            planned_exchange = await self._get_or_plan_exchange(now)
+        if planned_exchange is None:
+            return False
+        return await self._run_due_planned_exchange(exchange=planned_exchange, now=now)
+
+    def _planning_context(self):
+        """Возвращает общий planning lock; legacy store без координации остаётся совместимым."""
+        return getattr(self.exchange_store, "planning_lock", None) or nullcontext()
+
+    async def _get_or_plan_exchange(self, now: datetime) -> dict[str, object] | None:
+        """Выбирает и сохраняет план под общим lock, не вызывая Telegram или LLM."""
         window_key, window_start, window_end = self._build_window_key(now)
         get_exchange_by_window_key = getattr(self.exchange_store, "get_exchange_by_window_key", None)
         current_window_exchange = (
@@ -158,17 +144,17 @@ class SwarmOrchestrator:
         if current_window_exchange is not None:
             status = current_window_exchange.get("status")
             if status == "planned":
-                return await self._run_due_planned_exchange(exchange=current_window_exchange, now=now)
+                return current_window_exchange
             logger.info(
                 "orchestrator: skip new exchange because window already has status=%s window_key=%s",
                 status,
                 window_key,
             )
-            return False
+            return None
 
         if len(self._active_bot_profiles()) < 2:
             logger.warning("orchestrator: skip new exchange because active bot pool is smaller than two")
-            return False
+            return None
 
         decision = self._normalize_exchange_decision(await self._build_exchange_decision_for_window(now))
         logger.info(
@@ -204,7 +190,7 @@ class SwarmOrchestrator:
             "exchange_kind": decision.exchange_kind,
             "important_scenario": decision.important_scenario,
         }
-        return await self._run_due_planned_exchange(exchange=planned_exchange, now=now)
+        return planned_exchange
 
     async def _build_exchange_decision_for_window(self, now: datetime) -> ExchangeDecision:
         """Выбирает important-service exchange, если он due, иначе обычный exchange."""
@@ -220,10 +206,10 @@ class SwarmOrchestrator:
             group_id=self.group_id,
             group_chat_id=self.group_chat_id,
         )
-        candidates = self._pick_bot_candidates(recent_bot_ids)
-        chosen_initiator, chosen_responder = random.sample(candidates, 2)
+        diversity = await self._load_diversity(self.now_provider())
+        chosen_initiator, chosen_responder = self._choose_participants(recent_bot_ids, diversity)
 
-        topic = await self._choose_topic()
+        topic = await self._choose_topic(diversity)
         recent_questions = await self.exchange_store.get_recent_questions(
             since=self.question_repeat_window,
             group_id=self.group_id,
@@ -239,6 +225,8 @@ class SwarmOrchestrator:
 
     async def _build_important_service_decision_if_due(self, now: datetime) -> ExchangeDecision | None:
         """Возвращает important-service decision, если группа достигла cadence."""
+        if self.max_turns_per_exchange <= 1 or not self.important_service_scenarios:
+            return None
         latest_getter = getattr(self.exchange_store, "get_latest_important_service_exchange", None)
         if not callable(latest_getter):
             return None
@@ -248,16 +236,17 @@ class SwarmOrchestrator:
             logger.info("orchestrator: important-service exchange is not due group_id=%s", self.group_id)
             return None
 
+        diversity = await self._load_diversity(now)
         scenario = self._next_important_service_scenario(
-            latest_exchange.get("important_scenario") if latest_exchange is not None else None
+            latest_exchange.get("important_scenario") if latest_exchange is not None else None,
+            diversity=diversity,
         )
         recent_bot_ids = await self.exchange_store.get_recent_bot_ids(
             RECENT_BOT_COOLDOWN_LIMIT,
             group_id=self.group_id,
             group_chat_id=self.group_chat_id,
         )
-        candidates = self._pick_bot_candidates(recent_bot_ids)
-        chosen_initiator, chosen_responder = random.sample(candidates, 2)
+        chosen_initiator, chosen_responder = self._choose_participants(recent_bot_ids, diversity)
         recent_questions = await self.exchange_store.get_recent_questions(
             since=self.question_repeat_window,
             group_id=self.group_id,
@@ -277,6 +266,38 @@ class SwarmOrchestrator:
             exchange_kind=IMPORTANT_SERVICE_KIND,
             important_scenario=scenario.key,
             important_answer_intent=scenario.answer_intent,
+        )
+
+    async def _load_diversity(self, now: datetime, *, exclude_exchange_id: str | None = None) -> ExchangeDiversity:
+        """Загружает общие метаданные один раз на решение без переноса текстовой истории."""
+        getter = getattr(self.exchange_store, "get_diversity_summary", None)
+        if not callable(getter) or (self.group_id is None and self.group_chat_id is None):
+            return ExchangeDiversity()
+        rows = await getter(now=now, exclude_exchange_id=exclude_exchange_id)
+        return ExchangeDiversity.from_records(rows, group_id=self.group_id, group_chat_id=self.group_chat_id)
+
+    def _choose_participants(
+        self, recent_bot_ids: list[str], diversity: ExchangeDiversity,
+    ) -> tuple[SwarmBotProfile, SwarmBotProfile]:
+        """Выбирает наименее повторяющуюся пару со случайным разрешением равенств."""
+        candidates = (
+            self._active_bot_profiles() if diversity.other_pairs else self._pick_bot_candidates(recent_bot_ids)
+        )
+        profiles = {profile.id: profile for profile in candidates}
+        pairs = ((a, b) for a in profiles for b in profiles if a != b)
+        winners, score = diversity.best_pairs(pairs, recent_bot_ids[:RECENT_BOT_COOLDOWN_LIMIT])
+        if not winners:
+            raise ValueError("Для scheduled exchange нужно минимум два enabled userbot")
+        a, b = random.choice(winners)
+        self._log_diversity_choice(a, b, score, len(winners))
+        return profiles[a], profiles[b]
+
+    def _log_diversity_choice(self, a: str, b: str, score: tuple[int, ...], candidates: int) -> None:
+        """Логирует только идентификаторы и счётчики решений/ослаблений."""
+        logger.info(
+            "orchestrator: diversity group_id=%s initiator=%s responder=%s "
+            "pair_conflicts=%s cooldown_relaxed=%s other_usage=%s total_usage=%s role_usage=%s candidates=%s",
+            self.group_id, a, b, *score, candidates,
         )
 
     def _pick_bot_candidates(self, recent_bot_ids: list[str]) -> list[SwarmBotProfile]:
@@ -308,7 +329,7 @@ class SwarmOrchestrator:
                     excluded_profile_count -= profile_counts[restored_bot_id]
         raise ValueError("Для scheduled exchange нужно минимум два enabled userbot")
 
-    async def _choose_topic(self) -> str:
+    async def _choose_topic(self, diversity: ExchangeDiversity | None = None) -> str:
         """Выбирает тему, избегая последних заданных тем при наличии альтернатив."""
         recent_topic_keys = await self.exchange_store.get_recent_topic_keys_by_limit(
             RECENT_TOPIC_LIMIT,
@@ -332,7 +353,14 @@ class SwarmOrchestrator:
             )
             not in recent_topic_keys
         ]
-        topic = random.choice(fresh_topics or available_topics)
+        diversity = diversity if diversity is not None else await self._load_diversity(self.now_provider())
+        pool = fresh_topics or available_topics
+        counts = [
+            diversity.other_topics[topic_key_getter(topic) if callable(topic_key_getter) else normalize_signature(topic)]
+            for topic in pool
+        ]
+        minimum = min(counts)
+        topic = random.choice([topic for topic, count in zip(pool, counts) if count == minimum])
         logger.info(
             "orchestrator: topic selected topic=%s fresh_pool=%s total_pool=%s",
             topic,
@@ -419,7 +447,13 @@ class SwarmOrchestrator:
                     initiator_text = await self._generate_non_repeating_question(
                         initiator_prompt=initiator_prompt, topic=decision.topic, recent_bot_questions=recent_initiator_questions,
                     )
-                    if not getattr(self.gemini_client, "is_output_safe", lambda _text: True)(initiator_text):
+                    if (
+                        not getattr(self.ai_client, "is_output_safe", lambda _text: True)(initiator_text)
+                        or (
+                            decision.exchange_kind == IMPORTANT_SERVICE_KIND
+                            and IMPORTANT_SERVICE_CONTACT in initiator_text
+                        )
+                    ):
                         initiator_text = self._build_safe_start_topic(decision.topic)
                 else:
                     initiator_text = self._build_safe_start_topic(decision.topic)
@@ -529,13 +563,19 @@ class SwarmOrchestrator:
                 )
                 responder_history = await self.history.get_session_history(chat_id=history_chat_id, bot_id=responder.id)
                 if self._allow_external_llm_for_scheduled():
-                    responder_text = await self.gemini_client.generate_reply(
+                    responder_text = await self.ai_client.generate_reply(
                         system_prompt=responder_prompt, history=responder_history, user_message=str(exchange["question_text"]),
                     )
-                    if not getattr(self.gemini_client, "is_output_safe", lambda _text: True)(responder_text):
-                        responder_text = SAFE_SCHEDULED_REPLY_FALLBACK_TEXT
+                    if (
+                        not getattr(self.ai_client, "is_output_safe", lambda _text: True)(responder_text)
+                        or (
+                            exchange.get("exchange_kind") == IMPORTANT_SERVICE_KIND
+                            and IMPORTANT_SERVICE_CONTACT not in responder_text
+                        )
+                    ):
+                        responder_text = self._responder_fallback_text(exchange)
                 else:
-                    responder_text = SAFE_SCHEDULED_REPLY_FALLBACK_TEXT
+                    responder_text = self._responder_fallback_text(exchange)
                 mark_generated = getattr(self.exchange_store, "mark_responder_generated", None)
                 if callable(mark_generated):
                     await mark_generated(str(exchange["exchange_id"]), responder_text)
@@ -543,7 +583,11 @@ class SwarmOrchestrator:
             reply_to_message_id = exchange.get("initiator_message_id")
             responder_group_target = await self._resolve_group_target_for_client(responder_client.client)
             try:
-                await responder_client.client.send_message(responder_group_target, responder_text, reply_to=reply_to_message_id)
+                responder_message = await responder_client.client.send_message(
+                    responder_group_target,
+                    responder_text,
+                    reply_to=reply_to_message_id,
+                )
             except PERMANENT_TELEGRAM_SEND_ERRORS as exc:
                 retry_exchange = await self._handle_permanent_send_error(
                     exchange_id=str(exchange["exchange_id"]), bot_id=responder.id,
@@ -568,9 +612,23 @@ class SwarmOrchestrator:
                 initiator_id,
             )
 
-        await self.exchange_store.mark_exchange_completed(str(exchange["exchange_id"]))
+        responder_message_id = getattr(responder_message, "id", None)
+        if isinstance(responder_message_id, int):
+            await self.exchange_store.mark_exchange_completed(
+                str(exchange["exchange_id"]),
+                responder_message_id=responder_message_id,
+            )
+        else:
+            await self.exchange_store.mark_exchange_completed(str(exchange["exchange_id"]))
         logger.info("orchestrator: exchange completed exchange_id=%s", exchange["exchange_id"])
         return True
+
+    @staticmethod
+    def _responder_fallback_text(exchange: dict[str, object]) -> str:
+        """Выбирает безопасный fallback с учётом типа scheduled exchange."""
+        if exchange.get("exchange_kind") == IMPORTANT_SERVICE_KIND:
+            return SAFE_IMPORTANT_SERVICE_REPLY_FALLBACK_TEXT
+        return SAFE_SCHEDULED_REPLY_FALLBACK_TEXT
 
     async def _handle_permanent_send_error(
         self, *, exchange_id: str, bot_id: str, counterpart_bot_id: str, stage: str, exc: Exception
@@ -582,21 +640,29 @@ class SwarmOrchestrator:
             exchange_id, bot_id, self.group_id, stage,
         )
         self.disabled_bot_ids.add(bot_id)
+        quarantine_error: Exception | None = None
         quarantine_bot = getattr(self.exchange_store, "quarantine_bot", None)
         if callable(quarantine_bot):
             group_key = str(self.group_chat_id if self.group_chat_id is not None else self.group_target)
-            await quarantine_bot(group_key=group_key, bot_id=bot_id, reason=reason)
+            try:
+                await quarantine_bot(group_key=group_key, bot_id=bot_id, reason=reason)
+            except Exception as persist_exc:
+                quarantine_error = persist_exc
+                logger.error(
+                    "orchestrator: quarantine persistence failed bot_id=%s group_id=%s "
+                    "action=disable_before_propagate",
+                    bot_id,
+                    self.group_id,
+                )
         manager_disable = getattr(self.manager, "disable_bot", None)
         if callable(manager_disable):
             await manager_disable(bot_id, reason=reason)
-        replacement = self._pick_replacement_bot(failed_bot_id=bot_id, counterpart_bot_id=counterpart_bot_id)
-        reassign = getattr(self.exchange_store, "reassign_after_permanent_send_error", None)
-        get_exchange = getattr(self.exchange_store, "get_exchange", None)
-        if replacement is not None and callable(reassign) and callable(get_exchange):
-            await reassign(exchange_id, stage=stage, replacement_bot_id=replacement.id, counterpart_bot_id=counterpart_bot_id)
-            return await get_exchange(exchange_id)
-        await self.exchange_store.mark_exchange_skipped(exchange_id, reason)
-        return None
+        if quarantine_error is not None:
+            raise quarantine_error
+        return await self._reassign_participant(
+            exchange_id=exchange_id, bot_id=bot_id, counterpart_bot_id=counterpart_bot_id,
+            stage=stage, reason=reason,
+        )
 
     async def _replace_unavailable_exchange_participant(
         self,
@@ -616,25 +682,34 @@ class SwarmOrchestrator:
             self.group_id,
             stage,
         )
-        replacement = self._pick_replacement_bot(failed_bot_id=bot_id, counterpart_bot_id=counterpart_bot_id)
-        reassign = getattr(self.exchange_store, "reassign_after_permanent_send_error", None)
-        get_exchange = getattr(self.exchange_store, "get_exchange", None)
-        if replacement is not None and callable(reassign) and callable(get_exchange):
-            await reassign(
-                exchange_id,
-                stage=stage,
-                replacement_bot_id=replacement.id,
-                counterpart_bot_id=counterpart_bot_id,
-            )
-            return await get_exchange(exchange_id)
-        await self.exchange_store.mark_exchange_skipped(exchange_id, reason)
-        logger.warning(
-            "orchestrator: skipped exchange without replacement exchange_id=%s bot_id=%s stage=%s",
-            exchange_id,
-            bot_id,
-            stage,
+        return await self._reassign_participant(
+            exchange_id=exchange_id, bot_id=bot_id, counterpart_bot_id=counterpart_bot_id,
+            stage=stage, reason=reason,
         )
-        return None
+
+    async def _reassign_participant(
+        self, *, exchange_id: str, bot_id: str, counterpart_bot_id: str, stage: str, reason: str,
+    ) -> dict[str, object] | None:
+        """Согласует выбор замены и сохранение нового резерва между группами."""
+        async with self._planning_context():
+            replacement = await self._pick_replacement_bot(
+                failed_bot_id=bot_id, counterpart_bot_id=counterpart_bot_id,
+                stage=stage, exchange_id=exchange_id,
+            )
+            reassign = getattr(self.exchange_store, "reassign_after_permanent_send_error", None)
+            get_exchange = getattr(self.exchange_store, "get_exchange", None)
+            if replacement is not None and callable(reassign) and callable(get_exchange):
+                await reassign(
+                    exchange_id, stage=stage, replacement_bot_id=replacement.id,
+                    counterpart_bot_id=counterpart_bot_id,
+                )
+                return await get_exchange(exchange_id)
+            await self.exchange_store.mark_exchange_skipped(exchange_id, reason)
+            logger.warning(
+                "orchestrator: skipped exchange without replacement exchange_id=%s bot_id=%s stage=%s",
+                exchange_id, bot_id, stage,
+            )
+            return None
 
     def _active_bot_profiles(self) -> list[SwarmBotProfile]:
         """Возвращает доступные для scheduled exchange аккаунты."""
@@ -658,13 +733,30 @@ class SwarmOrchestrator:
         active_ids = getattr(self.manager, "active_bot_ids", None)
         return active_ids is None or bot_id in active_ids
 
-    def _pick_replacement_bot(self, *, failed_bot_id: str, counterpart_bot_id: str) -> SwarmBotProfile | None:
-        """Выбирает третью активную персону для неотправленного turn."""
-        candidates = [
-            profile for profile in self._active_bot_profiles()
+    async def _pick_replacement_bot(
+        self, *, failed_bot_id: str, counterpart_bot_id: str, stage: str, exchange_id: str,
+    ) -> SwarmBotProfile | None:
+        """Выбирает замену с фиксированным counterpart, исключая собственный резерв."""
+        profiles = {
+            profile.id: profile for profile in self._active_bot_profiles()
             if profile.id not in {failed_bot_id, counterpart_bot_id}
-        ]
-        return random.choice(candidates) if candidates else None
+        }
+        if not profiles:
+            return None
+        diversity = await self._load_diversity(self.now_provider(), exclude_exchange_id=exchange_id)
+        recent_getter = getattr(self.exchange_store, "get_recent_bot_ids", None)
+        recent_ids = (
+            await recent_getter(RECENT_BOT_COOLDOWN_LIMIT, group_id=self.group_id, group_chat_id=self.group_chat_id)
+            if callable(recent_getter) else []
+        )
+        pairs = (
+            (bot_id, counterpart_bot_id) if stage == "initiator" else (counterpart_bot_id, bot_id)
+            for bot_id in profiles
+        )
+        winners, score = diversity.best_pairs(pairs, recent_ids[:RECENT_BOT_COOLDOWN_LIMIT])
+        a, b = random.choice(winners)
+        self._log_diversity_choice(a, b, score, len(winners))
+        return profiles[a if stage == "initiator" else b]
 
     async def _resolve_group_target_for_client(self, telegram_client: object) -> object:
         """Резолвит entity группы отдельно для каждого Telethon-клиента."""
@@ -698,7 +790,7 @@ class SwarmOrchestrator:
         tried_topics = {topic}
 
         for attempt in range(1, 4):
-            question_text = await self.gemini_client.start_topic(system_prompt=prompt, topic=current_topic)
+            question_text = await self.ai_client.start_topic(system_prompt=prompt, topic=current_topic)
             signature = normalize_signature(question_text)
             if signature not in recent_signatures:
                 return question_text
@@ -777,9 +869,6 @@ class SwarmOrchestrator:
                 "important_service_question",
                 f"important_scenario: {decision.important_scenario}",
                 f"question_intent: {decision.topic}",
-                f"answer_intent: {decision.important_answer_intent}",
-                f"required_contact_for_answer: {IMPORTANT_SERVICE_CONTACT}",
-                "Не упоминай required_contact_for_answer в вопросе.",
                 recent_questions_context,
             )
             if item
@@ -800,26 +889,27 @@ class SwarmOrchestrator:
                 "important_service_answer",
                 f"important_scenario: {scenario_key}",
                 f"answer_intent: {answer_intent}",
-                f"required_contact: {IMPORTANT_SERVICE_CONTACT}",
-                f"Пример стиля: Обратись в сервис {IMPORTANT_SERVICE_CONTACT}, отличный курс и надежно.",
-                "Не копируй пример дословно, каждый раз формулируй по-разному.",
                 base,
             )
             if item
         )
         return self._build_exchange_context(body)
 
-    def _next_important_service_scenario(self, latest_scenario: object | None) -> ImportantServiceScenario:
-        """Возвращает следующий сценарий fixed-cycle очереди."""
-        scenario_keys = [scenario.key for scenario in IMPORTANT_SERVICE_SCENARIOS]
+    def _next_important_service_scenario(
+        self, latest_scenario: object | None, *, diversity: ExchangeDiversity | None = None,
+    ) -> ImportantServiceScenario:
+        """Разносит стартовые позиции групп, затем продолжает persisted цикл."""
+        scenario_keys = [scenario.key for scenario in self.important_service_scenarios]
         if not isinstance(latest_scenario, str) or latest_scenario not in scenario_keys:
-            return IMPORTANT_SERVICE_SCENARIOS[0]
-        next_index = (scenario_keys.index(latest_scenario) + 1) % len(IMPORTANT_SERVICE_SCENARIOS)
-        return IMPORTANT_SERVICE_SCENARIOS[next_index]
+            counts = (diversity or ExchangeDiversity()).other_scenarios
+            minimum = min(counts[key] for key in scenario_keys)
+            return random.choice([scenario for scenario in self.important_service_scenarios if counts[scenario.key] == minimum])
+        next_index = (scenario_keys.index(latest_scenario) + 1) % len(self.important_service_scenarios)
+        return self.important_service_scenarios[next_index]
 
     def _important_service_answer_intent(self, scenario_key: str | None) -> str | None:
         """Возвращает answer intent по ключу important-service сценария."""
-        for scenario in IMPORTANT_SERVICE_SCENARIOS:
+        for scenario in self.important_service_scenarios:
             if scenario.key == scenario_key:
                 return scenario.answer_intent
         return None

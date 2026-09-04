@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import uuid
@@ -35,6 +36,30 @@ class ExchangeStore:
 
     def __init__(self, database: SQLiteDatabase) -> None:
         self.database = database
+        self.planning_lock = asyncio.Lock()
+
+    async def get_diversity_summary(
+        self, *, now: datetime, exclude_exchange_id: str | None = None,
+    ) -> list[dict[str, object]]:
+        """Читает общие резервы и опубликованные роли за 24 часа без текстов сообщений."""
+        rows = await self.database.fetch_all(
+            "get_diversity_summary",
+            """SELECT exchange_id, group_id, group_chat_id, topic_key, important_scenario,
+                      status, last_activity_at,
+                      CASE WHEN status = 'planned' OR initiator_message_id IS NOT NULL
+                           THEN initiator_bot_id END AS initiator_bot_id,
+                      CASE WHEN status IN ('planned', 'started') OR responder_message_id IS NOT NULL
+                           THEN responder_bot_id END AS responder_bot_id
+               FROM scheduled_exchanges
+               WHERE last_activity_at >= ?
+                 AND (group_id IS NOT NULL OR group_chat_id IS NOT NULL)
+                 AND (? IS NULL OR exchange_id != ?)
+                 AND (status IN ('planned', 'started')
+                      OR initiator_message_id IS NOT NULL OR responder_message_id IS NOT NULL)
+               ORDER BY last_activity_at DESC, rowid DESC""",
+            (self._serialize_timestamp(now - timedelta(days=1)), exclude_exchange_id, exclude_exchange_id),
+        )
+        return [dict(row) for row in rows]
 
     async def init_db(self) -> None:
         """Создаёт таблицу scheduled_exchanges, если она ещё не существует."""
@@ -57,6 +82,7 @@ class ExchangeStore:
                 initiator_scheduled_at TIMESTAMP,
                 responder_scheduled_at TIMESTAMP,
                 initiator_message_id INTEGER,
+                responder_message_id INTEGER,
                 exchange_kind TEXT NOT NULL DEFAULT 'regular',
                 important_scenario TEXT,
                 status TEXT NOT NULL DEFAULT 'planned',
@@ -94,6 +120,7 @@ class ExchangeStore:
             await self._ensure_column(connection, "initiator_scheduled_at", "TIMESTAMP")
             await self._ensure_column(connection, "responder_scheduled_at", "TIMESTAMP")
             await self._ensure_column(connection, "initiator_message_id", "INTEGER")
+            await self._ensure_column(connection, "responder_message_id", "INTEGER")
             await self._ensure_column(connection, "exchange_kind", "TEXT NOT NULL DEFAULT 'regular'")
             await self._ensure_column(connection, "important_scenario", "TEXT")
             await self._ensure_column(connection, "skip_reason", "TEXT")
@@ -125,7 +152,10 @@ class ExchangeStore:
 
     async def reset_startup_availability(self) -> None:
         """Очищает прошлый startup-снимок доступности ботов."""
-        await self.database.execute("reset_startup_availability", "DELETE FROM quarantined_swarm_bots")
+        await self.database.execute(
+            "reset_startup_availability",
+            "DELETE FROM quarantined_swarm_bots WHERE group_key = '__startup__'",
+        )
 
     async def record_startup_availability(self, *, bot_id: str, is_available: bool, reason: str | None) -> None:
         """Сохраняет свежий итог startup-проверки без секретных данных."""
@@ -138,10 +168,31 @@ class ExchangeStore:
             (bot_id, reason or "", int(is_available)),
         )
 
-    async def get_quarantined_bot_ids(self) -> set[str]:
-        """Возвращает аккаунты, которые нельзя автоматически запускать после рестарта."""
-        rows = await self.database.fetch_all("get_quarantined_bot_ids", "SELECT DISTINCT bot_id FROM quarantined_swarm_bots")
+    async def get_quarantined_bot_ids(self, bot_ids: set[str] | None = None) -> set[str]:
+        """Возвращает настроенные аккаунты, которые нельзя запускать после рестарта."""
+        query = "SELECT DISTINCT bot_id FROM quarantined_swarm_bots WHERE group_key != '__startup__'"
+        params: tuple[str, ...] = ()
+        if bot_ids is not None:
+            if not bot_ids:
+                return set()
+            placeholders = ", ".join("?" for _ in bot_ids)
+            query += f" AND bot_id IN ({placeholders})"
+            params = tuple(sorted(bot_ids))
+        rows = await self.database.fetch_all("get_quarantined_bot_ids", query, params)
         return {str(row[0]) for row in rows}
+
+    async def backfill_legacy_group_scope(self, *, group_id: str, group_chat_id: int | None) -> None:
+        """Привязывает записи старой single-group schema к текущей legacy-группе."""
+        await self.database.execute(
+            "backfill_legacy_group_scope",
+            """
+            UPDATE scheduled_exchanges
+            SET group_id = ?, group_chat_id = ?
+            WHERE group_id IS NULL AND group_chat_id IS NULL
+            """,
+            (group_id, group_chat_id),
+        )
+        logger.info("Legacy exchange scope восстановлен: group_id=%s group_chat_id=%s", group_id, group_chat_id)
 
     async def create_exchange(
         self,
@@ -299,20 +350,37 @@ class ExchangeStore:
         )
         logger.info("Exchange помечен как started: exchange_id=%s", exchange_id)
 
-    async def mark_exchange_completed(self, exchange_id: str) -> None:
+    async def mark_exchange_completed(self, exchange_id: str, *, responder_message_id: int | None = None) -> None:
         """Помечает exchange как завершённый."""
         await self.database.execute(
             "mark_exchange_completed",
             """
             UPDATE scheduled_exchanges
             SET status = 'completed',
+                responder_message_id = COALESCE(?, responder_message_id),
                 completed_at = CURRENT_TIMESTAMP,
                 last_activity_at = CURRENT_TIMESTAMP
             WHERE exchange_id = ?
             """,
-            (exchange_id,),
+            (responder_message_id, exchange_id),
         )
         logger.info("Exchange помечен как completed: exchange_id=%s", exchange_id)
+
+    async def mark_exchange_skipped(self, exchange_id: str, reason: str) -> None:
+        """Помечает exchange терминально пропущенным без повторной отправки."""
+        await self.database.execute(
+            "mark_exchange_skipped",
+            """
+            UPDATE scheduled_exchanges
+            SET status = 'skipped',
+                skip_reason = ?,
+                completed_at = CURRENT_TIMESTAMP,
+                last_activity_at = CURRENT_TIMESTAMP
+            WHERE exchange_id = ?
+            """,
+            (reason, exchange_id),
+        )
+        logger.warning("Exchange помечен как skipped: exchange_id=%s reason=%s", exchange_id, reason)
 
     async def get_recent_bot_ids(self, limit: int, *, group_id: str | None = None, group_chat_id: int | None = None) -> list[str]:
         """Возвращает последние уникальные bot_id, которые писали scheduled-сообщения."""
@@ -343,6 +411,7 @@ class ExchangeStore:
                 FROM scheduled_exchanges
                 WHERE status = 'completed'
                   AND completed_at IS NOT NULL
+                  AND responder_message_id IS NOT NULL
                   {filter_sql}
             ),
             latest_bot_events AS (
@@ -570,6 +639,10 @@ class ExchangeStore:
     async def _ensure_indexes(self, connection: aiosqlite.Connection) -> None:
         """Создаёт индексы для горячих запросов scheduled exchange."""
         index_statements = [
+            """
+            CREATE INDEX IF NOT EXISTS idx_scheduled_exchanges_diversity_activity
+            ON scheduled_exchanges (last_activity_at DESC)
+            """,
             """
             CREATE INDEX IF NOT EXISTS idx_scheduled_exchanges_group_window_created
             ON scheduled_exchanges (group_id, group_chat_id, window_key, created_at DESC)

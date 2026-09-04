@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from random import randint
@@ -13,7 +14,8 @@ from urllib.parse import urlparse
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from ai.gemini import GeminiClient, PromptLoader
+from ai.openrouter import OpenRouterClient
+from ai.prompt_loader import ImportantServiceScenario, PromptLoader
 from ai.history import MessageHistory
 from ai.prompt_composer import PromptComposer
 from core.config import SettingsReloadWatcher, load_settings_or_exit
@@ -35,6 +37,10 @@ STARTUP_MEMBERSHIP_DELAY_SECONDS = (30, 60)
 GLOBAL_ACCOUNT_QUARANTINE_KEY = "__global_account__"
 
 
+class GroupAvailabilityError(RuntimeError):
+    """Enabled-группа недоступна конкретному аккаунту без глобальной блокировки."""
+
+
 def _pick_startup_membership_delay_seconds() -> float:
     """Выбирает секундовую задержку перед проверкой membership при startup."""
     start_seconds, end_seconds = STARTUP_MEMBERSHIP_DELAY_SECONDS
@@ -48,19 +54,29 @@ class RuntimeContext:
     database: SQLiteDatabase
     history: MessageHistory
     prompt_loader: PromptLoader
-    gemini_client: GeminiClient
+    ai_client: OpenRouterClient
     topic_selector: TopicSelector
     prompt_composer: PromptComposer
     exchange_store: ExchangeStore
+    important_service_scenarios: tuple[ImportantServiceScenario, ...] = ()
 
     async def close(self) -> None:
         """Закрывает runtime-ресурсы с внешними соединениями."""
-        await self.database.close()
+        try:
+            await self.ai_client.close()
+        finally:
+            await self.database.close()
 
 
 def _utc_now() -> datetime:
     """Возвращает текущее время в UTC."""
     return datetime.now(UTC)
+
+
+def _unwrap_secret(value: object) -> object:
+    """Раскрывает маскирующий тип только на границе внешнего клиента."""
+    get_secret_value = getattr(value, "get_secret_value", None)
+    return get_secret_value() if callable(get_secret_value) else value
 
 
 def _iter_candidate_chat_ids(chat_id: int) -> tuple[int, ...]:
@@ -78,8 +94,12 @@ def _is_invite_link(target: str | None) -> bool:
     """Определяет, является ли target приватной invite-ссылкой Telegram."""
     if not isinstance(target, str):
         return False
-    normalized = target.strip()
-    return normalized.startswith(("https://t.me/+", "http://t.me/+", "https://t.me/joinchat/", "http://t.me/joinchat/"))
+    parsed = urlparse(target.strip())
+    return (
+        parsed.scheme.lower() in {"http", "https"}
+        and (parsed.hostname or "").lower() == "t.me"
+        and (parsed.path.startswith("/+") or parsed.path.lower().startswith("/joinchat/"))
+    )
 
 
 def _redact_group_target(target: object) -> object:
@@ -219,6 +239,9 @@ def _extract_join_result_target(join_result: object | None) -> object | None:
 
 def _extract_resolved_chat_id(resolved_target: object | None, fallback_chat_id: int | None) -> int | None:
     """Извлекает реальный chat_id группы из resolved entity или fallback."""
+    marked_chat_id = _extract_event_chat_id(resolved_target, None)
+    if marked_chat_id is not None:
+        return marked_chat_id
     if fallback_chat_id is not None:
         return fallback_chat_id
     target_id = getattr(resolved_target, "id", None)
@@ -227,17 +250,16 @@ def _extract_resolved_chat_id(resolved_target: object | None, fallback_chat_id: 
 
 def _extract_event_chat_id(resolved_target: object | None, fallback_chat_id: int | None) -> int | None:
     """Возвращает marked peer id в том же формате, что Telegram event.chat_id."""
-    if fallback_chat_id is not None:
-        return fallback_chat_id
-    if resolved_target is None:
-        return None
-    try:
-        from telethon import utils
+    if resolved_target is not None:
+        try:
+            from telethon import utils
 
-        peer_id = utils.get_peer_id(resolved_target)
-    except (ImportError, TypeError, ValueError):
-        return None
-    return peer_id if isinstance(peer_id, int) else None
+            peer_id = utils.get_peer_id(resolved_target)
+        except (ImportError, TypeError, ValueError):
+            peer_id = None
+        if isinstance(peer_id, int):
+            return peer_id
+    return fallback_chat_id
 
 
 def _group_target_cache_key(group_chat_id: int | None, group_target: str | None) -> tuple[int | None, str | None]:
@@ -423,7 +445,99 @@ async def _log_bot_write_permission(
         default_send_messages_banned,
         is_admin,
     )
+    if not can_write:
+        logger.error(
+            "swarm: bot_id=%s попал в block по группе group_id=%s: can_write=False participant_banned=%s default_banned=%s",
+            bot_id,
+            group_id,
+            participant_send_messages_banned,
+            default_send_messages_banned,
+        )
     return can_write
+
+
+async def _require_group_availability(
+    client_wrapper: object,
+    group: object,
+    *,
+    bot_id: str,
+    dialog_index: dict[object, object] | None = None,
+) -> object:
+    """Требует resolved target и подтверждённое право записи для одного аккаунта."""
+    group_id = str(getattr(group, "id"))
+    try:
+        resolved_target = await _ensure_group_membership(
+            client_wrapper,
+            getattr(group, "group_chat_id", None),
+            getattr(group, "group_target", None),
+            bot_id,
+            dialog_index=dialog_index,
+        )
+    except Exception as exc:
+        raise GroupAvailabilityError(f"group_membership_unavailable:{group_id}") from exc
+    if resolved_target is None:
+        raise GroupAvailabilityError(f"group_unresolved:{group_id}")
+    can_write = await _log_bot_write_permission(
+        getattr(client_wrapper, "client", None),
+        resolved_target,
+        bot_id=bot_id,
+        group_id=group_id,
+    )
+    if can_write is not True:
+        raise GroupAvailabilityError(f"group_write_unavailable:{group_id}")
+    return resolved_target
+
+
+def _group_membership_signature(group: object) -> tuple[object, ...]:
+    """Возвращает поля группы, требующие повторной membership-проверки."""
+    return (
+        getattr(group, "id", None),
+        getattr(group, "group_chat_id", None),
+        getattr(group, "group_target", None),
+    )
+
+
+async def _filter_reload_ready_groups(
+    manager: SwarmManager,
+    previous_groups: list[object],
+    candidate_groups: list[object],
+) -> list[object]:
+    """Оставляет новые и изменённые группы только после checks всех active bots."""
+    previous_signatures = {
+        str(getattr(group, "id")): _group_membership_signature(group) for group in previous_groups
+    }
+    dialog_indexes: dict[str, dict[object, object]] = {}
+    ready_groups: list[object] = []
+    for group in candidate_groups:
+        group_id = str(getattr(group, "id"))
+        if previous_signatures.get(group_id) == _group_membership_signature(group):
+            ready_groups.append(group)
+            continue
+        if not manager.active_bot_ids:
+            logger.warning(
+                "settings reload: changed group remains pending because active bot pool is empty group_id=%s",
+                group_id,
+            )
+            continue
+        try:
+            for bot_id in manager.active_bot_ids:
+                client_wrapper = manager.get_client(bot_id)
+                if bot_id not in dialog_indexes:
+                    try:
+                        dialog_indexes[bot_id] = await _build_group_dialog_index(client_wrapper.client)
+                    except Exception as exc:
+                        raise GroupAvailabilityError(f"group_dialog_unavailable:{group_id}") from exc
+                await _require_group_availability(
+                    client_wrapper,
+                    group,
+                    bot_id=bot_id,
+                    dialog_index=dialog_indexes[bot_id],
+                )
+        except GroupAvailabilityError:
+            logger.warning("settings reload: group excluded after availability check group_id=%s", group_id)
+            continue
+        ready_groups.append(group)
+    return ready_groups
 
 
 def _build_group_membership_startup_hook(
@@ -448,7 +562,7 @@ def _build_group_membership_startup_hook(
 
 def _build_multi_group_membership_startup_hook(
     *,
-    groups: list[object],
+    groups: list[object] | Callable[[], list[object]],
 ):
     """Строит startup hook с global messaging check и membership всех enabled groups."""
 
@@ -473,27 +587,18 @@ def _build_multi_group_membership_startup_hook(
         await asyncio.sleep(delay_seconds)
         dialog_index = await _build_group_dialog_index(client_wrapper.client)
         resolved: dict[str, object | None] = {}
-        for group in groups:
+        current_groups = groups() if callable(groups) else groups
+        for group in current_groups:
             if not getattr(group, "enabled", True):
                 continue
             group_id = getattr(group, "id")
-            resolved_target = await _ensure_group_membership(
+            resolved_target = await _require_group_availability(
                 client_wrapper,
-                getattr(group, "group_chat_id", None),
-                getattr(group, "group_target", None),
-                profile.id,
+                group,
+                bot_id=profile.id,
                 dialog_index=dialog_index,
             )
             resolved[group_id] = resolved_target
-            if resolved_target is not None:
-                can_write = await _log_bot_write_permission(
-                    client_wrapper.client,
-                    resolved_target,
-                    bot_id=profile.id,
-                    group_id=group_id,
-                )
-                if can_write is not True:
-                    raise AccountMessagingUnavailableError(f"telegram_startup_group_write_unavailable:{group_id}")
         return resolved
 
     return startup_hook
@@ -532,6 +637,8 @@ def _enabled_groups_from_settings(settings: object) -> list[object]:
     groups = list(getattr(settings, "enabled_groups", []) or [])
     if groups:
         return groups
+    if list(getattr(settings, "groups", []) or []):
+        return []
     group_chat_id = getattr(settings, "group_chat_id", None)
     group_target = getattr(settings, "group_target", None)
     if group_chat_id is None and group_target is None:
@@ -557,6 +664,7 @@ def _build_group_orchestrator_signature(
     group_target: object,
     group_chat_id: int | None,
     skip_if_recent_human_activity: bool,
+    allow_external_llm_for_scheduled: bool,
 ) -> tuple[object, ...]:
     """Строит стабильную подпись group runtime-настроек для кеша orchestrator."""
     return (
@@ -573,6 +681,7 @@ def _build_group_orchestrator_signature(
         tuple(getattr(group, "responder_delay_minutes", (3, 10))),
         getattr(group, "max_turns_per_exchange", 2),
         skip_if_recent_human_activity,
+        allow_external_llm_for_scheduled,
     )
 
 
@@ -615,21 +724,23 @@ async def _build_runtime_context(settings: object) -> RuntimeContext:
     """Создаёт общие runtime-зависимости swarm."""
     database = SQLiteDatabase(settings.db_path)
     await database.open()
+    ai_client = None
     try:
         history = MessageHistory(database)
         await history.init_db()
 
         prompt_loader = PromptLoader(settings.prompts_dir)
-        gemini_client = GeminiClient(
-            settings.gemini_api_key,
-            model_name=settings.gemini_model,
-            proxy_url=settings.proxy_url,
-            fallback_model_name=settings.gemini_fallback_model,
-            max_retries=settings.gemini_max_retries,
-            retry_backoff_seconds=settings.gemini_retry_backoff_seconds,
-            retry_jitter_seconds=settings.gemini_retry_jitter_seconds,
-            request_timeout_seconds=settings.gemini_request_timeout_seconds,
-            temperature=settings.gemini_temperature,
+        important_service_scenarios = await prompt_loader.load_important_service_scenarios()
+        ai_client = OpenRouterClient(
+            api_key=_unwrap_secret(settings.openrouter_api_key),
+            models=settings.openrouter_models,
+            proxy=_unwrap_secret(settings.proxy),
+            temperature=settings.openrouter_temperature,
+            request_timeout_seconds=settings.openrouter_request_timeout_seconds,
+            retry_initial_interval_ms=settings.openrouter_retry_initial_interval_ms,
+            retry_max_interval_ms=settings.openrouter_retry_max_interval_ms,
+            retry_max_elapsed_time_ms=settings.openrouter_retry_max_elapsed_time_ms,
+            retry_jitter_ms=settings.openrouter_retry_jitter_ms,
             max_output_chars=getattr(settings, "swarm_max_output_chars", 400),
             max_mentions_per_message=getattr(settings, "swarm_max_mentions_per_message", 2),
         )
@@ -642,7 +753,15 @@ async def _build_runtime_context(settings: object) -> RuntimeContext:
         await history.prune_older_than(retention_days=retention_days)
         await exchange_store.prune_older_than(retention_days=retention_days)
     except BaseException:
-        await database.close()
+        if ai_client is not None:
+            try:
+                await ai_client.close()
+            except Exception:
+                logger.warning("Runtime initialization cleanup failed: resource=ai_client")
+        try:
+            await database.close()
+        except Exception:
+            logger.warning("Runtime initialization cleanup failed: resource=database")
         raise
 
     logger.info(
@@ -655,10 +774,11 @@ async def _build_runtime_context(settings: object) -> RuntimeContext:
         database=database,
         history=history,
         prompt_loader=prompt_loader,
-        gemini_client=gemini_client,
+        ai_client=ai_client,
         topic_selector=topic_selector,
         prompt_composer=prompt_composer,
         exchange_store=exchange_store,
+        important_service_scenarios=important_service_scenarios,
     )
 
 
@@ -705,7 +825,7 @@ async def _register_swarm_handlers(
             bot_profile=profile,
             history=runtime.history,
             prompt_composer=runtime.prompt_composer,
-            gemini_client=runtime.gemini_client,
+            ai_client=runtime.ai_client,
             swarm_user_ids=manager.swarm_user_ids,
             enabled_group_chat_ids=enabled_group_chat_ids,
             manager=manager,
@@ -730,6 +850,7 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
         raise ValueError("Swarm mode requires at least two enabled bots")
     current_settings = settings
     current_groups = _enabled_groups_from_settings(current_settings)
+    desired_groups = current_groups
     if not current_groups:
         raise ValueError("Swarm mode requires at least one enabled group")
 
@@ -740,10 +861,10 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
             session_string=profile.session_string,
             api_id=settings.api_id,
             api_hash=settings.api_hash,
-            proxy_url=settings.proxy_url,
+            proxy=_unwrap_secret(settings.proxy),
         ),
         startup_hook=_build_multi_group_membership_startup_hook(
-            groups=current_groups,
+            groups=lambda: current_groups,
         ),
         startup_quarantine_bot=lambda bot_id, reason: runtime.exchange_store.quarantine_bot(
             group_key=GLOBAL_ACCOUNT_QUARANTINE_KEY,
@@ -765,7 +886,7 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
         group.group_chat_id for group in current_groups if isinstance(getattr(group, "group_chat_id", None), int)
     }
     first_client = manager.get_client(manager.active_bot_ids[0]).client
-    for group in current_groups:
+    for group_index, group in enumerate(current_groups):
         resolved_group_target = await _resolve_group_target(
             first_client,
             getattr(group, "group_chat_id", None),
@@ -777,6 +898,13 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
         )
         if resolved_event_chat_id is not None:
             enabled_group_chat_ids.add(resolved_event_chat_id)
+        if group_index == 0:
+            backfill_legacy_scope = getattr(runtime.exchange_store, "backfill_legacy_group_scope", None)
+            if callable(backfill_legacy_scope):
+                await backfill_legacy_scope(
+                    group_id=str(group.id),
+                    group_chat_id=resolved_event_chat_id,
+                )
         await _log_resolved_group(first_client, group.group_chat_id, group.group_target)
     await _register_swarm_handlers(manager, runtime, lambda: current_settings, enabled_group_chat_ids)
 
@@ -785,16 +913,34 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
     next_group_start_index = 0
 
     async def orchestrator_tick() -> bool:
-        nonlocal current_settings, current_groups, next_group_start_index
+        nonlocal current_settings, current_groups, desired_groups, next_group_start_index
         reloaded_settings = reload_watcher.poll()
         if reloaded_settings is not None:
             current_settings = reloaded_settings
-            current_groups = _enabled_groups_from_settings(current_settings)
+            desired_groups = _enabled_groups_from_settings(current_settings)
+            runtime.ai_client.max_output_chars = current_settings.swarm_max_output_chars
+            runtime.ai_client.max_mentions_per_message = current_settings.swarm_max_mentions_per_message
+
+        previous_ready_signatures = [_group_membership_signature(group) for group in current_groups]
+        next_ready_groups = await _filter_reload_ready_groups(manager, current_groups, desired_groups)
+        ready_registry_changed = previous_ready_signatures != [
+            _group_membership_signature(group) for group in next_ready_groups
+        ]
+        current_groups = next_ready_groups
+        if ready_registry_changed:
             enabled_group_chat_ids.clear()
             enabled_group_chat_ids.update(
-                group.group_chat_id for group in current_groups if isinstance(getattr(group, "group_chat_id", None), int)
+                group.group_chat_id
+                for group in current_groups
+                if isinstance(getattr(group, "group_chat_id", None), int)
             )
+        if reloaded_settings is not None:
             logger.info("settings reload: enabled_groups=%s", [group.id for group in current_groups])
+
+        if not manager.active_bot_ids:
+            logger.warning("orchestrator: tick skipped because active bot pool is empty")
+            return False
+        tick_client = manager.get_client(manager.active_bot_ids[0]).client
 
         any_started = False
         _prune_orchestrator_cache(orchestrator_cache, {group.id for group in current_groups})
@@ -804,7 +950,7 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
         )
         for group in groups_for_tick:
             resolved_group_target = await _resolve_group_target(
-                first_client,
+                tick_client,
                 getattr(group, "group_chat_id", None),
                 getattr(group, "group_target", None),
             )
@@ -824,6 +970,7 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
                 group_target=group_target,
                 group_chat_id=group_chat_id,
                 skip_if_recent_human_activity=current_settings.swarm_skip_if_recent_human_activity,
+                allow_external_llm_for_scheduled=current_settings.swarm_allow_external_llm_for_scheduled,
             )
 
             def build_orchestrator(
@@ -838,7 +985,7 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
                     manager=manager,
                     topic_selector=runtime.topic_selector,
                     prompt_composer=runtime.prompt_composer,
-                    gemini_client=runtime.gemini_client,
+                    ai_client=runtime.ai_client,
                     history=runtime.history,
                     exchange_store=runtime.exchange_store,
                     group_id=_group.id,
@@ -851,6 +998,7 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
                     responder_delay_minutes=_group.responder_delay_minutes,
                     skip_if_recent_human_activity=_settings.swarm_skip_if_recent_human_activity,
                     allow_external_llm_for_scheduled=_settings.swarm_allow_external_llm_for_scheduled,
+                    important_service_scenarios=getattr(runtime, "important_service_scenarios", ()),
                     resolve_group_target=lambda telegram_client, _resolver_group=_group: _resolve_group_target(
                         telegram_client,
                         getattr(_resolver_group, "group_chat_id", None),
@@ -889,7 +1037,13 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
 async def main() -> None:
     """Инициализирует и запускает swarm userbot."""
     settings = load_settings_or_exit()
-    setup_logging(settings.log_level)
+    setup_logging(
+        settings.log_level,
+        log_file=settings.log_file,
+        file_level=settings.log_file_level,
+        file_max_bytes=settings.log_file_max_bytes,
+        file_backup_count=settings.log_file_backup_count,
+    )
     logger.info("Запуск swarm userbot")
     if settings.mode != "swarm":
         raise ValueError("Поддерживается только mode=swarm")
@@ -910,5 +1064,13 @@ async def main() -> None:
         logger.info("Swarm userbot остановлен")
 
 
+def _run_cli() -> None:
+    """Запускает приложение и завершает Ctrl+C без пользовательского traceback."""
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    _run_cli()

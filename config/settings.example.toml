@@ -1,14 +1,29 @@
-# Минимальный несекретный конфиг swarm-инстанса.
+# Минимальный конфиг swarm-инстанса. Реальную копию с Telegram credentials не коммить.
 # По умолчанию runtime читает именно config/settings.toml.
 # Стабильные пути вроде data/history.db и ai/prompts/* задаются кодом и здесь не дублируются.
 
-[gemini]
-# Необязательный override основной модели.
-model = "gemini-2.5-flash"
+[telegram]
+# Telegram API credentials из https://my.telegram.org/apps.
+api_id = 12345678
+api_hash = "your_api_hash_here"
+
+[openrouter]
+# Обязательный ordered-список: основная модель и минимум одна fallback-модель.
+# Замени placeholders на доступные model slugs из OpenRouter.
+models = ["provider/primary-model", "provider/fallback-model"]
+# temperature необязательна; если строку не добавлять, параметр не отправляется модели.
+# temperature = 0.9
 
 [logging]
 # Необязательный override уровня логирования.
 level = "INFO"
+# По умолчанию логи ошибок идут в logs/swarm.log
+# (переопределяется при необходимости через file).
+# file = "logs/swarm.log"
+# Необязательные настройки ротации файловых логов:
+# file_level = "ERROR"
+# file_max_bytes = 10485760
+# file_backup_count = 5
 
 [swarm.schedule]
 # UTC-окна, в которые разрешены плановые обмены между ботами.
@@ -44,7 +59,7 @@ active_windows_utc = ["14-16"]
 responder_delay_minutes = [5, 12]
 
 [swarm.orchestrator]
-tick_seconds = 30
+tick_seconds = 60
 silence_timeout_minutes = 60
 skip_if_recent_human_activity = true
 

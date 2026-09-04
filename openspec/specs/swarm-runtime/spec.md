@@ -3,26 +3,43 @@
 ## Purpose
 
 Define how enabled Telegram userbot accounts are started, supervised, registered for routing, and connected to the target group.
-
 ## Requirements
-
 ### Requirement: Runtime context initialization
-The system SHALL initialize one shared SQLite database connection and other shared runtime dependencies before starting swarm clients, and SHALL close the SQLite connection exactly once during shutdown.
+The system SHALL initialize one shared SQLite connection and one shared provider-neutral AI client before starting swarm clients, and SHALL close both exactly once during shutdown.
 
 #### Scenario: Runtime dependencies are created
-- **WHEN** the application starts
-- **THEN** one SQLite database connection is opened and passed to message history and exchange storage, both tables are initialized, prompt loading is configured, Gemini client is configured, topics are loaded, and prompt composer is created
+- **WHEN** the application starts with valid settings
+- **THEN** SQLite stores, prompt loading, topic selection, prompt composition, and one shared OpenRouter-backed `ai_client` are initialized before bot clients
 
-#### Scenario: Runtime persistence is closed once
-- **WHEN** the runtime context shuts down
-- **THEN** the shared SQLite database closes its connection once and the message history and exchange store do not close it independently
+#### Scenario: Runtime dependencies close once
+- **WHEN** runtime shuts down
+- **THEN** the AI client and shared SQLite connection each close exactly once
 
-#### Scenario: Partial initialization cleans up persistence
-- **WHEN** runtime context construction fails after opening SQLite
-- **THEN** the shared SQLite connection is closed before the initialization error is propagated
+#### Scenario: Partial initialization cleans up resources
+- **WHEN** context construction fails after SQLite or the AI client is created
+- **THEN** every successfully created owned resource is closed before the error propagates
+
+#### Scenario: Shared proxy reaches both transports
+- **WHEN** settings provide `PROXY`
+- **THEN** runtime passes the same value to every Telethon client and the OpenRouter AI client
+
+#### Scenario: Direct transports omit proxy
+- **WHEN** settings do not provide `PROXY`
+- **THEN** runtime constructs Telethon and OpenRouter without proxy configuration
+
+### Requirement: Graceful operator shutdown
+The system SHALL treat an operator interrupt at the process entry point as a successful graceful shutdown after asynchronous runtime cleanup completes.
+
+#### Scenario: Ctrl+C stops without traceback
+- **WHEN** the operator sends an interrupt while the swarm is running
+- **THEN** supervisor tasks are cancelled, owned runtime resources are closed, and the process exits without printing a `CancelledError` or `KeyboardInterrupt` traceback
+
+#### Scenario: Runtime failures remain visible
+- **WHEN** the application exits because of an exception other than an operator interrupt
+- **THEN** the exception propagates from the process entry point
 
 ### Requirement: Enabled bot startup
-The system SHALL start only enabled swarm bot profiles and collect their Telegram user ids.
+The system SHALL start only enabled swarm bot profiles, collect their Telegram user ids, and clean up any client that fails before active-pool registration completes.
 
 #### Scenario: Disabled bot is skipped
 - **WHEN** a bot profile has `enabled = false`
@@ -32,12 +49,12 @@ The system SHALL start only enabled swarm bot profiles and collect their Telegra
 - **WHEN** an enabled bot starts successfully and returns a Telegram user id
 - **THEN** its bot id is added to the active pool and its Telegram user id is added to `swarm_user_ids`
 
-#### Scenario: Startup failure excludes bot
-- **WHEN** an enabled bot fails during startup
-- **THEN** the bot runtime state is marked as error and it is not added to the active pool
+#### Scenario: Startup failure excludes and stops bot
+- **WHEN** an enabled bot fails after its Telegram client was created or connected
+- **THEN** the client is stopped and removed, the runtime state is marked as error, and the bot is not added to the active pool
 
 ### Requirement: Global account messaging eligibility at startup
-Before a swarm account is registered as active, the system SHALL perform a non-publishing global messaging API health-check. A confirmed deactivated, revoked, or globally banned account SHALL be disabled, stopped, persistently quarantined, and logged as requiring attention.
+Before a swarm account is registered as active, the system SHALL perform a non-publishing global messaging API health-check. A confirmed deactivated, revoked, or globally banned account SHALL be disabled, stopped, persistently quarantined, and logged as requiring attention; group-level failures SHALL remain non-global.
 
 #### Scenario: Global messaging check succeeds
 - **WHEN** an enabled bot starts and Telegram accepts the non-publishing messaging action
@@ -56,8 +73,8 @@ Before a swarm account is registered as active, the system SHALL perform a non-p
 - **THEN** the account remains disabled in memory and startup fails instead of continuing without durable quarantine
 
 #### Scenario: Recipient-specific restriction is not global quarantine
-- **WHEN** a recipient or group does not permit writing
-- **THEN** startup does not classify that recipient-specific condition as a global account freeze
+- **WHEN** a group cannot be resolved or does not confirm `can_write=True`
+- **THEN** startup rejects that bot without classifying the condition or persisting it as a global account freeze
 
 ### Requirement: Minimum active bot count
 The system SHALL require at least two enabled bots before startup and at least two active bots after startup.
@@ -71,11 +88,15 @@ The system SHALL require at least two enabled bots before startup and at least t
 - **THEN** the orchestrator job is not registered and startup fails
 
 ### Requirement: Fresh availability determines startup pool
-The system SHALL reset persisted startup availability before checking enabled bot profiles and SHALL admit a profile only after the global Telegram eligibility check and `can_write=True` for every enabled group.
+The system SHALL replace only the transient startup availability snapshot before checking enabled bot profiles, preserve durable quarantine rows, and admit a profile only after the global Telegram eligibility check and `can_write=True` for every enabled group. When building the startup pool, durable quarantine SHALL be limited to the bot IDs present in the current enabled profile configuration, matched as exact strings.
 
-#### Scenario: Previous quarantine is stale
-- **WHEN** a previously quarantined enabled bot is started after a restart
-- **THEN** it receives a fresh Telegram availability check instead of being skipped from old persisted state
+#### Scenario: Startup ignores quarantine rows for retired profiles
+- **WHEN** durable quarantine contains an account ID that is absent from the current TOML bot profiles
+- **THEN** startup SHALL leave that row in SQLite but SHALL NOT exclude any current profile because of it
+
+#### Scenario: Startup filters numeric IDs exactly
+- **WHEN** durable quarantine contains configured bot IDs represented by numeric strings of different lengths
+- **THEN** startup SHALL exclude each exact matching configured ID and SHALL not coerce, truncate, or merge the values
 
 ### Requirement: Handler registration per active bot
 The system SHALL register an addressed-reply handler for each active bot client.
@@ -89,7 +110,7 @@ The system SHALL register an addressed-reply handler for each active bot client.
 - **THEN** handler registration skips that bot id
 
 ### Requirement: Target group membership
-The system SHALL wait a random inclusive 30–60 second delay before each bot's startup membership check, build one reusable dialog index for that bot, then resolve or join every enabled configured group for that bot during startup and after group reload.
+The system SHALL wait a random inclusive 30–60 second delay before each bot's startup membership check, build one reusable dialog index for that bot, resolve or join every enabled configured group during startup, validate new or changed enabled groups for every active bot after reload before activation, and resolve groups during scheduler ticks only through a currently active bot client.
 
 #### Scenario: Startup membership delay stays within the configured range
 - **WHEN** an enabled bot reaches either startup membership hook
@@ -98,6 +119,30 @@ The system SHALL wait a random inclusive 30–60 second delay before each bot's 
 #### Scenario: Multi-group membership reuses one dialog scan
 - **WHEN** one bot checks membership for multiple enabled groups during startup
 - **THEN** the runtime scans that bot's available dialogs once and reuses the resulting index for every group check
+
+#### Scenario: Unresolved enabled group rejects startup
+- **WHEN** an enabled group cannot be resolved or joined for a bot
+- **THEN** that bot does not enter the active pool
+
+#### Scenario: Group write permission is required
+- **WHEN** group permission lookup returns false or unknown for a bot
+- **THEN** the group check fails without creating global account quarantine
+
+#### Scenario: Reloaded group is checked before activation
+- **WHEN** reload adds, enables, or changes the identity of an enabled group
+- **THEN** every active bot resolves or joins it and confirms `can_write=True` before routing or scheduling activates the group
+
+#### Scenario: Reloaded group check fails
+- **WHEN** any active bot cannot resolve, join, or write to a new or changed enabled group
+- **THEN** that group remains excluded from routing and scheduling without globally quarantining the bot
+
+#### Scenario: Scheduler resolves through an active client
+- **WHEN** the client originally used during startup has been disabled and another bot remains active
+- **THEN** the next scheduler tick resolves configured groups through the remaining active bot client
+
+#### Scenario: Scheduler has no active client
+- **WHEN** no bot is active when a scheduler tick starts
+- **THEN** the tick returns without resolving a group or raising an exception
 
 #### Scenario: Telegram peer namespaces remain isolated
 - **WHEN** a user dialog and a channel dialog expose the same raw entity id
@@ -139,7 +184,7 @@ The system SHALL cache resolved Telegram group entities independently by normali
 - **THEN** the runtime resolves the new identity instead of returning the entity cached for the previous identity
 
 ### Requirement: Group runtime registry
-The system SHALL maintain runtime state for configured groups separately from immutable configuration.
+The system SHALL maintain runtime state for configured groups separately from immutable configuration and SHALL never synthesize an active legacy group when the current configuration explicitly contains only disabled groups.
 
 #### Scenario: Enabled group becomes active after resolve
 - **WHEN** at least one active bot resolves an enabled group to a Telegram target and chat id
@@ -149,20 +194,35 @@ The system SHALL maintain runtime state for configured groups separately from im
 - **WHEN** a reload marks a group disabled
 - **THEN** routing and scheduling skip that group without stopping the bot pool
 
+#### Scenario: Every configured group is disabled
+- **WHEN** the current configuration contains one or more groups and none of them is enabled
+- **THEN** runtime returns no active groups and does not create a legacy fallback from compatibility fields
+
 ### Requirement: Group orchestrator reuse
-The system SHALL reuse per-group scheduled orchestrators across scheduler ticks while the group's effective runtime signature is unchanged.
+The system SHALL reuse per-group scheduled orchestrators across scheduler ticks while the group's effective runtime signature, including its scheduled LLM security gate, is unchanged.
 
 #### Scenario: Unchanged group reuses orchestrator
 - **WHEN** two scheduler ticks run for the same enabled group without settings or resolved target changes
 - **THEN** the second tick reuses the existing `SwarmOrchestrator` instance for that group
 
 #### Scenario: Changed group rebuilds orchestrator
-- **WHEN** a group's effective schedule, target, city, max turns, or skip-human-activity setting changes
+- **WHEN** a group's effective schedule, target, city, max turns, skip-human-activity setting, or scheduled LLM gate changes
 - **THEN** the next scheduler tick creates a replacement `SwarmOrchestrator` for that group
 
 #### Scenario: Disabled group cache is pruned
 - **WHEN** a reload removes or disables a group
 - **THEN** the scheduler cache removes that group's orchestrator and stops ticking it
+
+### Requirement: Scheduler tick cadence
+The system SHALL use 60 seconds as the default orchestrator scheduler tick interval and SHALL allow an explicit TOML value to override that default.
+
+#### Scenario: Default scheduler interval
+- **WHEN** configuration does not specify `swarm.orchestrator.tick_seconds`
+- **THEN** the scheduler registers the orchestrator job with a 60-second interval
+
+#### Scenario: Explicit scheduler interval
+- **WHEN** configuration specifies a valid `swarm.orchestrator.tick_seconds`
+- **THEN** the scheduler registers the orchestrator job with that configured interval
 
 ### Requirement: Fair sequential group ticks
 The system SHALL rotate the first processed group across scheduler ticks while keeping group execution sequential.
@@ -180,11 +240,15 @@ The system SHALL rotate the first processed group across scheduler ticks while k
 - **THEN** the next start index is normalized to the new list length without skipping or indexing outside the list
 
 ### Requirement: Client supervision
-The system SHALL keep active bot clients supervised and reconnect after unexpected disconnects or client errors.
+The system SHALL keep active bot clients supervised and continue reconnect attempts after unexpected disconnects, client errors, or transient replacement-client startup failures.
 
 #### Scenario: Client error triggers reconnect
 - **WHEN** `run_until_disconnected` raises an error
-- **THEN** the manager records reconnect state, waits according to backoff, stops the old client, and starts the bot again
+- **THEN** the manager records reconnect state, waits according to backoff, stops the old client when present, and starts the bot again
+
+#### Scenario: Transient replacement startup failure is retried
+- **WHEN** a reconnect replacement client fails to start or complete its health checks
+- **THEN** the failed replacement is cleaned up and a later supervisor attempt creates another replacement without `KeyError`
 
 #### Scenario: Reconnect discovers globally unavailable account
 - **WHEN** the global messaging health-check fails during reconnect
@@ -202,7 +266,7 @@ The system SHALL prioritize human reply processing over scheduled tasks for the 
 - **THEN** a scheduled task for that bot receives `acquired = false`
 
 ### Requirement: Scheduled exchange устойчив к Telegram send restrictions
-Swarm runtime SHALL не завершать scheduler tick исключением при permanent Telegram send error: `UserBannedInChannelError`, `ChatWriteForbiddenError`, `ChannelPrivateError` или `UserNotParticipantError`.
+Swarm runtime SHALL не завершать scheduler tick исключением при permanent Telegram send error: `UserBannedInChannelError`, `ChatWriteForbiddenError`, `ChannelPrivateError` или `UserNotParticipantError`, кроме отдельной observability-ветки, где durable quarantine не удалось сохранить после обязательного runtime-disable аккаунта.
 
 #### Scenario: У ответчика нет права писать в целевой чат
 - **WHEN** responder `send_message` возвращает permanent Telegram send error
@@ -245,6 +309,10 @@ Swarm runtime SHALL не завершать scheduler tick исключение�
 - **WHEN** запись durable quarantine после permanent addressed-reply error завершается ошибкой
 - **THEN** runtime MUST всё равно отключить bot до распространения ошибки persistence
 
+#### Scenario: Quarantine запись scheduled exchange не сохранилась
+- **WHEN** запись durable quarantine после permanent scheduled send error завершается ошибкой
+- **THEN** runtime MUST всё равно отключить bot от всех runtime flows до распространения ошибки persistence
+
 #### Scenario: Активный пул уменьшился
 - **WHEN** после quarantine в active pool остаётся меньше двух ботов
 - **THEN** runtime MUST не создавать новый scheduled exchange
@@ -265,3 +333,49 @@ The system SHALL not log private Telegram invite hashes.
 #### Scenario: Private invite is used as quarantine key
 - **WHEN** private invite link является fallback-ключом quarantine
 - **THEN** audit-log quarantine содержит redacted marker вместо invite hash
+
+### Requirement: Installed runtime includes storage package
+The system SHALL include the entrypoint, `storage` Python package, and tracked runtime prompt/persona assets in built wheel and source distributions, and default asset paths SHALL resolve outside the source checkout.
+
+#### Scenario: Wheel import succeeds
+- **WHEN** the project wheel is installed outside the source checkout
+- **THEN** runtime modules importing `storage.sqlite_database` load without `ModuleNotFoundError`
+
+#### Scenario: Installed runtime loads default prompts
+- **WHEN** the wheel is installed and started from a directory outside the source checkout
+- **THEN** default prompt, topic, persona, and important-service resources resolve from installed package data
+
+### Requirement: Startup activation rollback
+The system SHALL remove and stop a newly activated bot when persistence of its successful startup availability fails.
+
+#### Scenario: Success snapshot write fails
+- **WHEN** a bot completes Telegram startup but its available snapshot cannot be stored
+- **THEN** the bot is removed from the active pool, its client is stopped, and startup does not retain contradictory active state
+
+### Requirement: Durable global quarantine ordering
+The system SHALL persist global quarantine before updating the transient unavailable snapshot and SHALL keep the account disabled in memory regardless of persistence errors.
+
+#### Scenario: Transient snapshot fails for globally unavailable account
+- **WHEN** Telegram confirms global messaging unavailability and snapshot persistence fails
+- **THEN** durable quarantine has already been attempted before the snapshot error propagates
+
+### Requirement: Reload group readiness retries
+The system SHALL retain configured but temporarily unavailable enabled groups as pending and retry their availability checks on later scheduler ticks.
+
+#### Scenario: Pending group recovers
+- **WHEN** a newly configured group fails one transient availability check and succeeds later without another file change
+- **THEN** a later tick activates it for routing and scheduling
+
+### Requirement: Reconnect validates current groups
+The system SHALL validate a replacement client against the current ready group registry rather than the startup-era group snapshot.
+
+#### Scenario: Group changes before reconnect
+- **WHEN** reload activates or retargets a group and a bot reconnects afterward
+- **THEN** the replacement client completes membership and write checks for that current group before re-entering the active pool
+
+### Requirement: Private invite classification is case insensitive
+The system SHALL classify Telegram private invite URLs without depending on scheme or host letter case and SHALL never log their invite hash.
+
+#### Scenario: Uppercase invite URL
+- **WHEN** target is `HTTPS://T.ME/+secret_hash`
+- **THEN** runtime uses the private-invite flow and logs only a redacted marker

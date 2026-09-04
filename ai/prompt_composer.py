@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from ai.gemini import PromptLoader
+from ai.prompt_loader import PromptLoader
 from ai.text_file_cache import AsyncTextFileCache
 
 
