@@ -260,7 +260,7 @@ async def test_openrouter_logs_safe_error_body_details(monkeypatch, caplog):
         json={
             "error": {
                 "code": 404,
-                "message": "No endpoints found matching your data policy for sk-or-v1-secret1234567890abcd",
+                "message": "No endpoints found for private prompt private topic sk-or-v1-secret1234567890abcd",
                 "metadata": {
                     "error_type": "not_found",
                     "provider_code": "no_available_endpoint",
@@ -284,7 +284,8 @@ async def test_openrouter_logs_safe_error_body_details(monkeypatch, caplog):
     assert "openrouter_error_code=404" in logs
     assert "openrouter_error_type=not_found" in logs
     assert "openrouter_provider_code=no_available_endpoint" in logs
-    assert "openrouter_error_message='No endpoints found matching your data policy for <redacted_secret>'" in logs
+    assert "openrouter_error_message" not in logs
+    assert "No endpoints found" not in logs
     assert "sk-or-v1-secret1234567890abcd" not in logs
     assert "private prompt" not in logs
     assert "private topic" not in logs

@@ -123,15 +123,13 @@ class OpenRouterClient(TextGenerationClient):
             details = self._extract_openrouter_error_details(exc)
             logger.warning(
                 "OpenRouter generation failed: operation=%s category=%s status=%s "
-                "openrouter_error_code=%s openrouter_error_type=%s openrouter_provider_code=%s "
-                "openrouter_error_message=%r",
+                "openrouter_error_code=%s openrouter_error_type=%s openrouter_provider_code=%s",
                 operation,
                 category,
                 status if status is not None else "unknown",
                 details.get("code", "unknown"),
                 details.get("error_type", "unknown"),
                 details.get("provider_code", "unknown"),
-                details.get("message", "unknown"),
             )
             error_type = TemporaryGenerationError if category == "temporary" else GenerationError
             raise error_type("Ошибка генерации через OpenRouter") from None
@@ -203,9 +201,6 @@ class OpenRouterClient(TextGenerationClient):
         code = error.get("code")
         if isinstance(code, int | str):
             details["code"] = code
-        message = error.get("message")
-        if isinstance(message, str) and message:
-            details["message"] = self._sanitize_error_detail(message)
         metadata = error.get("metadata")
         if isinstance(metadata, dict):
             error_type = metadata.get("error_type")
