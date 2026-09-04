@@ -128,7 +128,7 @@ async def test_write_free_models_catalog_checks_configured_model_availability(tm
             assert body["max_completion_tokens"] == 4
             return httpx.Response(
                 200,
-                json={"choices": [{"message": {"content": "1"}}]},
+                json={"choices": [{"message": {"content": "1."}}]},
                 request=request,
             )
         return httpx.Response(
@@ -169,7 +169,7 @@ async def test_write_free_models_catalog_checks_configured_model_availability(tm
             "connection_code": "available/model:free",
             "available": True,
             "status_code": 200,
-            "response": "1",
+            "response": "1.",
         },
         {
             "connection_code": "broken/model:free",

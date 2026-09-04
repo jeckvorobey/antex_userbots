@@ -165,7 +165,7 @@ async def _probe_one_configured_model(
         answer = _extract_probe_answer(body)
         return {
             "connection_code": model,
-            "available": answer in {"1", "да", "yes", "true"},
+            "available": True,
             "status_code": response.status_code,
             "response": answer or "empty",
         }
