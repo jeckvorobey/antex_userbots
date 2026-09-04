@@ -1105,8 +1105,9 @@ async def test_orchestrator_important_service_cadence_uses_utc_calendar_days():
     assert orchestrator._important_service_is_due(latest, datetime(2026, 7, 8, 10, 0, tzinfo=UTC)) is True
 
 
-def test_orchestrator_rotates_important_service_scenarios():
-    """Проверяет фиксированную очередь important-service сценариев."""
+def test_orchestrator_rotates_important_service_scenarios(monkeypatch):
+    """Проверяет случайный старт и сохранение порядка после выбранной позиции."""
+    monkeypatch.setattr("userbot.orchestrator.random.choice", lambda seq: seq[-1])
     orchestrator = SwarmOrchestrator(
         bot_profiles=[],
         manager=SimpleNamespace(),
@@ -1118,7 +1119,8 @@ def test_orchestrator_rotates_important_service_scenarios():
         important_service_scenarios=IMPORTANT_SERVICE_SCENARIOS,
     )
 
-    assert orchestrator._next_important_service_scenario(None).key == "exchange_rub"
+    assert orchestrator._next_important_service_scenario(None).key == "booking_booking"
+    assert orchestrator._next_important_service_scenario("removed_scenario").key == "booking_booking"
     assert orchestrator._next_important_service_scenario("exchange_rub").key == "booking_airbnb"
     assert orchestrator._next_important_service_scenario("booking_airbnb").key == "exchange_usdt"
     assert orchestrator._next_important_service_scenario("exchange_usdt").key == "booking_booking"
@@ -1126,8 +1128,9 @@ def test_orchestrator_rotates_important_service_scenarios():
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_important_service_replaces_regular_topic_when_due():
+async def test_orchestrator_important_service_replaces_regular_topic_when_due(monkeypatch):
     """Проверяет, что due important-service exchange подменяет обычную тему окна."""
+    monkeypatch.setattr("userbot.orchestrator.random.choice", lambda seq: seq[0])
     initiator_client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=701)))
     responder_client = SimpleNamespace(send_message=AsyncMock())
     exchange_store = SimpleNamespace(

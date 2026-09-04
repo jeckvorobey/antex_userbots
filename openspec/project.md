@@ -60,8 +60,10 @@ APScheduler tick
   -> SwarmOrchestrator.run_once for group context
   -> ExchangeStore group-scoped due responder check
   -> group active UTC window and human-activity checks
-  -> ExchangeStore group-scoped window check
-  -> important-service cadence/rotation check or shared topic intent selection
+  -> shared ExchangeStore planning lock
+  -> group-scoped window check and 24-hour cross-group metadata summary
+  -> ExchangeDiversity participant ranking and topic/initial-scenario preferences
+  -> persist planned participants/topic and release planning lock
   -> city-aware start-topic adaptation
   -> bot/topic/question anti-repeat
   -> PromptComposer start_topic/reply prompts
@@ -82,7 +84,13 @@ SQLite is the only persistent storage. `storage.sqlite_database.SQLiteDatabase` 
 
 `ExchangeStore` also stores quarantine records for accounts that Telegram has confirmed as globally unavailable for messaging. Startup reads these records before creating clients, so a quarantined account cannot be automatically reused until it is manually reviewed and its quarantine record is removed.
 
+Cross-group scheduling reads metadata only from exchanges whose `last_activity_at` is within the last 24 hours, using an index on that column. Planned roles reserve participants; started exchanges retain the pending responder reservation; terminal records count only roles with published message ids. Group identity uses real chat id with group id as a legacy fallback. Text histories and published-only local cooldown remain group-scoped. `userbot.exchange_diversity.ExchangeDiversity` aggregates the metadata once per decision and ranks pairs by other-group unordered-pair use, local cooldown relaxation, other-group participant use, total participant use, then role use. Ties are random; shortages degrade to the lowest-conflict available pair. Local candidate selection remains linear; pair ranking is O(B²), or 182 directed candidates for 14 bots.
+
+The shared `ExchangeStore.planning_lock` serializes the window check, summary read, selection and plan creation within one swarm process, separately from the SQLite transaction lock. It is released before Telegram/LLM calls and scheduled waits. Participant reassignment uses the same coordination and ranking with the counterpart fixed, excluding its own record. Existing plans survive restarts without rerolling their choices. Multiple independent processes sharing one runtime database are not supported by this coordination.
+
 Important-service exchanges are stored in the same `scheduled_exchanges` lifecycle as ordinary exchanges with `exchange_kind = important_service` and an `important_scenario` key. Their cadence is evaluated per group by UTC calendar days: after a group receives an important-service exchange on day N, the next one for that group is eligible no earlier than day N+3. The scenario cycle is `exchange_rub` -> `booking_airbnb` -> `exchange_usdt` -> `booking_booking`, and important-service prompt contexts use `important_service_question` / `important_service_answer` markers so only important answers are required to mention `@tt_exchenge_bot`.
+
+A group's initial service scenario is randomly selected among the least used/reserved keys in other groups over 24 hours; its existing persisted cycle then continues from that position. Ordinary topics retain local freshness priority and use other-group topic counts to rank eligible alternatives. Neither policy changes active windows or responder delays or guarantees semantic uniqueness of generated wording.
 
 ## Development Rules
 

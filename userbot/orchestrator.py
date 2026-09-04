@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import random
 from collections import Counter
+from contextlib import nullcontext
 from datetime import date
 from datetime import UTC, datetime, timedelta
 from typing import Any, Callable
@@ -14,6 +15,7 @@ from telethon.errors import ChannelPrivateError, ChatWriteForbiddenError, UserBa
 from ai.prompt_loader import ImportantServiceScenario
 from core.runtime_models import ExchangeDecision, SwarmBotProfile
 from userbot.exchange_store import ExchangeStore, normalize_signature
+from userbot.exchange_diversity import ExchangeDiversity
 from userbot.scheduler import is_within_windows_utc, pick_random_datetime, pick_random_delay
 
 
@@ -120,6 +122,18 @@ class SwarmOrchestrator:
             logger.warning("orchestrator: skip exchange because resolved group_chat_id is missing group_id=%s", self.group_id)
             return False
 
+        async with self._planning_context():
+            planned_exchange = await self._get_or_plan_exchange(now)
+        if planned_exchange is None:
+            return False
+        return await self._run_due_planned_exchange(exchange=planned_exchange, now=now)
+
+    def _planning_context(self):
+        """Возвращает общий planning lock; legacy store без координации остаётся совместимым."""
+        return getattr(self.exchange_store, "planning_lock", None) or nullcontext()
+
+    async def _get_or_plan_exchange(self, now: datetime) -> dict[str, object] | None:
+        """Выбирает и сохраняет план под общим lock, не вызывая Telegram или LLM."""
         window_key, window_start, window_end = self._build_window_key(now)
         get_exchange_by_window_key = getattr(self.exchange_store, "get_exchange_by_window_key", None)
         current_window_exchange = (
@@ -130,17 +144,17 @@ class SwarmOrchestrator:
         if current_window_exchange is not None:
             status = current_window_exchange.get("status")
             if status == "planned":
-                return await self._run_due_planned_exchange(exchange=current_window_exchange, now=now)
+                return current_window_exchange
             logger.info(
                 "orchestrator: skip new exchange because window already has status=%s window_key=%s",
                 status,
                 window_key,
             )
-            return False
+            return None
 
         if len(self._active_bot_profiles()) < 2:
             logger.warning("orchestrator: skip new exchange because active bot pool is smaller than two")
-            return False
+            return None
 
         decision = self._normalize_exchange_decision(await self._build_exchange_decision_for_window(now))
         logger.info(
@@ -176,7 +190,7 @@ class SwarmOrchestrator:
             "exchange_kind": decision.exchange_kind,
             "important_scenario": decision.important_scenario,
         }
-        return await self._run_due_planned_exchange(exchange=planned_exchange, now=now)
+        return planned_exchange
 
     async def _build_exchange_decision_for_window(self, now: datetime) -> ExchangeDecision:
         """Выбирает important-service exchange, если он due, иначе обычный exchange."""
@@ -192,10 +206,10 @@ class SwarmOrchestrator:
             group_id=self.group_id,
             group_chat_id=self.group_chat_id,
         )
-        candidates = self._pick_bot_candidates(recent_bot_ids)
-        chosen_initiator, chosen_responder = random.sample(candidates, 2)
+        diversity = await self._load_diversity(self.now_provider())
+        chosen_initiator, chosen_responder = self._choose_participants(recent_bot_ids, diversity)
 
-        topic = await self._choose_topic()
+        topic = await self._choose_topic(diversity)
         recent_questions = await self.exchange_store.get_recent_questions(
             since=self.question_repeat_window,
             group_id=self.group_id,
@@ -222,16 +236,17 @@ class SwarmOrchestrator:
             logger.info("orchestrator: important-service exchange is not due group_id=%s", self.group_id)
             return None
 
+        diversity = await self._load_diversity(now)
         scenario = self._next_important_service_scenario(
-            latest_exchange.get("important_scenario") if latest_exchange is not None else None
+            latest_exchange.get("important_scenario") if latest_exchange is not None else None,
+            diversity=diversity,
         )
         recent_bot_ids = await self.exchange_store.get_recent_bot_ids(
             RECENT_BOT_COOLDOWN_LIMIT,
             group_id=self.group_id,
             group_chat_id=self.group_chat_id,
         )
-        candidates = self._pick_bot_candidates(recent_bot_ids)
-        chosen_initiator, chosen_responder = random.sample(candidates, 2)
+        chosen_initiator, chosen_responder = self._choose_participants(recent_bot_ids, diversity)
         recent_questions = await self.exchange_store.get_recent_questions(
             since=self.question_repeat_window,
             group_id=self.group_id,
@@ -251,6 +266,38 @@ class SwarmOrchestrator:
             exchange_kind=IMPORTANT_SERVICE_KIND,
             important_scenario=scenario.key,
             important_answer_intent=scenario.answer_intent,
+        )
+
+    async def _load_diversity(self, now: datetime, *, exclude_exchange_id: str | None = None) -> ExchangeDiversity:
+        """Загружает общие метаданные один раз на решение без переноса текстовой истории."""
+        getter = getattr(self.exchange_store, "get_diversity_summary", None)
+        if not callable(getter) or (self.group_id is None and self.group_chat_id is None):
+            return ExchangeDiversity()
+        rows = await getter(now=now, exclude_exchange_id=exclude_exchange_id)
+        return ExchangeDiversity.from_records(rows, group_id=self.group_id, group_chat_id=self.group_chat_id)
+
+    def _choose_participants(
+        self, recent_bot_ids: list[str], diversity: ExchangeDiversity,
+    ) -> tuple[SwarmBotProfile, SwarmBotProfile]:
+        """Выбирает наименее повторяющуюся пару со случайным разрешением равенств."""
+        candidates = (
+            self._active_bot_profiles() if diversity.other_pairs else self._pick_bot_candidates(recent_bot_ids)
+        )
+        profiles = {profile.id: profile for profile in candidates}
+        pairs = ((a, b) for a in profiles for b in profiles if a != b)
+        winners, score = diversity.best_pairs(pairs, recent_bot_ids[:RECENT_BOT_COOLDOWN_LIMIT])
+        if not winners:
+            raise ValueError("Для scheduled exchange нужно минимум два enabled userbot")
+        a, b = random.choice(winners)
+        self._log_diversity_choice(a, b, score, len(winners))
+        return profiles[a], profiles[b]
+
+    def _log_diversity_choice(self, a: str, b: str, score: tuple[int, ...], candidates: int) -> None:
+        """Логирует только идентификаторы и счётчики решений/ослаблений."""
+        logger.info(
+            "orchestrator: diversity group_id=%s initiator=%s responder=%s "
+            "pair_conflicts=%s cooldown_relaxed=%s other_usage=%s total_usage=%s role_usage=%s candidates=%s",
+            self.group_id, a, b, *score, candidates,
         )
 
     def _pick_bot_candidates(self, recent_bot_ids: list[str]) -> list[SwarmBotProfile]:
@@ -282,7 +329,7 @@ class SwarmOrchestrator:
                     excluded_profile_count -= profile_counts[restored_bot_id]
         raise ValueError("Для scheduled exchange нужно минимум два enabled userbot")
 
-    async def _choose_topic(self) -> str:
+    async def _choose_topic(self, diversity: ExchangeDiversity | None = None) -> str:
         """Выбирает тему, избегая последних заданных тем при наличии альтернатив."""
         recent_topic_keys = await self.exchange_store.get_recent_topic_keys_by_limit(
             RECENT_TOPIC_LIMIT,
@@ -306,7 +353,14 @@ class SwarmOrchestrator:
             )
             not in recent_topic_keys
         ]
-        topic = random.choice(fresh_topics or available_topics)
+        diversity = diversity if diversity is not None else await self._load_diversity(self.now_provider())
+        pool = fresh_topics or available_topics
+        counts = [
+            diversity.other_topics[topic_key_getter(topic) if callable(topic_key_getter) else normalize_signature(topic)]
+            for topic in pool
+        ]
+        minimum = min(counts)
+        topic = random.choice([topic for topic, count in zip(pool, counts) if count == minimum])
         logger.info(
             "orchestrator: topic selected topic=%s fresh_pool=%s total_pool=%s",
             topic,
@@ -605,14 +659,10 @@ class SwarmOrchestrator:
             await manager_disable(bot_id, reason=reason)
         if quarantine_error is not None:
             raise quarantine_error
-        replacement = self._pick_replacement_bot(failed_bot_id=bot_id, counterpart_bot_id=counterpart_bot_id)
-        reassign = getattr(self.exchange_store, "reassign_after_permanent_send_error", None)
-        get_exchange = getattr(self.exchange_store, "get_exchange", None)
-        if replacement is not None and callable(reassign) and callable(get_exchange):
-            await reassign(exchange_id, stage=stage, replacement_bot_id=replacement.id, counterpart_bot_id=counterpart_bot_id)
-            return await get_exchange(exchange_id)
-        await self.exchange_store.mark_exchange_skipped(exchange_id, reason)
-        return None
+        return await self._reassign_participant(
+            exchange_id=exchange_id, bot_id=bot_id, counterpart_bot_id=counterpart_bot_id,
+            stage=stage, reason=reason,
+        )
 
     async def _replace_unavailable_exchange_participant(
         self,
@@ -632,25 +682,34 @@ class SwarmOrchestrator:
             self.group_id,
             stage,
         )
-        replacement = self._pick_replacement_bot(failed_bot_id=bot_id, counterpart_bot_id=counterpart_bot_id)
-        reassign = getattr(self.exchange_store, "reassign_after_permanent_send_error", None)
-        get_exchange = getattr(self.exchange_store, "get_exchange", None)
-        if replacement is not None and callable(reassign) and callable(get_exchange):
-            await reassign(
-                exchange_id,
-                stage=stage,
-                replacement_bot_id=replacement.id,
-                counterpart_bot_id=counterpart_bot_id,
-            )
-            return await get_exchange(exchange_id)
-        await self.exchange_store.mark_exchange_skipped(exchange_id, reason)
-        logger.warning(
-            "orchestrator: skipped exchange without replacement exchange_id=%s bot_id=%s stage=%s",
-            exchange_id,
-            bot_id,
-            stage,
+        return await self._reassign_participant(
+            exchange_id=exchange_id, bot_id=bot_id, counterpart_bot_id=counterpart_bot_id,
+            stage=stage, reason=reason,
         )
-        return None
+
+    async def _reassign_participant(
+        self, *, exchange_id: str, bot_id: str, counterpart_bot_id: str, stage: str, reason: str,
+    ) -> dict[str, object] | None:
+        """Согласует выбор замены и сохранение нового резерва между группами."""
+        async with self._planning_context():
+            replacement = await self._pick_replacement_bot(
+                failed_bot_id=bot_id, counterpart_bot_id=counterpart_bot_id,
+                stage=stage, exchange_id=exchange_id,
+            )
+            reassign = getattr(self.exchange_store, "reassign_after_permanent_send_error", None)
+            get_exchange = getattr(self.exchange_store, "get_exchange", None)
+            if replacement is not None and callable(reassign) and callable(get_exchange):
+                await reassign(
+                    exchange_id, stage=stage, replacement_bot_id=replacement.id,
+                    counterpart_bot_id=counterpart_bot_id,
+                )
+                return await get_exchange(exchange_id)
+            await self.exchange_store.mark_exchange_skipped(exchange_id, reason)
+            logger.warning(
+                "orchestrator: skipped exchange without replacement exchange_id=%s bot_id=%s stage=%s",
+                exchange_id, bot_id, stage,
+            )
+            return None
 
     def _active_bot_profiles(self) -> list[SwarmBotProfile]:
         """Возвращает доступные для scheduled exchange аккаунты."""
@@ -674,13 +733,30 @@ class SwarmOrchestrator:
         active_ids = getattr(self.manager, "active_bot_ids", None)
         return active_ids is None or bot_id in active_ids
 
-    def _pick_replacement_bot(self, *, failed_bot_id: str, counterpart_bot_id: str) -> SwarmBotProfile | None:
-        """Выбирает третью активную персону для неотправленного turn."""
-        candidates = [
-            profile for profile in self._active_bot_profiles()
+    async def _pick_replacement_bot(
+        self, *, failed_bot_id: str, counterpart_bot_id: str, stage: str, exchange_id: str,
+    ) -> SwarmBotProfile | None:
+        """Выбирает замену с фиксированным counterpart, исключая собственный резерв."""
+        profiles = {
+            profile.id: profile for profile in self._active_bot_profiles()
             if profile.id not in {failed_bot_id, counterpart_bot_id}
-        ]
-        return random.choice(candidates) if candidates else None
+        }
+        if not profiles:
+            return None
+        diversity = await self._load_diversity(self.now_provider(), exclude_exchange_id=exchange_id)
+        recent_getter = getattr(self.exchange_store, "get_recent_bot_ids", None)
+        recent_ids = (
+            await recent_getter(RECENT_BOT_COOLDOWN_LIMIT, group_id=self.group_id, group_chat_id=self.group_chat_id)
+            if callable(recent_getter) else []
+        )
+        pairs = (
+            (bot_id, counterpart_bot_id) if stage == "initiator" else (counterpart_bot_id, bot_id)
+            for bot_id in profiles
+        )
+        winners, score = diversity.best_pairs(pairs, recent_ids[:RECENT_BOT_COOLDOWN_LIMIT])
+        a, b = random.choice(winners)
+        self._log_diversity_choice(a, b, score, len(winners))
+        return profiles[a if stage == "initiator" else b]
 
     async def _resolve_group_target_for_client(self, telegram_client: object) -> object:
         """Резолвит entity группы отдельно для каждого Telethon-клиента."""
@@ -819,11 +895,15 @@ class SwarmOrchestrator:
         )
         return self._build_exchange_context(body)
 
-    def _next_important_service_scenario(self, latest_scenario: object | None) -> ImportantServiceScenario:
-        """Возвращает следующий сценарий fixed-cycle очереди."""
+    def _next_important_service_scenario(
+        self, latest_scenario: object | None, *, diversity: ExchangeDiversity | None = None,
+    ) -> ImportantServiceScenario:
+        """Разносит стартовые позиции групп, затем продолжает persisted цикл."""
         scenario_keys = [scenario.key for scenario in self.important_service_scenarios]
         if not isinstance(latest_scenario, str) or latest_scenario not in scenario_keys:
-            return self.important_service_scenarios[0]
+            counts = (diversity or ExchangeDiversity()).other_scenarios
+            minimum = min(counts[key] for key in scenario_keys)
+            return random.choice([scenario for scenario in self.important_service_scenarios if counts[scenario.key] == minimum])
         next_index = (scenario_keys.index(latest_scenario) + 1) % len(self.important_service_scenarios)
         return self.important_service_scenarios[next_index]
 

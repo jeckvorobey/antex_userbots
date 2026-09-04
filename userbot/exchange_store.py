@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import uuid
@@ -35,6 +36,30 @@ class ExchangeStore:
 
     def __init__(self, database: SQLiteDatabase) -> None:
         self.database = database
+        self.planning_lock = asyncio.Lock()
+
+    async def get_diversity_summary(
+        self, *, now: datetime, exclude_exchange_id: str | None = None,
+    ) -> list[dict[str, object]]:
+        """Читает общие резервы и опубликованные роли за 24 часа без текстов сообщений."""
+        rows = await self.database.fetch_all(
+            "get_diversity_summary",
+            """SELECT exchange_id, group_id, group_chat_id, topic_key, important_scenario,
+                      status, last_activity_at,
+                      CASE WHEN status = 'planned' OR initiator_message_id IS NOT NULL
+                           THEN initiator_bot_id END AS initiator_bot_id,
+                      CASE WHEN status IN ('planned', 'started') OR responder_message_id IS NOT NULL
+                           THEN responder_bot_id END AS responder_bot_id
+               FROM scheduled_exchanges
+               WHERE last_activity_at >= ?
+                 AND (group_id IS NOT NULL OR group_chat_id IS NOT NULL)
+                 AND (? IS NULL OR exchange_id != ?)
+                 AND (status IN ('planned', 'started')
+                      OR initiator_message_id IS NOT NULL OR responder_message_id IS NOT NULL)
+               ORDER BY last_activity_at DESC, rowid DESC""",
+            (self._serialize_timestamp(now - timedelta(days=1)), exclude_exchange_id, exclude_exchange_id),
+        )
+        return [dict(row) for row in rows]
 
     async def init_db(self) -> None:
         """Создаёт таблицу scheduled_exchanges, если она ещё не существует."""
@@ -614,6 +639,10 @@ class ExchangeStore:
     async def _ensure_indexes(self, connection: aiosqlite.Connection) -> None:
         """Создаёт индексы для горячих запросов scheduled exchange."""
         index_statements = [
+            """
+            CREATE INDEX IF NOT EXISTS idx_scheduled_exchanges_diversity_activity
+            ON scheduled_exchanges (last_activity_at DESC)
+            """,
             """
             CREATE INDEX IF NOT EXISTS idx_scheduled_exchanges_group_window_created
             ON scheduled_exchanges (group_id, group_chat_id, window_key, created_at DESC)
