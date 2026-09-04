@@ -199,8 +199,10 @@ class OpenRouterClient(TextGenerationClient):
 
         details: dict[str, Any] = {}
         code = error.get("code")
-        if isinstance(code, int | str):
+        if isinstance(code, int):
             details["code"] = code
+        elif isinstance(code, str) and code:
+            details["code"] = self._sanitize_error_detail(code, limit=80)
         metadata = error.get("metadata")
         if isinstance(metadata, dict):
             error_type = metadata.get("error_type")
