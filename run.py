@@ -739,6 +739,7 @@ async def _build_runtime_context(settings: object) -> RuntimeContext:
             output_path=OPENROUTER_FREE_MODELS_LOG,
             proxy=proxy,
             timeout_seconds=settings.openrouter_request_timeout_seconds,
+            configured_models=settings.openrouter_models,
         )
         ai_client = OpenRouterClient(
             api_key=openrouter_api_key,
