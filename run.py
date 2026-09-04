@@ -839,7 +839,10 @@ async def _run_swarm_mode(settings: object, runtime: RuntimeContext, scheduler: 
     if callable(reset_startup_availability):
         await reset_startup_availability()
     get_quarantined_bot_ids = getattr(runtime.exchange_store, "get_quarantined_bot_ids", None)
-    quarantined_bot_ids = await get_quarantined_bot_ids() if callable(get_quarantined_bot_ids) else set()
+    configured_bot_ids = {profile.id for profile in bot_profiles}
+    quarantined_bot_ids = (
+        await get_quarantined_bot_ids(configured_bot_ids) if callable(get_quarantined_bot_ids) else set()
+    )
     if quarantined_bot_ids:
         bot_profiles = [profile for profile in bot_profiles if profile.id not in quarantined_bot_ids]
         logger.warning("swarm: durable quarantine excluded bots count=%s", len(quarantined_bot_ids))

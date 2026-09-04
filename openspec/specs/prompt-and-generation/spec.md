@@ -135,19 +135,11 @@ The system SHALL expose an async `TextGenerationClient` with `generate_reply`, `
 - **THEN** the prompt instructs the AI client to begin like an ordinary chat participant using `привет`, `всем привет`, `здравствуйте`, or by asking the question directly without an introductory word
 
 ### Requirement: Strict OpenRouter requests
-The system SHALL send non-streaming Chat Completions through the official async OpenRouter SDK with ordered models and strict provider privacy preferences.
+The system SHALL send non-streaming Chat Completions through the official async OpenRouter SDK with ordered models and explicit local-test provider preferences.
 
-#### Scenario: Request contains ordered models and ZDR policy
-- **WHEN** either generation method calls OpenRouter
-- **THEN** `chat.send_async` receives configured `models` in order and provider preferences with `zdr=true`, `data_collection="deny"`, `allow_fallbacks=true`, and `require_parameters=true`
-
-#### Scenario: Optional temperature is omitted
-- **WHEN** `[openrouter].temperature` is absent
-- **THEN** the SDK request omits the temperature argument
-
-#### Scenario: Configured temperature is forwarded
-- **WHEN** `[openrouter].temperature` is present
-- **THEN** the SDK request contains that exact value
+#### Scenario: Request uses non-ZDR local-test policy
+- **WHEN** either generation method calls OpenRouter in the local test runtime
+- **THEN** `chat.send_async` receives configured models in order and provider preferences with `zdr=false` and `allow_fallbacks=true`
 
 ### Requirement: Bounded OpenRouter completion
 The system SHALL bound every OpenRouter Chat Completion to at most 256 generated tokens before provider execution while retaining the stricter publish-time character limit.

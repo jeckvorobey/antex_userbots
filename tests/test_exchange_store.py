@@ -57,6 +57,19 @@ async def test_startup_availability_snapshot_preserves_durable_quarantine(exchan
     assert await exchange_store.get_quarantined_bot_ids() == {"blocked"}
 
 
+@pytest.mark.asyncio
+async def test_quarantine_filter_scopes_to_configured_numeric_bot_ids(exchange_store):
+    """Фильтр quarantine учитывает текущие числовые ID, но не старые аккаунты."""
+    await exchange_store.quarantine_bot(group_key="old-group", bot_id="legacy_name", reason="forbidden")
+    await exchange_store.quarantine_bot(group_key="current-group", bot_id="7", reason="forbidden")
+    await exchange_store.quarantine_bot(group_key="current-group", bot_id="123456789012345", reason="forbidden")
+
+    assert await exchange_store.get_quarantined_bot_ids({"7", "123456789012345"}) == {
+        "7",
+        "123456789012345",
+    }
+
+
 async def test_exchange_store_persists_recent_bot_ids_topics_and_signatures(exchange_store):
     """Проверяет persisted bot/topic/question state для orchestrator."""
     exchange_id = await exchange_store.create_exchange(

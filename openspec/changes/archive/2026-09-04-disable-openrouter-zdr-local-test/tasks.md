@@ -1,0 +1,4 @@
+- [x] Add failing request-contract assertions for `zdr=false`.
+- [x] Set the OpenRouter provider preference to `zdr=false`.
+- [x] Update the generation delta specification.
+- [ ] Run focused verification and document the local-only privacy trade-off.

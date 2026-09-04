@@ -3,9 +3,7 @@
 ## Purpose
 
 Define how enabled Telegram userbot accounts are started, supervised, registered for routing, and connected to the target group.
-
 ## Requirements
-
 ### Requirement: Runtime context initialization
 The system SHALL initialize one shared SQLite connection and one shared provider-neutral AI client before starting swarm clients, and SHALL close both exactly once during shutdown.
 
@@ -79,15 +77,15 @@ The system SHALL require at least two enabled bots before startup and at least t
 - **THEN** the orchestrator job is not registered and startup fails
 
 ### Requirement: Fresh availability determines startup pool
-The system SHALL replace only the transient startup availability snapshot before checking enabled bot profiles, preserve durable quarantine rows, and admit a profile only after the global Telegram eligibility check and `can_write=True` for every enabled group.
+The system SHALL replace only the transient startup availability snapshot before checking enabled bot profiles, preserve durable quarantine rows, and admit a profile only after the global Telegram eligibility check and `can_write=True` for every enabled group. When building the startup pool, durable quarantine SHALL be limited to the bot IDs present in the current enabled profile configuration, matched as exact strings.
 
-#### Scenario: Startup snapshot is replaced
-- **WHEN** startup begins with previous `__startup__` availability rows
-- **THEN** those transient rows are removed before fresh results are recorded
+#### Scenario: Startup ignores quarantine rows for retired profiles
+- **WHEN** durable quarantine contains an account ID that is absent from the current TOML bot profiles
+- **THEN** startup SHALL leave that row in SQLite but SHALL NOT exclude any current profile because of it
 
-#### Scenario: Durable quarantine survives startup reset
-- **WHEN** a bot has a quarantine row created for a permanent Telegram send restriction
-- **THEN** startup reset preserves that row until an explicit manual removal
+#### Scenario: Startup filters numeric IDs exactly
+- **WHEN** durable quarantine contains configured bot IDs represented by numeric strings of different lengths
+- **THEN** startup SHALL exclude each exact matching configured ID and SHALL not coerce, truncate, or merge the values
 
 ### Requirement: Handler registration per active bot
 The system SHALL register an addressed-reply handler for each active bot client.

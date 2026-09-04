@@ -65,8 +65,8 @@ def install_fake_sdk(monkeypatch, *, chat=None):
 
 
 @pytest.mark.asyncio
-async def test_openrouter_sends_ordered_models_messages_and_zdr_policy(monkeypatch):
-    """Проверяет полный безопасный request contract."""
+async def test_openrouter_sends_ordered_models_without_zdr(monkeypatch):
+    """Проверяет request contract локального режима без ZDR."""
     chat = FakeChat()
     created = install_fake_sdk(monkeypatch, chat=chat)
     client = OpenRouterClient(api_key="secret-key", models=["vendor/primary", "vendor/fallback"])
@@ -85,10 +85,8 @@ async def test_openrouter_sends_ordered_models_messages_and_zdr_policy(monkeypat
         {"role": "user", "content": "История диалога:\nuser: Привет\n\nПользователь: Как дела?"},
     ]
     assert request["provider"] == {
-        "zdr": True,
-        "data_collection": "deny",
+        "zdr": False,
         "allow_fallbacks": True,
-        "require_parameters": True,
     }
     assert request["stream"] is False
     assert request["max_completion_tokens"] == 256
@@ -287,5 +285,4 @@ async def test_openrouter_adapter_is_compatible_with_installed_sdk(monkeypatch):
 
     assert result == "SDK ok"
     assert captured["body"]["models"] == ["vendor/primary", "vendor/fallback"]
-    assert captured["body"]["provider"]["zdr"] is True
-    assert captured["body"]["provider"]["data_collection"] == "deny"
+    assert captured["body"]["provider"] == {"zdr": False, "allow_fallbacks": True}

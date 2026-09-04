@@ -1,0 +1,5 @@
+- [x] Add a regression test for configured numeric IDs and stale profile rows.
+- [x] Scope `ExchangeStore.get_quarantined_bot_ids` to an optional configured ID set.
+- [x] Pass current swarm profile IDs from startup into the quarantine lookup.
+- [x] Run focused and full test verification.
+- [x] Sync and archive the completed OpenSpec change.

@@ -143,12 +143,17 @@ class ExchangeStore:
             (bot_id, reason or "", int(is_available)),
         )
 
-    async def get_quarantined_bot_ids(self) -> set[str]:
-        """Возвращает аккаунты, которые нельзя автоматически запускать после рестарта."""
-        rows = await self.database.fetch_all(
-            "get_quarantined_bot_ids",
-            "SELECT DISTINCT bot_id FROM quarantined_swarm_bots WHERE group_key != '__startup__'",
-        )
+    async def get_quarantined_bot_ids(self, bot_ids: set[str] | None = None) -> set[str]:
+        """Возвращает настроенные аккаунты, которые нельзя запускать после рестарта."""
+        query = "SELECT DISTINCT bot_id FROM quarantined_swarm_bots WHERE group_key != '__startup__'"
+        params: tuple[str, ...] = ()
+        if bot_ids is not None:
+            if not bot_ids:
+                return set()
+            placeholders = ", ".join("?" for _ in bot_ids)
+            query += f" AND bot_id IN ({placeholders})"
+            params = tuple(sorted(bot_ids))
+        rows = await self.database.fetch_all("get_quarantined_bot_ids", query, params)
         return {str(row[0]) for row in rows}
 
     async def backfill_legacy_group_scope(self, *, group_id: str, group_chat_id: int | None) -> None:
