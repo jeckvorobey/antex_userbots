@@ -734,13 +734,6 @@ async def _build_runtime_context(settings: object) -> RuntimeContext:
         important_service_scenarios = await prompt_loader.load_important_service_scenarios()
         openrouter_api_key = _unwrap_secret(settings.openrouter_api_key)
         proxy = _unwrap_secret(settings.proxy)
-        await write_free_models_catalog(
-            api_key=openrouter_api_key,
-            output_path=OPENROUTER_FREE_MODELS_LOG,
-            proxy=proxy,
-            timeout_seconds=settings.openrouter_request_timeout_seconds,
-            configured_models=settings.openrouter_models,
-        )
         ai_client = OpenRouterClient(
             api_key=openrouter_api_key,
             models=settings.openrouter_models,
@@ -753,6 +746,14 @@ async def _build_runtime_context(settings: object) -> RuntimeContext:
             retry_jitter_ms=settings.openrouter_retry_jitter_ms,
             max_output_chars=getattr(settings, "swarm_max_output_chars", 400),
             max_mentions_per_message=getattr(settings, "swarm_max_mentions_per_message", 2),
+        )
+        await write_free_models_catalog(
+            api_key=openrouter_api_key,
+            ai_client=ai_client,
+            output_path=OPENROUTER_FREE_MODELS_LOG,
+            proxy=proxy,
+            timeout_seconds=settings.openrouter_request_timeout_seconds,
+            configured_models=settings.openrouter_models,
         )
         topic_selector = TopicSelector(settings.topics_path)
         await topic_selector.load()

@@ -13,7 +13,9 @@ The system SHALL initialize one shared SQLite connection and one shared provider
 
 #### Scenario: Configured model succeeds
 - **WHEN** startup checks configured models
-- **THEN** it SHALL send sequential short generation requests in unique configuration order using the file-backed prompt «Ответь только словами: Да, доступен»
+- **THEN** it SHALL send sequential short generation requests in unique configuration order using the file-backed prompt «Ответь только словами: Да, работаю» through the same SDK request builder and configured client as bot generation, targeting one model per attempt without mutating runtime models
+- **AND** each attempt SHALL log the model and check prompt before sending and a bounded secret-redacted answer or safe failure status after completion
+- **AND** each model check SHALL have an overall eight-second deadline including SDK retries
 - **AND** any nonempty text response after stripping surrounding whitespace SHALL count as success
 - **AND** at first success it SHALL stop checks, skip catalog fetching, update diagnostics with catalog_fetched=false, and continue startup without replacing configured models
 

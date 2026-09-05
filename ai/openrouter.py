@@ -86,22 +86,6 @@ class OpenRouterClient(TextGenerationClient):
         """Отправляет один provider-routed запрос и нормализует первый ответ."""
         if self._closed:
             raise GenerationError("Клиент генерации уже закрыт")
-        request: dict[str, Any] = {
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_context},
-            ],
-            "models": self.models,
-            "provider": {
-                "zdr": False,
-                "allow_fallbacks": True,
-            },
-            "stream": False,
-            "max_completion_tokens": MAX_COMPLETION_TOKENS,
-        }
-        if self.temperature is not None:
-            request["temperature"] = self.temperature
-
         logger.info(
             "OpenRouter generation started: operation=%s models=%s proxy=%s",
             operation,
@@ -109,11 +93,7 @@ class OpenRouterClient(TextGenerationClient):
             self._describe_proxy(),
         )
         try:
-            response = await self._get_client().chat.send_async(**request)
-            content = response.choices[0].message.content
-            if not isinstance(content, str) or not content.strip():
-                raise GenerationError("OpenRouter вернул пустой текст")
-            return content.strip()
+            return await self._request_text(system_prompt, user_context, self.models)
         except GenerationError:
             logger.error("OpenRouter generation failed: operation=%s category=response", operation)
             raise
@@ -133,6 +113,36 @@ class OpenRouterClient(TextGenerationClient):
             )
             error_type = TemporaryGenerationError if category == "temporary" else GenerationError
             raise error_type("Ошибка генерации через OpenRouter") from None
+
+    async def probe_model(self, model: str, prompt: str) -> str:
+        """Проверяет одну модель тем же SDK-путём, сохраняя исходные SDK ошибки."""
+        if self._closed:
+            raise GenerationError("Клиент генерации уже закрыт")
+        return await self._request_text("", prompt, [model])
+
+    async def _request_text(self, system_prompt: str, user_context: str, models: list[str]) -> str:
+        """Общий запрос SDK для генерации ботов и startup-проверки."""
+        request: dict[str, Any] = {
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_context},
+            ],
+            "models": models,
+            "provider": {
+                "zdr": False,
+                "allow_fallbacks": True,
+            },
+            "stream": False,
+            "max_completion_tokens": MAX_COMPLETION_TOKENS,
+        }
+        if self.temperature is not None:
+            request["temperature"] = self.temperature
+
+        response = await self._get_client().chat.send_async(**request)
+        content = response.choices[0].message.content
+        if not isinstance(content, str) or not content.strip():
+            raise GenerationError("OpenRouter вернул пустой текст")
+        return content.strip()
 
     def _get_client(self) -> Any:
         """Лениво создаёт официальный SDK client с bounded retries."""

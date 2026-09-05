@@ -13,12 +13,12 @@ from typing import Any
 import httpx
 
 from ai.generation import LONG_SECRET_RE
+from ai.openrouter import OpenRouterClient
 
 
 logger = logging.getLogger(__name__)
 
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
-OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_FREE_MODELS_LOG = "logs/openrouter_free_models.json"
 OPENROUTER_FREE_MODELS_SORT = "intelligence-high-to-low"
 OPENROUTER_MODELS_PAGE_SIZE = 1000
@@ -35,16 +35,22 @@ async def write_free_models_catalog(
     model_probe_timeout_seconds: float = OPENROUTER_MODEL_PROBE_TIMEOUT_SECONDS,
     configured_models: list[str] | tuple[str, ...] | None = None,
     http_client: httpx.AsyncClient | None = None,
+    ai_client: OpenRouterClient | None = None,
 ) -> dict[str, Any]:
     """Проверяет генерацию; при всех отказах получает каталог бесплатных моделей."""
     path = Path(output_path)
     owns_client = http_client is None
     client = http_client or httpx.AsyncClient(proxy=proxy, timeout=timeout_seconds)
+    owns_ai_client = ai_client is None
+    generation_client = ai_client or OpenRouterClient(
+        api_key=api_key, models=list(configured_models or ()), proxy=proxy,
+        request_timeout_seconds=timeout_seconds,
+    )
     model_checks: list[dict[str, Any]] = []
     try:
         try:
             model_checks = await _probe_configured_models(
-                client,
+                generation_client,
                 api_key=api_key,
                 configured_models=list(configured_models or ()),
                 timeout_seconds=model_probe_timeout_seconds,
@@ -92,8 +98,12 @@ async def write_free_models_catalog(
             )
             return {"status": "error", "models_count": 0, "output_path": str(path)}
     finally:
-        if owns_client:
-            await client.aclose()
+        try:
+            if owns_ai_client:
+                await generation_client.close()
+        finally:
+            if owns_client:
+                await client.aclose()
 
 
 async def _fetch_all_free_text_models(client: httpx.AsyncClient, *, api_key: str) -> tuple[list[dict[str, Any]], int]:
@@ -129,7 +139,7 @@ async def _fetch_all_free_text_models(client: httpx.AsyncClient, *, api_key: str
 
 
 async def _probe_configured_models(
-    client: httpx.AsyncClient,
+    client: OpenRouterClient,
     *,
     api_key: str,
     configured_models: list[str],
@@ -142,11 +152,15 @@ async def _probe_configured_models(
     prompt = (await asyncio.to_thread(OPENROUTER_MODEL_PROBE_PROMPT_PATH.read_text, encoding="utf-8")).strip()
     checks = []
     for model in models:
+        logger.info("OpenRouter startup request: model=%s prompt=%r",
+                    _sanitize_external_scalar(model, api_key=api_key),
+                    _sanitize_external_scalar(prompt, api_key=api_key))
         check = await _probe_one_configured_model(
             client, api_key=api_key, model=model, timeout_seconds=timeout_seconds, prompt=prompt,
         )
         checks.append(check)
-        logger.info("OpenRouter startup probe: attempt=%s available=%s status=%s",
+        logger.info("OpenRouter startup result: model=%s attempt=%s available=%s status=%s",
+                    _sanitize_external_scalar(model, api_key=api_key),
                     len(checks), check["available"], check["status_code"])
         if check["available"]:
             break
@@ -154,35 +168,24 @@ async def _probe_configured_models(
 
 
 async def _probe_one_configured_model(
-    client: httpx.AsyncClient,
+    client: OpenRouterClient,
     *,
     api_key: str,
     model: str,
     timeout_seconds: float,
     prompt: str,
 ) -> dict[str, Any]:
-    """Проверяет одну configured модель коротким bounded Chat Completions запросом."""
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    """Проверяет одну модель через SDK с общим deadline на retries."""
     try:
-        response = await client.post(
-            OPENROUTER_CHAT_COMPLETIONS_URL,
-            headers=headers,
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "provider": {"zdr": False, "allow_fallbacks": True},
-                "stream": False,
-                "max_completion_tokens": 32,
-            },
-            timeout=timeout_seconds,
-        )
-        response.raise_for_status()
-        body = response.json()
-        answer = _extract_probe_answer(body)
+        async with asyncio.timeout(timeout_seconds):
+            answer = await client.probe_model(model, prompt)
+        logger.info("OpenRouter startup answer: model=%s answer=%r",
+                    _sanitize_external_scalar(model, api_key=api_key),
+                    _sanitize_external_scalar(answer, api_key=api_key))
         return {
             "connection_code": model,
             "available": bool(answer),
-            "status_code": response.status_code,
+            "status_code": 200,
             "response": "text_received" if answer else "empty",
         }
     except Exception as exc:
@@ -231,7 +234,7 @@ def _build_success_payload(
 
 def _build_error_payload(*, exc: Exception, api_key: str) -> dict[str, Any]:
     """Собирает безопасный diagnostic JSON при ошибке каталога."""
-    status_code = getattr(getattr(exc, "response", None), "status_code", None)
+    status_code = OpenRouterClient._extract_status_code(exc)
     return {
         "status": "error",
         "generated_at": datetime.now(UTC).isoformat(),
@@ -245,24 +248,9 @@ def _build_error_payload(*, exc: Exception, api_key: str) -> dict[str, Any]:
     }
 
 
-def _extract_probe_answer(payload: Any) -> str:
-    """Достаёт короткий ответ probe-запроса из Chat Completions response."""
-    if not isinstance(payload, dict):
-        return ""
-    choices = payload.get("choices")
-    if not isinstance(choices, list) or not choices:
-        return ""
-    first_choice = choices[0]
-    if not isinstance(first_choice, dict):
-        return ""
-    message = first_choice.get("message")
-    content = message.get("content") if isinstance(message, dict) else None
-    return content.strip() if isinstance(content, str) else ""
-
-
 def _build_probe_error_check(*, model: str, exc: Exception, api_key: str) -> dict[str, Any]:
     """Собирает safe availability result без свободного provider message."""
-    status_code = getattr(getattr(exc, "response", None), "status_code", None)
+    status_code = OpenRouterClient._extract_status_code(exc)
     error_payload = _extract_error_payload(exc)
     return {
         "connection_code": model,
