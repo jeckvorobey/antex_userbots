@@ -23,7 +23,6 @@ OPENROUTER_FREE_MODELS_LOG = "logs/openrouter_free_models.json"
 OPENROUTER_FREE_MODELS_SORT = "intelligence-high-to-low"
 OPENROUTER_MODELS_PAGE_SIZE = 1000
 OPENROUTER_MODEL_PROBE_PROMPT_PATH = Path(__file__).parent / "prompts" / "model_probe.md"
-OPENROUTER_MODEL_PROBE_TIMEOUT_SECONDS = 8.0
 
 
 async def write_free_models_catalog(
@@ -32,7 +31,7 @@ async def write_free_models_catalog(
     output_path: str | Path = OPENROUTER_FREE_MODELS_LOG,
     proxy: str | None = None,
     timeout_seconds: float = 45.0,
-    model_probe_timeout_seconds: float = OPENROUTER_MODEL_PROBE_TIMEOUT_SECONDS,
+    model_probe_timeout_seconds: float | None = None,
     configured_models: list[str] | tuple[str, ...] | None = None,
     http_client: httpx.AsyncClient | None = None,
     ai_client: OpenRouterClient | None = None,
@@ -47,32 +46,37 @@ async def write_free_models_catalog(
         request_timeout_seconds=timeout_seconds,
     )
     model_checks: list[dict[str, Any]] = []
+    generation_available = False
     try:
         try:
             model_checks = await _probe_configured_models(
                 generation_client,
                 api_key=api_key,
                 configured_models=list(configured_models or ()),
-                timeout_seconds=model_probe_timeout_seconds,
+                timeout_seconds=timeout_seconds if model_probe_timeout_seconds is None else model_probe_timeout_seconds,
             )
-            if any(check["available"] for check in model_checks):
+            generation_available = any(check["available"] for check in model_checks)
+            if generation_available:
                 _write_json(path, {
                     "status": "ok",
                     "generated_at": datetime.now(UTC).isoformat(),
                     "catalog_fetched": False,
+                    "generation_available": True,
                     "configured_model_checks": model_checks,
                 })
                 logger.info("OpenRouter startup generation succeeded: checks=%s catalog skipped", len(model_checks))
                 return {
-                    "status": "ok", "models_count": 0,
+                    "status": "ok", "generation_available": True, "models_count": 0,
                     "configured_model_checks_count": len(model_checks), "output_path": str(path),
                 }
+            logger.error("OpenRouter startup unavailable: checked=%s; каталог не подтверждает генерацию", len(model_checks))
             models, total_count = await _fetch_all_free_text_models(client, api_key=api_key)
             payload = _build_success_payload(
                 models=models,
                 total_count=total_count,
                 configured_model_checks=model_checks,
             )
+            payload["generation_available"] = generation_available
             _write_json(path, payload)
             logger.info(
                 "OpenRouter free models catalog written: path=%s models=%s configured_model_checks=%s",
@@ -82,6 +86,7 @@ async def write_free_models_catalog(
             )
             return {
                 "status": "ok",
+                "generation_available": False,
                 "models_count": len(models),
                 "configured_model_checks_count": len(model_checks),
                 "output_path": str(path),
@@ -89,14 +94,18 @@ async def write_free_models_catalog(
         except Exception as exc:
             payload = _build_error_payload(exc=exc, api_key=api_key)
             payload["configured_model_checks"] = model_checks
-            _write_json(path, payload)
+            payload["generation_available"] = generation_available
+            try:
+                _write_json(path, payload)
+            except OSError:
+                logger.error("OpenRouter diagnostic report could not be written")
             logger.warning(
                 "OpenRouter free models catalog failed: path=%s status=%s message=%r",
                 path,
                 payload["error"].get("status_code", "unknown"),
                 payload["error"].get("message", "unknown"),
             )
-            return {"status": "error", "models_count": 0, "output_path": str(path)}
+            return {"status": "error", "generation_available": generation_available, "models_count": 0, "output_path": str(path)}
     finally:
         try:
             if owns_ai_client:
@@ -159,9 +168,10 @@ async def _probe_configured_models(
             client, api_key=api_key, model=model, timeout_seconds=timeout_seconds, prompt=prompt,
         )
         checks.append(check)
-        logger.info("OpenRouter startup result: model=%s attempt=%s available=%s status=%s",
+        log_result = logger.info if check["available"] else logger.error
+        log_result("OpenRouter startup result: model=%s attempt=%s available=%s status=%s reason=%s",
                     _sanitize_external_scalar(model, api_key=api_key),
-                    len(checks), check["available"], check["status_code"])
+                    len(checks), check["available"], check["status_code"], check.get("error_reason", "none"))
         if check["available"]:
             break
     return checks
@@ -256,6 +266,7 @@ def _build_probe_error_check(*, model: str, exc: Exception, api_key: str) -> dic
         "connection_code": model,
         "available": False,
         "status_code": status_code if isinstance(status_code, int) else "unknown",
+        "error_reason": error_payload.get("reason", "unknown"),
         "error_code": _sanitize_external_scalar(error_payload.get("code"), api_key=api_key),
         "error_type": _sanitize_external_scalar(error_payload.get("error_type"), api_key=api_key),
         "provider_code": _sanitize_external_scalar(error_payload.get("provider_code"), api_key=api_key),
@@ -279,6 +290,7 @@ def _extract_error_payload(exc: Exception) -> dict[str, Any]:
         return {}
     metadata = error.get("metadata")
     return {
+        "reason": OpenRouterClient._classify_error_message(error.get("message")),
         "code": error.get("code"),
         "error_type": metadata.get("error_type") if isinstance(metadata, dict) else None,
         "provider_code": metadata.get("provider_code") if isinstance(metadata, dict) else None,

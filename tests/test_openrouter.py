@@ -124,7 +124,6 @@ async def test_openrouter_sends_ordered_models_without_zdr(monkeypatch):
         "zdr": False,
         "data_collection": "deny",
         "allow_fallbacks": True,
-        "require_parameters": True,
     }
     assert request["stream"] is False
     assert request["max_completion_tokens"] == 256
@@ -373,5 +372,21 @@ async def test_openrouter_adapter_is_compatible_with_installed_sdk(monkeypatch):
         "zdr": False,
         "data_collection": "deny",
         "allow_fallbacks": True,
-        "require_parameters": True,
     }
+
+
+@pytest.mark.parametrize("message,reason", [
+    ("No endpoints found matching your data policy", "data_policy"),
+    ("No endpoints found that support the requested parameters", "unsupported_parameters"),
+    ("No endpoints found for model", "no_endpoints"),
+    ("private user content secret-key", "unknown"),
+])
+def test_error_reason_is_classified_without_logging_message(message, reason):
+    """Причина маршрутизации классифицируется без свободного текста ответа."""
+    from openrouter.errors import OpenRouterError
+    client = OpenRouterClient(api_key="secret-key", models=["one", "two"])
+    exc = OpenRouterError("private exception", httpx.Response(404, json={"error": {"code": 404, "message": message}}))
+    details = client._extract_openrouter_error_details(exc)
+    assert details["reason"] == reason
+    assert "message" not in details
+    assert "secret-key" not in str(details)

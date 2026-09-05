@@ -266,7 +266,8 @@ def test_build_proxy_settings_rejects_https_proxy():
 
 
 @pytest.mark.asyncio
-async def test_build_runtime_context_wires_and_closes_openrouter(monkeypatch, tmp_path):
+@pytest.mark.parametrize("generation_available", [True, False, None])
+async def test_build_runtime_context_wires_and_closes_openrouter(monkeypatch, tmp_path, generation_available):
     """Проверяет единый OpenRouter client и его lifecycle в RuntimeContext."""
     import run
 
@@ -276,6 +277,7 @@ async def test_build_runtime_context_wires_and_closes_openrouter(monkeypatch, tm
         return_value={
             "status": "ok",
             "models_count": 2,
+            "generation_available": generation_available,
             "output_path": "logs/openrouter_free_models.json",
         }
     )
@@ -304,6 +306,12 @@ async def test_build_runtime_context_wires_and_closes_openrouter(monkeypatch, tm
         swarm_max_mentions_per_message=2,
         swarm_history_retention_days=30,
     )
+
+    if generation_available is not True:
+        with pytest.raises(RuntimeError, match="OpenRouter.*недоступ"):
+            await run._build_runtime_context(settings)
+        fake_ai_client.close.assert_awaited_once()
+        return
 
     runtime = await run._build_runtime_context(settings)
 
@@ -351,7 +359,7 @@ async def test_build_runtime_context_preserves_init_error_and_closes_all_resourc
     )
     monkeypatch.setattr(run, "OpenRouterClient", lambda **_kwargs: ai_client)
     monkeypatch.setattr(run, "TopicSelector", lambda _path: topic_selector)
-    monkeypatch.setattr(run, "write_free_models_catalog", AsyncMock())
+    monkeypatch.setattr(run, "write_free_models_catalog", AsyncMock(return_value={"generation_available": True}))
     settings = SimpleNamespace(
         db_path=":memory:",
         prompts_dir="prompts",
@@ -377,12 +385,14 @@ async def test_build_runtime_context_preserves_init_error_and_closes_all_resourc
 
 
 @pytest.mark.asyncio
-async def test_main_runs_swarm_mode(monkeypatch, tmp_path):
+@pytest.mark.parametrize("proxy", [None, "socks5://private-user:private-password@127.0.0.1:1080"])
+async def test_main_runs_swarm_mode(monkeypatch, tmp_path, caplog, proxy):
     """Проверяет, что main() запускает swarm-bootstrap и закрывает runtime."""
     import run
 
     settings = Settings(
         openrouter_api_key="openrouter-key",
+        proxy=proxy,
         db_path=":memory:",
         settings_path=str(write_openrouter_settings(tmp_path)),
     )
@@ -397,6 +407,12 @@ async def test_main_runs_swarm_mode(monkeypatch, tmp_path):
 
     await run.main()
 
+    assert f"settings_path={settings.settings_path}" in caplog.text
+    assert "models=['test/primary', 'test/fallback']" in caplog.text
+    assert f"shared_proxy={'on' if proxy else 'off'}" in caplog.text
+    assert "openrouter-key" not in caplog.text
+    assert "private-password" not in caplog.text
+    assert "private-user" not in caplog.text
     scheduler.start.assert_called_once()
     run._run_swarm_mode.assert_awaited_once_with(settings, runtime_context, scheduler)
     runtime_context.close.assert_awaited_once()

@@ -49,3 +49,8 @@ def setup_logging(
             file_handlers[0].setLevel(normalized_file_level)
 
     root_logger.setLevel(normalized_level)
+
+    if log_file:
+        root_logger.info("Файловый лог включён: path=%s level=%s", log_path.resolve(), logging.getLevelName(normalized_file_level))
+    else:
+        root_logger.warning("Файловый лог отключён: logging.file не задан")
