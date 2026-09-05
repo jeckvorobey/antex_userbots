@@ -122,7 +122,9 @@ async def test_openrouter_sends_ordered_models_without_zdr(monkeypatch):
     ]
     assert request["provider"] == {
         "zdr": False,
+        "data_collection": "deny",
         "allow_fallbacks": True,
+        "require_parameters": True,
     }
     assert request["stream"] is False
     assert request["max_completion_tokens"] == 256
@@ -367,4 +369,9 @@ async def test_openrouter_adapter_is_compatible_with_installed_sdk(monkeypatch):
 
     assert result == "SDK ok"
     assert captured["body"]["models"] == ["vendor/primary", "vendor/fallback"]
-    assert captured["body"]["provider"] == {"zdr": False, "allow_fallbacks": True}
+    assert captured["body"]["provider"] == {
+        "zdr": False,
+        "data_collection": "deny",
+        "allow_fallbacks": True,
+        "require_parameters": True,
+    }

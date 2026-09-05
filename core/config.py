@@ -105,7 +105,7 @@ class Secrets(BaseSettings):
 class _StrictModel(BaseModel):
     """Базовая модель TOML-секций с запретом неизвестных ключей."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
 
 class TelegramConfig(_StrictModel):

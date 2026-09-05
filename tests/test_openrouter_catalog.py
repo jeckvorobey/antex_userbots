@@ -111,7 +111,7 @@ async def test_probes_stop_on_first_text_success(tmp_path, monkeypatch, caplog, 
         calls.append(body["models"])
         assert body["messages"][-1]["content"] == "Ответь только словами: Да, работаю"
         assert body["max_completion_tokens"] == 256
-        assert body["provider"] == {"zdr": False, "allow_fallbacks": True}
+        assert body["provider"] == {"zdr": False, "data_collection": "deny", "allow_fallbacks": True, "require_parameters": True}
         if fail_first and body["models"] == ["first:free"]:
             error = RuntimeError("private failure secret-key")
             error.status_code = 429
