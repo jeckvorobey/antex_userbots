@@ -39,4 +39,3 @@ The system SHALL initialize one shared SQLite connection and one shared provider
 #### Scenario: Direct transports omit proxy
 - **WHEN** settings do not provide `PROXY`
 - **THEN** runtime constructs Telethon and OpenRouter without proxy configuration
-
