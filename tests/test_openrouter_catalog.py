@@ -239,3 +239,22 @@ async def test_shared_client_keeps_configuration_and_remains_open(tmp_path, monk
     assert created[0].kwargs["retry_config"].backoff.max_elapsed_time == 4321
     await client.close()
     assert created[0].exit_calls == 1
+
+
+def test_sdk_error_preserves_safe_provider_details():
+    """Настоящее SDK исключение сохраняет whitelist, скрывая ключ и raw message."""
+    from openrouter.errors import OpenRouterError
+    from ai.openrouter_catalog import _build_probe_error_check
+
+    response = httpx.Response(429, json={"error": {
+        "code": 429, "message": "private raw detail secret-key",
+        "metadata": {"error_type": "limit secret-key", "provider_code": "rate_limit"},
+    }})
+    result = _build_probe_error_check(model="model", api_key="secret-key",
+                                      exc=OpenRouterError("failure", response))
+    assert result["status_code"] == 429
+    assert result["error_code"] == "429"
+    assert result["error_type"] == "limit <redacted_secret>"
+    assert result["provider_code"] == "rate_limit"
+    assert "secret-key" not in json.dumps(result)
+    assert "private raw detail" not in json.dumps(result)

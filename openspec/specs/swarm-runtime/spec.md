@@ -44,6 +44,10 @@ The system SHALL initialize one shared SQLite connection and one shared provider
 - **WHEN** settings do not provide `PROXY`
 - **THEN** runtime constructs Telethon and OpenRouter without proxy configuration
 
+#### Scenario: SDK provider error details
+- **WHEN** a startup SDK error exposes provider diagnostics via raw_response
+- **THEN** the report SHALL preserve only secret-redacted error_code, error_type and provider_code without raw payload or error message
+
 ### Requirement: Graceful operator shutdown
 The system SHALL treat an operator interrupt at the process entry point as a successful graceful shutdown after asynchronous runtime cleanup completes.
 

@@ -265,6 +265,8 @@ def _build_probe_error_check(*, model: str, exc: Exception, api_key: str) -> dic
 def _extract_error_payload(exc: Exception) -> dict[str, Any]:
     """Извлекает только whitelisted поля error body."""
     response = getattr(exc, "response", None)
+    if response is None:
+        response = getattr(exc, "raw_response", None)
     parse_json = getattr(response, "json", None)
     if not callable(parse_json):
         return {}
@@ -360,6 +362,8 @@ def _format_toml_models_line(model_ids: list[str]) -> str:
 def _extract_safe_error_message(exc: Exception, *, api_key: str) -> str:
     """Достаёт OpenRouter error.message и редактирует секреты."""
     response = getattr(exc, "response", None)
+    if response is None:
+        response = getattr(exc, "raw_response", None)
     parse_json = getattr(response, "json", None)
     message = ""
     if callable(parse_json):
