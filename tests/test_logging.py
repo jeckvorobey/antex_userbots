@@ -81,3 +81,25 @@ async def test_log_resolved_group_logs_configured_group_id_even_without_membersh
         "Целевая группа настроена: GROUP_CHAT_ID=-1001234567890 GROUP_TARGET=@chat" in record.getMessage()
         for record in caplog.records
     )
+
+
+def test_file_logging_announces_destination_and_captures_errors(tmp_path, caplog):
+    """Файловый лог объявляет путь, пишет ERROR и пропускает INFO."""
+    root = logging.getLogger()
+    previous_handlers, previous_level = list(root.handlers), root.level
+    path = tmp_path / "swarm.log"
+    try:
+        with caplog.at_level(logging.INFO):
+            setup_logging("INFO", log_file=str(path))
+            logging.getLogger("ai.openrouter_catalog").error("startup unavailable")
+            logging.getLogger("ai.openrouter_catalog").info("routine startup")
+        assert "Файловый лог включён" in caplog.text
+        assert str(path) in caplog.text
+        assert "startup unavailable" in path.read_text()
+        assert "routine startup" not in path.read_text()
+    finally:
+        for handler in list(root.handlers):
+            if handler not in previous_handlers:
+                root.removeHandler(handler)
+                handler.close()
+        root.setLevel(previous_level)

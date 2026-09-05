@@ -103,13 +103,14 @@ class OpenRouterClient(TextGenerationClient):
             details = self._extract_openrouter_error_details(exc)
             logger.error(
                 "OpenRouter generation failed: operation=%s category=%s status=%s "
-                "openrouter_error_code=%s openrouter_error_type=%s openrouter_provider_code=%s",
+                "openrouter_error_code=%s openrouter_error_type=%s openrouter_provider_code=%s openrouter_error_reason=%s",
                 operation,
                 category,
                 status if status is not None else "unknown",
                 details.get("code", "unknown"),
                 details.get("error_type", "unknown"),
                 details.get("provider_code", "unknown"),
+                details.get("reason", "unknown"),
             )
             error_type = TemporaryGenerationError if category == "temporary" else GenerationError
             raise error_type("Ошибка генерации через OpenRouter") from None
@@ -132,7 +133,6 @@ class OpenRouterClient(TextGenerationClient):
                 "zdr": False,
                 "data_collection": "deny",
                 "allow_fallbacks": True,
-                "require_parameters": True,
             },
             "stream": False,
             "max_completion_tokens": MAX_COMPLETION_TOKENS,
@@ -211,7 +211,7 @@ class OpenRouterClient(TextGenerationClient):
         if not isinstance(error, dict):
             return {}
 
-        details: dict[str, Any] = {}
+        details: dict[str, Any] = {"reason": self._classify_error_message(error.get("message"))}
         code = error.get("code")
         if isinstance(code, int):
             details["code"] = code
@@ -226,6 +226,18 @@ class OpenRouterClient(TextGenerationClient):
             if isinstance(provider_code, str) and provider_code:
                 details["provider_code"] = self._sanitize_error_detail(provider_code, limit=80)
         return details
+
+    @staticmethod
+    def _classify_error_message(message: Any) -> str:
+        """Сводит пояснение OpenRouter к фиксированному безопасному коду."""
+        if not isinstance(message, str):
+            return "unknown"
+        text = message.lower()
+        if "data policy" in text or "data collection" in text:
+            return "data_policy"
+        if "no endpoints" in text:
+            return "unsupported_parameters" if "parameter" in text else "no_endpoints"
+        return "unknown"
 
     def _sanitize_error_detail(self, text: str, *, limit: int = 300) -> str:
         """Редактирует секреты и ограничивает длину provider diagnostics."""

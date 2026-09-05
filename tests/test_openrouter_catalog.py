@@ -74,6 +74,7 @@ async def test_write_free_models_catalog_filters_sorts_and_writes_connection_cod
 
     assert result == {
         "status": "ok",
+        "generation_available": False,
         "models_count": 2,
         "configured_model_checks_count": 0,
         "output_path": str(output_path),
@@ -111,7 +112,7 @@ async def test_probes_stop_on_first_text_success(tmp_path, monkeypatch, caplog, 
         calls.append(body["models"])
         assert body["messages"][-1]["content"] == "Ответь только словами: Да, работаю"
         assert body["max_completion_tokens"] == 256
-        assert body["provider"] == {"zdr": False, "data_collection": "deny", "allow_fallbacks": True, "require_parameters": True}
+        assert body["provider"] == {"zdr": False, "data_collection": "deny", "allow_fallbacks": True}
         if fail_first and body["models"] == ["first:free"]:
             error = RuntimeError("private failure secret-key")
             error.status_code = 429
@@ -134,9 +135,11 @@ async def test_probes_stop_on_first_text_success(tmp_path, monkeypatch, caplog, 
     assert answer.strip().replace("secret-key", "<redacted_secret>") in caplog.text
     if fail_first:
         assert "status=429" in caplog.text
+        assert any(record.levelno == logging.ERROR and "startup result:" in record.message for record in caplog.records)
     assert "secret-key" not in caplog.text
     assert "private failure" not in caplog.text
     payload = json.loads(path.read_text())
+    assert payload["generation_available"] is True
     assert payload["catalog_fetched"] is False
     assert payload["configured_model_checks"][-1]["available"] is True
     assert "secret-key" not in path.read_text()
@@ -177,6 +180,7 @@ async def test_all_failed_probes_fetch_catalog_last(tmp_path, monkeypatch, catal
     assert calls == models + ["catalog"]
     assert created[0].exit_calls == 1
     payload = json.loads(path.read_text())
+    assert payload["generation_available"] is False
     assert len(payload["configured_model_checks"]) == len(models)
     assert all(not row["available"] for row in payload["configured_model_checks"])
     assert payload["configured_model_checks"][0]["status_code"] == 404
@@ -202,7 +206,7 @@ async def test_write_free_models_catalog_writes_safe_error_file(tmp_path):
             http_client=http_client,
         )
 
-    assert result == {"status": "error", "models_count": 0, "output_path": str(output_path)}
+    assert result == {"status": "error", "generation_available": False, "models_count": 0, "output_path": str(output_path)}
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert payload["status"] == "error"
     assert payload["error"]["status_code"] == 403
@@ -258,3 +262,33 @@ def test_sdk_error_preserves_safe_provider_details():
     assert result["provider_code"] == "rate_limit"
     assert "secret-key" not in json.dumps(result)
     assert "private raw detail" not in json.dumps(result)
+
+
+@pytest.mark.asyncio
+async def test_report_write_failure_preserves_generation_readiness(tmp_path, monkeypatch):
+    """Недоступный диск не отменяет уже подтверждённую генерацию."""
+    from tests.test_openrouter import FakeChat
+    created = install_fake_sdk(monkeypatch, chat=FakeChat())
+    def fail_write(*args):
+        raise PermissionError("report directory unavailable")
+    monkeypatch.setattr("ai.openrouter_catalog._write_json", fail_write)
+    async def handle(request):
+        pytest.fail("После успешной генерации каталог не нужен")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http_client:
+        result = await write_free_models_catalog(api_key="test-key", configured_models=["one"],
+            http_client=http_client, output_path=tmp_path / "report.json")
+    assert result["generation_available"] is True
+    assert result["status"] == "error"
+    assert created[0].exit_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_default_probe_deadline_uses_configured_request_timeout(tmp_path, monkeypatch):
+    """Startup использует настроенный timeout обычной генерации."""
+    from unittest.mock import AsyncMock
+    probe = AsyncMock(return_value=[{"available": True}])
+    monkeypatch.setattr("ai.openrouter_catalog._probe_configured_models", probe)
+    async with httpx.AsyncClient() as http_client:
+        await write_free_models_catalog(api_key="key", configured_models=["one"],
+            timeout_seconds=37, http_client=http_client, output_path=tmp_path / "report.json")
+    assert probe.call_args.kwargs["timeout_seconds"] == 37

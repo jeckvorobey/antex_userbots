@@ -747,7 +747,7 @@ async def _build_runtime_context(settings: object) -> RuntimeContext:
             max_output_chars=getattr(settings, "swarm_max_output_chars", 400),
             max_mentions_per_message=getattr(settings, "swarm_max_mentions_per_message", 2),
         )
-        await write_free_models_catalog(
+        startup_check = await write_free_models_catalog(
             api_key=openrouter_api_key,
             ai_client=ai_client,
             output_path=OPENROUTER_FREE_MODELS_LOG,
@@ -755,6 +755,8 @@ async def _build_runtime_context(settings: object) -> RuntimeContext:
             timeout_seconds=settings.openrouter_request_timeout_seconds,
             configured_models=settings.openrouter_models,
         )
+        if startup_check.get("generation_available") is not True:
+            raise RuntimeError("OpenRouter недоступен: ни одна модель не подтвердила генерацию; запуск остановлен до Telegram")
         topic_selector = TopicSelector(settings.topics_path)
         await topic_selector.load()
         prompt_composer = PromptComposer(prompt_loader=prompt_loader, bot_profiles_dir=settings.bot_profiles_dir)
@@ -1056,6 +1058,12 @@ async def main() -> None:
         file_backup_count=settings.log_file_backup_count,
     )
     logger.info("Запуск swarm userbot")
+    logger.info(
+        "Runtime configuration: settings_path=%s models=%s shared_proxy=%s",
+        settings.settings_path,
+        settings.openrouter_models,
+        "on" if _unwrap_secret(settings.proxy) else "off",
+    )
     if settings.mode != "swarm":
         raise ValueError("Поддерживается только mode=swarm")
 

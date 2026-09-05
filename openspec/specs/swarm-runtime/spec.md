@@ -15,18 +15,19 @@ The system SHALL initialize one shared SQLite connection and one shared provider
 - **WHEN** startup checks configured models
 - **THEN** it SHALL send sequential short generation requests in unique configuration order using the file-backed prompt «Ответь только словами: Да, работаю» through the same SDK request builder and configured client as bot generation, targeting one model per attempt without mutating runtime models
 - **AND** each attempt SHALL log the model and check prompt before sending and a bounded secret-redacted answer or safe failure status after completion
-- **AND** each model check SHALL have an overall eight-second deadline including SDK retries
+- **AND** each model check SHALL have an overall deadline equal to the configured request timeout including SDK retries
 - **AND** any nonempty text response after stripping surrounding whitespace SHALL count as success
 - **AND** at first success it SHALL stop checks, skip catalog fetching, update diagnostics with catalog_fetched=false, and continue startup without replacing configured models
 
 #### Scenario: All configured models fail
 - **WHEN** every configured model returns an HTTP error, timeout, malformed response, empty text, or the list is empty
 - **THEN** startup SHALL fetch the free text-output catalog and write sorted connection slugs plus attempted check results to logs/openrouter_free_models.json
+- **AND** generation_available SHALL be false and runtime SHALL fail before Telegram clients or scheduler start, closing SDK and SQLite
 - **AND** diagnostic files SHALL omit raw generated text and secrets
 
 #### Scenario: Catalog fails after probes
 - **WHEN** the fallback catalog request fails
-- **THEN** the safe error report SHALL retain attempted model check results and runtime startup SHALL continue
+- **THEN** the safe error report SHALL retain attempted model check results and runtime startup SHALL fail before Telegram clients or scheduler start
 
 #### Scenario: Runtime dependencies close once
 - **WHEN** runtime shuts down
@@ -46,7 +47,19 @@ The system SHALL initialize one shared SQLite connection and one shared provider
 
 #### Scenario: SDK provider error details
 - **WHEN** a startup SDK error exposes provider diagnostics via raw_response
-- **THEN** the report SHALL preserve only secret-redacted error_code, error_type and provider_code without raw payload or error message
+- **THEN** the report SHALL preserve only secret-redacted error_code, error_type and provider_code and a whitelisted error_reason derived from known error messages, without raw payload or error message
+
+#### Scenario: Diagnostic write fails after successful generation
+- **WHEN** a model returned nonempty text but writing the diagnostic report fails
+- **THEN** generation_available SHALL remain true and startup SHALL continue
+
+#### Scenario: Failed checks enter error log
+- **WHEN** a startup model check fails
+- **THEN** its safe result SHALL be logged at ERROR and logging setup SHALL announce the configured file destination and threshold or its disabled state
+
+#### Scenario: Effective startup configuration is visible
+- **WHEN** the application starts
+- **THEN** it SHALL log the selected settings path, configured model identifiers and whether the explicit shared proxy is configured, without credentials or proxy URLs
 
 ### Requirement: Graceful operator shutdown
 The system SHALL treat an operator interrupt at the process entry point as a successful graceful shutdown after asynchronous runtime cleanup completes.
