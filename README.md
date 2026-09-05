@@ -12,6 +12,11 @@
 - проект старается не повторять одни и те же вопросы слишком часто;
 - ключевые действия подробно пишутся в лог.
 
+Ошибки генерации OpenRouter записываются на уровне `ERROR`, поэтому строка
+`OpenRouter generation failed` попадает в файловый лог с `file_level = "ERROR"`.
+Она содержит категорию, HTTP status и доступные безопасные коды ошибки из ответа SDK.
+Сырой ответ провайдера, промты и секреты не записываются; отсутствующие поля обозначаются `unknown`.
+
 ## Что приложение делает сейчас
 
 В проекте есть два основных сценария работы.
@@ -171,7 +176,7 @@ temperature = 0.8
 - `[telegram].api_id` и `[telegram].api_hash` обязательны; переменные окружения `API_ID` и `API_HASH` не читаются;
 - `[openrouter].models` обязателен и содержит минимум две уникальные непустые модели в порядке primary -> fallback; конкретные slugs выбирает оператор;
 - `temperature` в `[openrouter]` необязательна и не отправляется в OpenRouter, если отсутствует;
-- при старте runtime пишет отдельный diagnostic-файл `logs/openrouter_free_models.json`: в нём перечислены бесплатные text-output модели OpenRouter, отсортированные best-first по `intelligence-high-to-low`, их `connection_code` slugs, готовая строка `toml_models_line` для ручного копирования в `[openrouter].models` и `configured_model_checks` с результатом короткого `1/0` probe для моделей из текущего конфига;
+- при старте runtime последовательно проверяет модели из `[openrouter].models` генерацией с промтом из `ai/prompts/model_probe.md`: «Ответь только словами: Да, доступен». Любой непустой текст подтверждает работу; после первого успеха проверки прекращаются и запуск продолжается. Только если все модели не ответили текстом, загружается каталог бесплатных text-output моделей. Отчёт `logs/openrouter_free_models.json` содержит результаты попыток без сырого текста; при успехе — `catalog_fetched=false`, при получении каталога — список slugs и `toml_models_line` для ручного копирования. Конфигурация моделей автоматически не меняется;
 - файл `logs/openrouter_free_models.json` не меняет рабочий список моделей автоматически и не содержит `OPENROUTER_API_KEY`;
 - каждый запрос использует Chat Completions с `zdr=false`, `allow_fallbacks=true` и server-side пределом `max_completion_tokens=256`;
 - credential-bearing URL маскируются до отправки провайдеру, а в Telegram-ответах разрешена только служебная ссылка `https://t.me/tt_exchenge_bot/antex`;

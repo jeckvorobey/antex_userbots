@@ -117,13 +117,13 @@ class OpenRouterClient(TextGenerationClient):
                 raise GenerationError("OpenRouter вернул пустой текст")
             return content.strip()
         except GenerationError:
-            logger.warning("OpenRouter generation failed: operation=%s category=response", operation)
+            logger.error("OpenRouter generation failed: operation=%s category=response", operation)
             raise
         except Exception as exc:
             status = self._extract_status_code(exc)
             category = "temporary" if self._is_temporary_error(exc, status) else "permanent"
             details = self._extract_openrouter_error_details(exc)
-            logger.warning(
+            logger.error(
                 "OpenRouter generation failed: operation=%s category=%s status=%s "
                 "openrouter_error_code=%s openrouter_error_type=%s openrouter_provider_code=%s",
                 operation,
@@ -186,6 +186,8 @@ class OpenRouterClient(TextGenerationClient):
     def _extract_openrouter_error_details(self, exc: Exception) -> dict[str, Any]:
         """Извлекает безопасные диагностические поля OpenRouter error body."""
         response = getattr(exc, "response", None)
+        if response is None:
+            response = getattr(exc, "raw_response", None)
         parse_json = getattr(response, "json", None)
         if not callable(parse_json):
             return {}

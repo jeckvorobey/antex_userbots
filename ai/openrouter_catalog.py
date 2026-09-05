@@ -22,7 +22,7 @@ OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions
 OPENROUTER_FREE_MODELS_LOG = "logs/openrouter_free_models.json"
 OPENROUTER_FREE_MODELS_SORT = "intelligence-high-to-low"
 OPENROUTER_MODELS_PAGE_SIZE = 1000
-OPENROUTER_MODEL_PROBE_PROMPT = "Ответь только цифрой 1."
+OPENROUTER_MODEL_PROBE_PROMPT_PATH = Path(__file__).parent / "prompts" / "model_probe.md"
 OPENROUTER_MODEL_PROBE_TIMEOUT_SECONDS = 8.0
 
 
@@ -36,19 +36,32 @@ async def write_free_models_catalog(
     configured_models: list[str] | tuple[str, ...] | None = None,
     http_client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
-    """Получает бесплатные text-output модели OpenRouter и пишет отдельный diagnostic-файл."""
+    """Проверяет генерацию; при всех отказах получает каталог бесплатных моделей."""
     path = Path(output_path)
     owns_client = http_client is None
     client = http_client or httpx.AsyncClient(proxy=proxy, timeout=timeout_seconds)
+    model_checks: list[dict[str, Any]] = []
     try:
         try:
-            models, total_count = await _fetch_all_free_text_models(client, api_key=api_key)
             model_checks = await _probe_configured_models(
                 client,
                 api_key=api_key,
                 configured_models=list(configured_models or ()),
                 timeout_seconds=model_probe_timeout_seconds,
             )
+            if any(check["available"] for check in model_checks):
+                _write_json(path, {
+                    "status": "ok",
+                    "generated_at": datetime.now(UTC).isoformat(),
+                    "catalog_fetched": False,
+                    "configured_model_checks": model_checks,
+                })
+                logger.info("OpenRouter startup generation succeeded: checks=%s catalog skipped", len(model_checks))
+                return {
+                    "status": "ok", "models_count": 0,
+                    "configured_model_checks_count": len(model_checks), "output_path": str(path),
+                }
+            models, total_count = await _fetch_all_free_text_models(client, api_key=api_key)
             payload = _build_success_payload(
                 models=models,
                 total_count=total_count,
@@ -69,6 +82,7 @@ async def write_free_models_catalog(
             }
         except Exception as exc:
             payload = _build_error_payload(exc=exc, api_key=api_key)
+            payload["configured_model_checks"] = model_checks
             _write_json(path, payload)
             logger.warning(
                 "OpenRouter free models catalog failed: path=%s status=%s message=%r",
@@ -121,21 +135,22 @@ async def _probe_configured_models(
     configured_models: list[str],
     timeout_seconds: float,
 ) -> list[dict[str, Any]]:
-    """Проверяет каждую configured модель коротким безопасным Chat Completions запросом."""
+    """Проверяет модели последовательно до первого непустого текстового ответа."""
     models = _unique_models(configured_models)
-    return list(
-        await asyncio.gather(
-            *(
-                _probe_one_configured_model(
-                    client,
-                    api_key=api_key,
-                    model=model,
-                    timeout_seconds=timeout_seconds,
-                )
-                for model in models
-            )
+    if not models:
+        return []
+    prompt = (await asyncio.to_thread(OPENROUTER_MODEL_PROBE_PROMPT_PATH.read_text, encoding="utf-8")).strip()
+    checks = []
+    for model in models:
+        check = await _probe_one_configured_model(
+            client, api_key=api_key, model=model, timeout_seconds=timeout_seconds, prompt=prompt,
         )
-    )
+        checks.append(check)
+        logger.info("OpenRouter startup probe: attempt=%s available=%s status=%s",
+                    len(checks), check["available"], check["status_code"])
+        if check["available"]:
+            break
+    return checks
 
 
 async def _probe_one_configured_model(
@@ -144,6 +159,7 @@ async def _probe_one_configured_model(
     api_key: str,
     model: str,
     timeout_seconds: float,
+    prompt: str,
 ) -> dict[str, Any]:
     """Проверяет одну configured модель коротким bounded Chat Completions запросом."""
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -153,10 +169,10 @@ async def _probe_one_configured_model(
             headers=headers,
             json={
                 "model": model,
-                "messages": [{"role": "user", "content": OPENROUTER_MODEL_PROBE_PROMPT}],
+                "messages": [{"role": "user", "content": prompt}],
                 "provider": {"zdr": False, "allow_fallbacks": True},
                 "stream": False,
-                "max_completion_tokens": 4,
+                "max_completion_tokens": 32,
             },
             timeout=timeout_seconds,
         )
@@ -165,9 +181,9 @@ async def _probe_one_configured_model(
         answer = _extract_probe_answer(body)
         return {
             "connection_code": model,
-            "available": True,
+            "available": bool(answer),
             "status_code": response.status_code,
-            "response": answer or "empty",
+            "response": "text_received" if answer else "empty",
         }
     except Exception as exc:
         return _build_probe_error_check(model=model, exc=exc, api_key=api_key)
@@ -195,6 +211,7 @@ def _build_success_payload(
     connection_codes = [model["connection_code"] for model in models]
     return {
         "status": "ok",
+        "catalog_fetched": True,
         "generated_at": datetime.now(UTC).isoformat(),
         "source_url": OPENROUTER_MODELS_URL,
         "sort": OPENROUTER_FREE_MODELS_SORT,
@@ -240,7 +257,7 @@ def _extract_probe_answer(payload: Any) -> str:
         return ""
     message = first_choice.get("message")
     content = message.get("content") if isinstance(message, dict) else None
-    return " ".join(content.strip().lower().split())[:20] if isinstance(content, str) else ""
+    return content.strip() if isinstance(content, str) else ""
 
 
 def _build_probe_error_check(*, model: str, exc: Exception, api_key: str) -> dict[str, Any]:

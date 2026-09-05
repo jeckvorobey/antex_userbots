@@ -96,93 +96,70 @@ async def test_write_free_models_catalog_filters_sorts_and_writes_connection_cod
 
 
 @pytest.mark.asyncio
-async def test_write_free_models_catalog_checks_configured_model_availability(tmp_path):
-    """Проверяет configured модели коротким Chat Completions probe."""
-    posted_models = []
-    probe_timeouts = []
+@pytest.mark.parametrize("answer", ["Да, доступен", " Да, доступен.\n", "Работаю", "private text secret-key"])
+@pytest.mark.parametrize("fail_first", [False, True])
+async def test_probes_stop_on_first_text_success(tmp_path, answer, fail_first):
+    """Первый непустой текст завершает последовательные проверки без GET каталога."""
+    calls = []
 
     async def handle(request):
-        if request.url.path == "/api/v1/models":
-            return httpx.Response(
-                200,
-                json={
-                    "data": [
-                        {
-                            "id": "available/model:free",
-                            "architecture": {"output_modalities": ["text"]},
-                            "pricing": {"prompt": "0", "completion": "0"},
-                        }
-                    ],
-                    "total_count": 1,
-                },
-                request=request,
-            )
-
+        assert request.method == "POST"
         body = json.loads(request.content)
-        posted_models.append(body["model"])
-        probe_timeouts.append(request.extensions["timeout"])
-        if body["model"] == "available/model:free":
-            assert body["messages"] == [{"role": "user", "content": "Ответь только цифрой 1."}]
-            assert body["provider"] == {"zdr": False, "allow_fallbacks": True}
-            assert body["stream"] is False
-            assert body["max_completion_tokens"] == 4
-            return httpx.Response(
-                200,
-                json={"choices": [{"message": {"content": "1."}}]},
-                request=request,
-            )
-        return httpx.Response(
-            404,
-            json={
-                "error": {
-                    "code": "missing-secret-key",
-                    "message": "raw provider text secret-key",
-                    "metadata": {"error_type": "not_found", "provider_code": "no_route"},
-                }
-            },
-            request=request,
-        )
+        calls.append(body["model"])
+        assert body["messages"] == [{"role": "user", "content": "Ответь только словами: Да, доступен"}]
+        assert body["max_completion_tokens"] == 32
+        assert request.extensions["timeout"]["read"] == 8.0
+        if fail_first and body["model"] == "first:free":
+            return httpx.Response(429, json={"error": {"code": 429}})
+        return httpx.Response(200, json={"choices": [{"message": {"content": answer}}]})
 
-    output_path = tmp_path / "openrouter_free_models.json"
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http_client:
-        result = await write_free_models_catalog(
-            api_key="secret-key",
-            output_path=output_path,
-            configured_models=["available/model:free", "broken/model:free"],
-            http_client=http_client,
-        )
+    path = tmp_path / "report.json"
+    path.write_text('{"old_catalog": true}')
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        await write_free_models_catalog(api_key="secret-key", output_path=path,
+            configured_models=["first:free", "first:free", "second:free", "third:free"], http_client=client)
+    assert calls == (["first:free", "second:free"] if fail_first else ["first:free"])
+    payload = json.loads(path.read_text())
+    assert payload["catalog_fetched"] is False
+    assert payload["configured_model_checks"][-1]["available"] is True
+    assert "old_catalog" not in payload
+    assert "secret-key" not in path.read_text()
+    assert "private text" not in path.read_text()
 
-    assert result == {
-        "status": "ok",
-        "models_count": 1,
-        "configured_model_checks_count": 2,
-        "output_path": str(output_path),
-    }
-    assert posted_models == ["available/model:free", "broken/model:free"]
-    assert probe_timeouts == [
-        {"connect": 8.0, "read": 8.0, "write": 8.0, "pool": 8.0},
-        {"connect": 8.0, "read": 8.0, "write": 8.0, "pool": 8.0},
-    ]
-    payload = json.loads(output_path.read_text(encoding="utf-8"))
-    assert payload["configured_model_checks"] == [
-        {
-            "connection_code": "available/model:free",
-            "available": True,
-            "status_code": 200,
-            "response": "1.",
-        },
-        {
-            "connection_code": "broken/model:free",
-            "available": False,
-            "status_code": 404,
-            "error_code": "missing-<redacted_secret>",
-            "error_type": "not_found",
-            "provider_code": "no_route",
-        },
-    ]
-    serialized = output_path.read_text(encoding="utf-8")
-    assert "secret-key" not in serialized
-    assert "raw provider text" not in serialized
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("catalog_status", [200, 403])
+async def test_all_failed_probes_fetch_catalog_last(tmp_path, catalog_status):
+    """HTTP ошибки, таймаут и пустые/некорректные ответы ведут к каталогу после POST."""
+    calls = []
+    models = ["http", "timeout", "empty", "null", "missing", "nontext", "invalid"]
+
+    async def handle(request):
+        if request.method == "GET":
+            calls.append("catalog")
+            return httpx.Response(catalog_status, json={"data": [], "error": {"code": 403}})
+        model = json.loads(request.content)["model"]
+        calls.append(model)
+        if model == "http":
+            return httpx.Response(404, json={"error": {"code": 404}})
+        if model == "timeout":
+            raise httpx.ReadTimeout("private detail", request=request)
+        if model == "invalid":
+            return httpx.Response(200, text="not json")
+        if model == "missing":
+            return httpx.Response(200, json={"choices": []})
+        content = {"empty": " \n", "null": None, "nontext": []}[model]
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    path = tmp_path / "report.json"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        await write_free_models_catalog(api_key="secret-key", output_path=path,
+            configured_models=models, http_client=client)
+    assert calls == models + ["catalog"]
+    payload = json.loads(path.read_text())
+    assert len(payload["configured_model_checks"]) == len(models)
+    assert all(not row["available"] for row in payload["configured_model_checks"])
+    assert "private detail" not in path.read_text()
 
 
 @pytest.mark.asyncio
