@@ -309,6 +309,7 @@ async def test_build_runtime_context_wires_and_closes_openrouter(monkeypatch, tm
 
     write_catalog.assert_awaited_once_with(
         api_key="test-key",
+        ai_client=fake_ai_client,
         output_path="logs/openrouter_free_models.json",
         proxy="http://user:pass@127.0.0.1:8080",
         timeout_seconds=45.0,
@@ -350,6 +351,7 @@ async def test_build_runtime_context_preserves_init_error_and_closes_all_resourc
     )
     monkeypatch.setattr(run, "OpenRouterClient", lambda **_kwargs: ai_client)
     monkeypatch.setattr(run, "TopicSelector", lambda _path: topic_selector)
+    monkeypatch.setattr(run, "write_free_models_catalog", AsyncMock())
     settings = SimpleNamespace(
         db_path=":memory:",
         prompts_dir="prompts",

@@ -36,6 +36,8 @@ run.py
   -> userbot.orchestrator.SwarmOrchestrator per enabled group scheduled by APScheduler tick
 ```
 
+Startup model diagnostics reuse the shared OpenRouter SDK client and request builder, with a per-model deadline, before Telegram clients start. Only bounded, secret-redacted check answers enter logs; generated conversation content is not logged.
+
 ## Runtime Flows
 
 ### Addressed human reply
