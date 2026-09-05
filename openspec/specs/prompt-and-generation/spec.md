@@ -267,6 +267,11 @@ The system SHALL close the SDK transport and any adapter-owned proxy HTTP client
 ### Requirement: Safe provider observability
 The system SHALL log only safe operation categories, model count, status, and credential-free proxy description.
 
+#### Scenario: Generation failure reaches the error file
+- **WHEN** generation fails due to a provider exception or an empty response
+- **THEN** safe diagnostics are logged at ERROR so the default ERROR file handler retains them
+- **AND** allowlisted error fields are extracted from SDK `raw_response` or HTTPX `response`, without logging raw response text
+
 #### Scenario: Provider failure hides sensitive details
 - **WHEN** a provider request fails with a raw payload or exception
 - **THEN** logs and the raised exception chain omit keys, proxy credentials, prompts, history, generated text, and raw provider text

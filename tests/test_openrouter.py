@@ -10,6 +10,42 @@ import pytest
 
 from ai.generation import GenerationError, TemporaryGenerationError
 from ai.openrouter import OpenRouterClient
+from core.logging import setup_logging
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["provider", "temporary", "response"])
+async def test_generation_failure_reaches_error_log(monkeypatch, tmp_path, failure):
+    """Ошибка генерации сохраняет безопасную диагностику в стандартном error-файле."""
+    error = RuntimeError("private payload secret-key")
+    error.status_code = 503 if failure == "temporary" else 400
+    chat = FakeChat(error=error) if failure != "response" else FakeChat(
+        response=SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=""))])
+    )
+    install_fake_sdk(monkeypatch, chat=chat)
+    root = logging.getLogger()
+    original_handlers, original_level = list(root.handlers), root.level
+    monkeypatch.setattr(setup_logging, "_configured", getattr(setup_logging, "_configured", False), raising=False)
+    log_path = tmp_path / "errors.log"
+    try:
+        setup_logging("INFO", log_file=str(log_path))
+        client = OpenRouterClient(api_key="secret-key", models=["one", "two"])
+        with pytest.raises(GenerationError):
+            await client.start_topic("private prompt", "private topic")
+        logs = log_path.read_text()
+        assert "OpenRouter generation failed: operation=start_topic" in logs
+        if failure == "response":
+            assert "category=response" in logs
+        else:
+            assert f"status={error.status_code}" in logs
+        for private in ("private payload", "secret-key", "private prompt", "private topic"):
+            assert private not in logs
+    finally:
+        for handler in list(root.handlers):
+            if handler not in original_handlers:
+                root.removeHandler(handler)
+                handler.close()
+        root.setLevel(original_level)
 
 
 class FakeBackoff:
@@ -252,7 +288,8 @@ async def test_openrouter_logs_no_raw_error_or_credentials(monkeypatch, caplog):
 
 
 @pytest.mark.asyncio
-async def test_openrouter_logs_safe_error_body_details(monkeypatch, caplog):
+@pytest.mark.parametrize("sdk_error", [False, True])
+async def test_openrouter_logs_safe_error_body_details(monkeypatch, caplog, sdk_error):
     """Проверяет безопасные диагностические поля из OpenRouter error body."""
     request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
     response = httpx.Response(
@@ -270,6 +307,10 @@ async def test_openrouter_logs_safe_error_body_details(monkeypatch, caplog):
         request=request,
     )
     error = httpx.HTTPStatusError("raw provider payload", request=request, response=response)
+    if sdk_error:
+        from openrouter.errors import OpenRouterError
+
+        error = OpenRouterError("raw provider payload", response)
     install_fake_sdk(monkeypatch, chat=FakeChat(error=error))
     client = OpenRouterClient(
         api_key="sk-or-v1-secret1234567890abcd",

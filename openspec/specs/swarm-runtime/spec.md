@@ -11,9 +11,20 @@ The system SHALL initialize one shared SQLite connection and one shared provider
 - **WHEN** the application starts with valid settings
 - **THEN** SQLite stores, prompt loading, OpenRouter free-model diagnostics, topic selection, prompt composition, and one shared OpenRouter-backed `ai_client` are initialized before bot clients
 
-#### Scenario: OpenRouter free-model diagnostics are written
-- **WHEN** runtime context is built with a valid OpenRouter key
-- **THEN** the system queries OpenRouter's models catalog for free text-output models, checks configured `[openrouter].models` with short `1` probe requests, writes `logs/openrouter_free_models.json` with model connection slugs sorted best-first and per-configured-model availability, and does not replace the configured `[openrouter].models` list
+#### Scenario: Configured model succeeds
+- **WHEN** startup checks configured models
+- **THEN** it SHALL send sequential short generation requests in unique configuration order using the file-backed prompt «Ответь только словами: Да, доступен»
+- **AND** any nonempty text response after stripping surrounding whitespace SHALL count as success
+- **AND** at first success it SHALL stop checks, skip catalog fetching, update diagnostics with catalog_fetched=false, and continue startup without replacing configured models
+
+#### Scenario: All configured models fail
+- **WHEN** every configured model returns an HTTP error, timeout, malformed response, empty text, or the list is empty
+- **THEN** startup SHALL fetch the free text-output catalog and write sorted connection slugs plus attempted check results to logs/openrouter_free_models.json
+- **AND** diagnostic files SHALL omit raw generated text and secrets
+
+#### Scenario: Catalog fails after probes
+- **WHEN** the fallback catalog request fails
+- **THEN** the safe error report SHALL retain attempted model check results and runtime startup SHALL continue
 
 #### Scenario: Runtime dependencies close once
 - **WHEN** runtime shuts down
