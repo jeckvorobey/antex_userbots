@@ -104,3 +104,7 @@ A group's initial service scenario is randomly selected among the least used/res
 - Load bot persona strictly from configured `persona_file` under `bot_profiles_dir`.
 - Do not log or commit `SESSION_STRING_*`, API keys, private invite hashes, or runtime profile artifacts.
 - For new features, large changes, architecture changes, API changes, database changes, data-format changes, or public behavior changes, use the OpenSpec workflow described in `AGENTS.md`.
+
+## Область инструкций
+
+Актуальные рабочие границы и проверки: `../AGENTS.md` и `../docs/development.md`. Общий `openspec` Skill выбирает workflow текущего действия; не требуй локальные копии openspec-* и не повторяй согласование уже разрешённого scope. Runtime Telegram/OpenRouter не запускается автоматически ради документации.
