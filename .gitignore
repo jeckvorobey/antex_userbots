@@ -88,4 +88,5 @@ config/settings.prod.toml
 config/settings.test.toml
 
 data/*
+apps/
 # Prompt files are part of this single production instance.

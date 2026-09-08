@@ -131,7 +131,6 @@ class OpenRouterClient(TextGenerationClient):
             "models": models,
             "provider": {
                 "zdr": False,
-                "data_collection": "deny",
                 "allow_fallbacks": True,
             },
             "stream": False,
