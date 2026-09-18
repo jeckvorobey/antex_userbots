@@ -213,7 +213,7 @@ class AddressedReplyRouter:
             response_text = SAFE_REPLY_FALLBACK_TEXT
 
         await self.history.save_message(
-            user_id=sender_id,
+            user_id=sender_id or 0,
             role="user",
             text=user_text,
             chat_id=chat_id,
@@ -273,7 +273,7 @@ class AddressedReplyRouter:
                 raise quarantine_error
             raise
         await self.history.save_message(
-            user_id=sender_id,
+            user_id=sender_id or 0,
             role="assistant",
             text=response_text,
             chat_id=chat_id,

@@ -14,7 +14,9 @@ from ai.generation import GenerationError, TemporaryGenerationError, TextGenerat
 logger = logging.getLogger(__name__)
 RETRY_STATUS_CODES = ["408", "429", "5XX", "524", "529"]
 TEMPORARY_STATUS_CODES = {408, 429, 524, 529}
-MAX_COMPLETION_TOKENS = 256
+MAX_COMPLETION_TOKENS = 2048
+REASONING_EFFORT = "low"
+UNSAFE_FINISH_REASONS = frozenset({"error", "content_filter"})
 
 
 class OpenRouterClient(TextGenerationClient):
@@ -133,6 +135,7 @@ class OpenRouterClient(TextGenerationClient):
                 "zdr": False,
                 "allow_fallbacks": True,
             },
+            "reasoning": {"effort": REASONING_EFFORT},
             "stream": False,
             "max_completion_tokens": MAX_COMPLETION_TOKENS,
         }
@@ -140,9 +143,19 @@ class OpenRouterClient(TextGenerationClient):
             request["temperature"] = self.temperature
 
         response = await self._get_client().chat.send_async(**request)
-        content = response.choices[0].message.content
+        choice = response.choices[0]
+        content = choice.message.content
         if not isinstance(content, str) or not content.strip():
             raise GenerationError("OpenRouter вернул пустой текст")
+        finish_reason = getattr(choice, "finish_reason", None)
+        if finish_reason == "length":
+            logger.warning(
+                "OpenRouter generation truncated: finish_reason=length max_completion_tokens=%s chars=%s",
+                MAX_COMPLETION_TOKENS,
+                len(content.strip()),
+            )
+        elif finish_reason in UNSAFE_FINISH_REASONS:
+            raise GenerationError(f"OpenRouter вернул незавершённый ответ: finish_reason={finish_reason}")
         return content.strip()
 
     def _get_client(self) -> Any:

@@ -111,7 +111,7 @@ async def test_probes_stop_on_first_text_success(tmp_path, monkeypatch, caplog, 
     async def send_async(**body):
         calls.append(body["models"])
         assert body["messages"][-1]["content"] == "Ответь только словами: Да, работаю"
-        assert body["max_completion_tokens"] == 256
+        assert body["max_completion_tokens"] == 2048
         assert body["provider"] == {"zdr": False, "allow_fallbacks": True}
         if fail_first and body["models"] == ["first:free"]:
             error = RuntimeError("private failure secret-key")
@@ -238,7 +238,7 @@ async def test_shared_client_keeps_configuration_and_remains_open(tmp_path, monk
     assert chat.calls[1]["models"] == ["one", "two"]
     for call in chat.calls:
         assert call["temperature"] == 0.42
-        assert call["max_completion_tokens"] == 256
+        assert call["max_completion_tokens"] == 2048
     assert created[0].kwargs["timeout_ms"] == 12000
     assert created[0].kwargs["retry_config"].backoff.max_elapsed_time == 4321
     await client.close()
