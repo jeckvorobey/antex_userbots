@@ -125,7 +125,8 @@ async def test_openrouter_sends_ordered_models_without_zdr(monkeypatch):
         "allow_fallbacks": True,
     }
     assert request["stream"] is False
-    assert request["max_completion_tokens"] == 256
+    assert request["max_completion_tokens"] == 2048
+    assert request["reasoning"] == {"effort": "low"}
     assert "temperature" not in request
     assert created[0].kwargs["api_key"] == "secret-key"
     assert created[0].kwargs["timeout_ms"] == 45000
@@ -230,6 +231,38 @@ async def test_openrouter_closes_proxy_transport_when_sdk_exit_fails():
 async def test_openrouter_rejects_empty_or_non_text_response(monkeypatch, content):
     """Проверяет fail-closed response parsing."""
     response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+    install_fake_sdk(monkeypatch, chat=FakeChat(response=response))
+    client = OpenRouterClient(api_key="key", models=["one", "two"])
+
+    with pytest.raises(GenerationError):
+        await client.start_topic("Роль", "Тема")
+
+
+@pytest.mark.asyncio
+async def test_openrouter_logs_warning_when_response_truncated(monkeypatch, caplog):
+    """finish_reason=length логируется warning, текст возвращается: длину отсекает downstream-гейт."""
+    response = SimpleNamespace(choices=[SimpleNamespace(
+        finish_reason="length",
+        message=SimpleNamespace(content="Оборванный ответ на полуслове"),
+    )])
+    install_fake_sdk(monkeypatch, chat=FakeChat(response=response))
+    client = OpenRouterClient(api_key="key", models=["one", "two"])
+
+    with caplog.at_level(logging.WARNING):
+        result = await client.start_topic("Роль", "Тема")
+
+    assert result == "Оборванный ответ на полуслове"
+    assert "finish_reason=length" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish_reason", ["error", "content_filter"])
+async def test_openrouter_rejects_unsafe_finish_reason(monkeypatch, finish_reason):
+    """Незавершённые ответы SDK не отправляются в чат как готовые сообщения."""
+    response = SimpleNamespace(choices=[SimpleNamespace(
+        finish_reason=finish_reason,
+        message=SimpleNamespace(content="Частичный обрывок"),
+    )])
     install_fake_sdk(monkeypatch, chat=FakeChat(response=response))
     client = OpenRouterClient(api_key="key", models=["one", "two"])
 
@@ -367,6 +400,8 @@ async def test_openrouter_adapter_is_compatible_with_installed_sdk(monkeypatch):
 
     assert result == "SDK ok"
     assert captured["body"]["models"] == ["vendor/primary", "vendor/fallback"]
+    assert captured["body"]["reasoning"] == {"effort": "low"}
+    assert captured["body"]["max_completion_tokens"] == 2048
     assert captured["body"]["provider"] == {
         "zdr": False,
         "allow_fallbacks": True,

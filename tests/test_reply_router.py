@@ -20,7 +20,7 @@ def _replace_addressed_reply_delay(monkeypatch):
 
 def _build_event(
     *,
-    sender_id: int,
+    sender_id: int | None,
     raw_text: str = "Привет",
     is_reply: bool = True,
     reply_sender_id: int | None = 101,
@@ -186,6 +186,33 @@ async def test_router_answers_only_to_addressed_bot_and_saves_history():
     assert history.save_message.await_count == 2
     assert history.save_message.await_args_list[0].kwargs["message_origin"] == "human_reply"
     assert history.save_message.await_args_list[1].kwargs["bot_id"] == "anna"
+
+
+@pytest.mark.asyncio
+async def test_router_saves_history_for_anonymous_sender_without_user_id():
+    """Отправитель без sender_id (анонимный админ) не ломает NOT NULL user_id в истории."""
+    history = SimpleNamespace(
+        get_session_history=AsyncMock(return_value=[]),
+        save_message=AsyncMock(),
+    )
+    router = AddressedReplyRouter(
+        bot_profile=SwarmBotProfile(id="anna", session_string="anna", persona_file="anna.md", telegram_user_id=101),
+        history=history,
+        prompt_composer=SimpleNamespace(compose=AsyncMock(return_value="system")),
+        ai_client=SimpleNamespace(generate_reply=AsyncMock(return_value="Ответ")),
+        swarm_user_ids=set(),
+        enabled_group_chat_ids={-100555},
+        manager=SimpleNamespace(human_slot=lambda _bot_id: _AsyncNullContext()),
+    )
+    event = _build_event(sender_id=None)
+
+    handled = await router.handle_event(event)
+
+    assert handled is True
+    event.reply.assert_awaited_once_with("Ответ")
+    assert history.save_message.await_count == 2
+    for call in history.save_message.await_args_list:
+        assert call.kwargs["user_id"] == 0
 
 
 @pytest.mark.asyncio
